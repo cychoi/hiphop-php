@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,8 @@
 #ifndef incl_HPHP_EVAL_DEBUGGER_COMMAND_H_
 #define incl_HPHP_EVAL_DEBUGGER_COMMAND_H_
 
-#include "hphp/util/base.h"
+#include <memory>
+
 #include "hphp/runtime/debugger/debugger_thrift_buffer.h"
 #include "hphp/runtime/debugger/debugger_client.h"
 
@@ -32,7 +33,8 @@ namespace HPHP { namespace Eval {
 // is in the onServer* methods.
 //
 
-DECLARE_BOOST_TYPES(DebuggerCommand);
+struct DebuggerCommand;
+using DebuggerCommandPtr = std::shared_ptr<DebuggerCommand>;
 class DebuggerCommand {
 public:
   /**
@@ -52,7 +54,6 @@ public:
     KindOfGlobal              = 7,
     KindOfHelp                = 8,
     KindOfInfo                = 9,
-    KindOfJump_UNUSED         = 10,
     KindOfConstant            = 11,
     KindOfList                = 12,
     KindOfMachine             = 13,
@@ -65,9 +66,10 @@ public:
     KindOfThread              = 20,
     KindOfUp                  = 21,
     KindOfVariable            = 22,
+    KindOfVariableAsync       = 222,
     KindOfWhere               = 23,
+    KindOfWhereAsync          = 223,
     KindOfExtended            = 24,
-    KindOfUser                = 25,
     KindOfZend                = 26,
     KindOfComplete            = 27,
 
@@ -93,6 +95,7 @@ public:
   explicit DebuggerCommand(Type type)
     : m_type(type), m_version(0), m_exitInterrupt(false),
       m_incomplete(false) {}
+  virtual ~DebuggerCommand() {}
 
   bool is(Type type) const { return m_type == type;}
   Type getType() const { return m_type;}
@@ -100,8 +103,7 @@ public:
   bool recv(DebuggerThriftBuffer &thrift);
   virtual void list(DebuggerClient &client);
   virtual void help(DebuggerClient &client);
-  void onClient(DebuggerClient &client);
-  virtual void setClientOutput(DebuggerClient &client);
+  virtual void onClient(DebuggerClient &client) = 0;
   virtual bool onServer(DebuggerProxy &proxy);
 
   // This seems to be confined to eval and print commands.
@@ -118,9 +120,6 @@ public:
   String getWireError() const { return m_wireError; }
 
 protected:
-  // Carries out the command, possibly by sending it to the server.
-  virtual void onClientImpl(DebuggerClient &client) = 0;
-
   bool displayedHelp(DebuggerClient &client);
   virtual void sendImpl(DebuggerThriftBuffer &thrift);
   virtual void recvImpl(DebuggerThriftBuffer &thrift);

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,10 +16,11 @@
 */
 
 #include "hphp/runtime/ext/ext_iconv.h"
-#include "hphp/runtime/base/util/string_buffer.h"
-#include "hphp/runtime/base/util/request_local.h"
-#include "hphp/runtime/base/zend/zend_functions.h"
-#include "hphp/runtime/base/zend/zend_string.h"
+#include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/request-local.h"
+#include "hphp/runtime/base/zend-functions.h"
+#include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/base/request-event-handler.h"
 
 #define ICONV_SUPPORTS_ERRNO 1
 #include <iconv.h>
@@ -36,11 +37,10 @@
 #endif
 
 namespace HPHP {
-IMPLEMENT_DEFAULT_EXTENSION(iconv);
-///////////////////////////////////////////////////////////////////////////////
 
-#define _php_iconv_memequal(a, b, c) \
-  ((c) == sizeof(unsigned long) ? *((unsigned long *)(a)) == *((unsigned long *)(b)) : ((c) == sizeof(unsigned int) ? *((unsigned int *)(a)) == *((unsigned int *)(b)) : memcmp(a, b, c) == 0))
+IMPLEMENT_DEFAULT_EXTENSION_VERSION(iconv, NO_EXTENSION_VERSION_YET);
+
+///////////////////////////////////////////////////////////////////////////////
 
 static char _generic_superset_name[] = "UCS-4LE";
 #define GENERIC_SUPERSET_NAME _generic_superset_name
@@ -100,21 +100,20 @@ static void _php_iconv_show_error(php_iconv_err_t err, const char *out_charset,
   }
 }
 
-class ICONVGlobals : public RequestEventHandler {
-public:
+struct ICONVGlobals final : RequestEventHandler {
   String input_encoding;
   String output_encoding;
   String internal_encoding;
 
   ICONVGlobals() {}
 
-  virtual void requestInit() {
+  void requestInit() override {
     input_encoding = "ISO-8859-1";
     output_encoding = "ISO-8859-1";
     internal_encoding = "ISO-8859-1";
   }
 
-  virtual void requestShutdown() {
+  void requestShutdown() override {
     input_encoding.reset();
     output_encoding.reset();
     internal_encoding.reset();
@@ -129,7 +128,7 @@ IMPLEMENT_STATIC_REQUEST_LOCAL(ICONVGlobals, s_iconv_globals);
 #ifndef ICONV_CSNMAXLEN
 #define ICONV_CSNMAXLEN 64
 #endif
-static bool validate_charset(CStrRef charset) {
+static bool validate_charset(const String& charset) {
   if (charset.size() >= ICONV_CSNMAXLEN) {
     throw_invalid_argument
       ("Charset parameter exceeds the maximum allowed "
@@ -139,7 +138,7 @@ static bool validate_charset(CStrRef charset) {
   return true;
 }
 
-static Variant check_charset(CStrRef charset) {
+static Variant check_charset(const String& charset) {
   if (!validate_charset(charset)) return false;
   if (charset.empty()) {
     return ICONVG(internal_encoding);
@@ -161,7 +160,7 @@ static php_iconv_err_t _php_iconv_appendl(StringBuffer &d, const char *s,
   if (in_p != NULL) {
     while (in_left > 0) {
       out_left = buf_growth - out_left;
-      out_p = d.reserve(out_left);
+      out_p = d.appendCursor(out_left);
 
       if (iconv(cd, (ICONV_CONST char **)&in_p, &in_left, (char **)&out_p, &out_left) ==
           (size_t)-1) {
@@ -188,7 +187,7 @@ static php_iconv_err_t _php_iconv_appendl(StringBuffer &d, const char *s,
   } else {
     for (;;) {
       out_left = buf_growth - out_left;
-      out_p = d.reserve(out_left);
+      out_p = d.appendCursor(out_left);
 
       if (iconv(cd, NULL, NULL, (char **)&out_p, &out_left) == (size_t)0) {
         d.resize(d.size() + buf_growth - out_left);
@@ -438,7 +437,7 @@ static php_iconv_err_t _php_iconv_strlen(unsigned int *pretval,
 
 static php_iconv_err_t _php_iconv_substr(StringBuffer &pretval,
                                          const char *str, size_t nbytes,
-                                         int offset, int len, const char *enc){
+                                         int offset, int len, const char *enc) {
   char buf[GENERIC_SUPERSET_NBYTES];
   php_iconv_err_t err = PHP_ICONV_ERR_SUCCESS;
   iconv_t cd1, cd2;
@@ -577,7 +576,19 @@ static php_iconv_err_t _php_iconv_strpos(unsigned int *pretval,
                                          size_t haystk_nbytes,
                                          const char *ndl, size_t ndl_nbytes,
                                          int offset, const char *enc) {
-  char buf[GENERIC_SUPERSET_NBYTES];
+
+#define _php_iconv_memequal(a, b, c)            \
+  ((c) == sizeof(uint64_t)                      \
+   ? (x).buf_64 == *((uint64_t *)(b))           \
+   : ((c) == sizeof(uint32_t)                   \
+      ? (x).buf_32 == *((uint32_t *)(b))        \
+      : memcmp((a).buf, b, c) == 0))
+
+  union gsnb_t {
+    char buf[GENERIC_SUPERSET_NBYTES];
+    uint32_t buf_32;
+    uint64_t buf_64;
+  } x;
   php_iconv_err_t err = PHP_ICONV_ERR_SUCCESS;
   iconv_t cd;
   const char *in_p;
@@ -625,8 +636,8 @@ static php_iconv_err_t _php_iconv_strpos(unsigned int *pretval,
 
   for (in_p = haystk, in_left = haystk_nbytes, cnt = 0; in_left > 0; ++cnt) {
     size_t prev_in_left;
-    out_p = buf;
-    out_left = sizeof(buf);
+    out_p = x.buf;
+    out_left = sizeof(x.buf);
 
     prev_in_left = in_left;
 
@@ -649,7 +660,7 @@ static php_iconv_err_t _php_iconv_strpos(unsigned int *pretval,
     }
     if (offset >= 0) {
       if (cnt >= (unsigned int)offset) {
-        if (_php_iconv_memequal(buf, ndl_buf_p, sizeof(buf))) {
+        if (_php_iconv_memequal(x, ndl_buf_p, sizeof(x.buf))) {
           if (match_ofs == (unsigned int)-1) {
             match_ofs = cnt;
           }
@@ -667,7 +678,7 @@ static php_iconv_err_t _php_iconv_strpos(unsigned int *pretval,
           lim = (unsigned int)(ndl_buf_p - ndl_buf);
 
           while (j < lim) {
-            if (_php_iconv_memequal(&ndl_buf[j], &ndl_buf[i],
+            if (_php_iconv_memequal(*(gsnb_t*)&ndl_buf[j], &ndl_buf[i],
                                     GENERIC_SUPERSET_NBYTES)) {
               i += GENERIC_SUPERSET_NBYTES;
             } else {
@@ -677,7 +688,7 @@ static php_iconv_err_t _php_iconv_strpos(unsigned int *pretval,
             j += GENERIC_SUPERSET_NBYTES;
           }
 
-          if (_php_iconv_memequal(buf, &ndl_buf[i], sizeof(buf))) {
+          if (_php_iconv_memequal(x, &ndl_buf[i], sizeof(x.buf))) {
             match_ofs += (lim - i) / GENERIC_SUPERSET_NBYTES;
             i += GENERIC_SUPERSET_NBYTES;
             ndl_buf_p = &ndl_buf[i];
@@ -690,7 +701,7 @@ static php_iconv_err_t _php_iconv_strpos(unsigned int *pretval,
         }
       }
     } else {
-      if (_php_iconv_memequal(buf, ndl_buf_p, sizeof(buf))) {
+      if (_php_iconv_memequal(x, ndl_buf_p, sizeof(x.buf))) {
         if (match_ofs == (unsigned int)-1) {
           match_ofs = cnt;
         }
@@ -710,7 +721,7 @@ static php_iconv_err_t _php_iconv_strpos(unsigned int *pretval,
         lim = (unsigned int)(ndl_buf_p - ndl_buf);
 
         while (j < lim) {
-          if (_php_iconv_memequal(&ndl_buf[j], &ndl_buf[i],
+          if (_php_iconv_memequal(*(gsnb_t*)&ndl_buf[j], &ndl_buf[i],
                                   GENERIC_SUPERSET_NBYTES)) {
             i += GENERIC_SUPERSET_NBYTES;
           } else {
@@ -720,7 +731,7 @@ static php_iconv_err_t _php_iconv_strpos(unsigned int *pretval,
           j += GENERIC_SUPERSET_NBYTES;
         }
 
-        if (_php_iconv_memequal(buf, &ndl_buf[i], sizeof(buf))) {
+        if (_php_iconv_memequal(x, &ndl_buf[i], sizeof(x.buf))) {
           match_ofs += (lim - i) / GENERIC_SUPERSET_NBYTES;
           i += GENERIC_SUPERSET_NBYTES;
           ndl_buf_p = &ndl_buf[i];
@@ -1254,15 +1265,15 @@ static php_iconv_err_t _php_iconv_mime_decode(StringBuffer &retval,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static const StaticString
+const StaticString
   s_scheme("scheme"),
   s_input_charset("input-charset"),
   s_output_charset("output-charset"),
   s_line_length("line-length"),
   s_line_break_chars("line-break-chars");
 
-Variant f_iconv_mime_encode(CStrRef field_name, CStrRef field_value,
-                            CVarRef preferences /* = null_variant */) {
+Variant f_iconv_mime_encode(const String& field_name, const String& field_value,
+                            const Variant& preferences /* = null_variant */) {
   php_iconv_enc_scheme_t scheme_id = PHP_ICONV_ENC_SCHEME_BASE64;
   String in_charset;
   String out_charset;
@@ -1272,7 +1283,7 @@ Variant f_iconv_mime_encode(CStrRef field_name, CStrRef field_value,
   char *buf = NULL;
 
   if (!preferences.isNull()) {
-    Variant scheme = preferences[s_scheme];
+    Variant scheme = preferences.toArray()[s_scheme];
     if (scheme.isString()) {
       String s = scheme.toString();
       switch (*s.data()) {
@@ -1285,24 +1296,24 @@ Variant f_iconv_mime_encode(CStrRef field_name, CStrRef field_value,
       }
     }
 
-    Variant input_charset = preferences[s_input_charset];
+    Variant input_charset = preferences.toArray()[s_input_charset];
     if (input_charset.isString()) {
       in_charset = input_charset.toString();
       if (!validate_charset(in_charset)) return false;
     }
 
-    Variant output_charset = preferences[s_output_charset];
+    Variant output_charset = preferences.toArray()[s_output_charset];
     if (output_charset.isString()) {
       out_charset = output_charset.toString();
       if (!validate_charset(out_charset)) return false;
     }
 
-    Variant line_length = preferences[s_line_length];
+    Variant line_length = preferences.toArray()[s_line_length];
     if (!line_length.isNull()) {
       line_len = line_length.toInt64();
     }
 
-    Variant line_break_chars = preferences[s_line_break_chars];
+    Variant line_break_chars = preferences.toArray()[s_line_break_chars];
     if (!line_break_chars.isNull()) {
       lfchars = line_break_chars.toString();
     }
@@ -1617,8 +1628,8 @@ Variant f_iconv_mime_encode(CStrRef field_name, CStrRef field_value,
   return ret.detach();
 }
 
-Variant f_iconv_mime_decode(CStrRef encoded_string, int mode /* = 0 */,
-                            CStrRef charset /* = null_string */) {
+Variant f_iconv_mime_decode(const String& encoded_string, int mode /* = 0 */,
+                            const String& charset /* = null_string */) {
   Variant encoded = check_charset(charset);
   if (same(encoded, false)) return false;
   String enc = encoded.toString();
@@ -1634,9 +1645,9 @@ Variant f_iconv_mime_decode(CStrRef encoded_string, int mode /* = 0 */,
   return false;
 }
 
-Variant f_iconv_mime_decode_headers(CStrRef encoded_headers,
+Variant f_iconv_mime_decode_headers(const String& encoded_headers,
                                     int mode /* = 0 */,
-                                    CStrRef charset /* = null_string */) {
+                                    const String& charset /* = null_string */) {
   Variant encoded = check_charset(charset);
   if (same(encoded, false)) return false;
   String enc = encoded.toString();
@@ -1685,9 +1696,9 @@ Variant f_iconv_mime_decode_headers(CStrRef encoded_headers,
       if (ret.exists(header)) {
         Variant elem = ret[header];
         if (!elem.is(KindOfArray)) {
-          ret.set(header, CREATE_VECTOR2(elem, value));
+          ret.set(header, make_packed_array(elem, value));
         } else {
-          elem.append(value);
+          elem.toArrRef().append(value);
           ret.set(header, elem);
         }
       } else {
@@ -1705,13 +1716,14 @@ Variant f_iconv_mime_decode_headers(CStrRef encoded_headers,
   return ret;
 }
 
-static const StaticString s_input_encoding("input_encoding");
-static const StaticString s_output_encoding("output_encoding");
-static const StaticString s_internal_encoding("internal_encoding");
-static const StaticString s_all("all");
+const StaticString
+  s_input_encoding("input_encoding"),
+  s_output_encoding("output_encoding"),
+  s_internal_encoding("internal_encoding"),
+  s_all("all");
 
 
-Variant f_iconv_get_encoding(CStrRef type /* = "all" */) {
+Variant f_iconv_get_encoding(const String& type /* = "all" */) {
   if (type == s_all) {
     Array ret;
     ret.set(s_input_encoding,    ICONVG(input_encoding));
@@ -1725,7 +1737,7 @@ Variant f_iconv_get_encoding(CStrRef type /* = "all" */) {
   return false;
 }
 
-bool f_iconv_set_encoding(CStrRef type, CStrRef charset) {
+bool f_iconv_set_encoding(const String& type, const String& charset) {
   if (!validate_charset(charset)) return false;
   if (type == s_input_encoding) {
     ICONVG(input_encoding) = charset;
@@ -1739,7 +1751,8 @@ bool f_iconv_set_encoding(CStrRef type, CStrRef charset) {
   return true;
 }
 
-Variant f_iconv(CStrRef in_charset, CStrRef out_charset, CStrRef str) {
+Variant f_iconv(const String& in_charset, const String& out_charset,
+                const String& str) {
   if (!validate_charset(in_charset)) return false;
   if (!validate_charset(out_charset)) return false;
 
@@ -1755,7 +1768,8 @@ Variant f_iconv(CStrRef in_charset, CStrRef out_charset, CStrRef str) {
   return false;
 }
 
-Variant f_iconv_strlen(CStrRef str, CStrRef charset /* = null_string */) {
+Variant f_iconv_strlen(const String& str,
+                       const String& charset /* = null_string */) {
   Variant encoded = check_charset(charset);
   if (same(encoded, false)) return false;
   String enc = encoded.toString();
@@ -1769,8 +1783,9 @@ Variant f_iconv_strlen(CStrRef str, CStrRef charset /* = null_string */) {
   return false;
 }
 
-Variant f_iconv_strpos(CStrRef haystack, CStrRef needle, int offset /* = 0 */,
-                       CStrRef charset /* = null_string */) {
+Variant f_iconv_strpos(const String& haystack, const String& needle,
+                       int offset /* = 0 */,
+                       const String& charset /* = null_string */) {
   if (offset < 0) {
     raise_warning("Offset not contained in string.");
     return false;
@@ -1793,8 +1808,8 @@ Variant f_iconv_strpos(CStrRef haystack, CStrRef needle, int offset /* = 0 */,
   return false;
 }
 
-Variant f_iconv_strrpos(CStrRef haystack, CStrRef needle,
-                        CStrRef charset /* = null_string */) {
+Variant f_iconv_strrpos(const String& haystack, const String& needle,
+                        const String& charset /* = null_string */) {
   if (needle.size() < 1) {
     return false;
   }
@@ -1813,8 +1828,9 @@ Variant f_iconv_strrpos(CStrRef haystack, CStrRef needle,
   return false;
 }
 
-Variant f_iconv_substr(CStrRef str, int offset, int length /* = INT_MAX */,
-                       CStrRef charset /* = null_string */) {
+Variant f_iconv_substr(const String& str, int offset,
+                       int length /* = INT_MAX */,
+                       const String& charset /* = null_string */) {
   Variant encoded = check_charset(charset);
   if (same(encoded, false)) return false;
   String enc = encoded.toString();
@@ -1828,7 +1844,7 @@ Variant f_iconv_substr(CStrRef str, int offset, int length /* = INT_MAX */,
   return false;
 }
 
-String f_ob_iconv_handler(CStrRef contents, int status) {
+String f_ob_iconv_handler(const String& contents, int status) {
   String mimetype = g_context->getMimeType();
   if (!mimetype.empty()) {
     char *out_buffer;

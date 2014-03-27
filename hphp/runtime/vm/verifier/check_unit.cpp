@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -42,7 +42,7 @@ class UnitChecker {
 
  private:
   template<class... Args>
-  void error(const char* fmt, Args&&... args) {
+  void error(const char* const fmt, Args&&... args) {
     verify_error(m_unit, nullptr, fmt, std::forward<Args>(args)...);
   }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,11 +18,11 @@
 #ifndef incl_HPHP_THRIFT_TRANSPORT_H_
 #define incl_HPHP_THRIFT_TRANSPORT_H_
 
-#include "hphp/runtime/base/base_includes.h"
+#include "hphp/runtime/base/base-includes.h"
 #include "hphp/util/logger.h"
 
 #include <sys/types.h>
-#include "netinet/in.h"
+#include <netinet/in.h>
 #include <unistd.h>
 #if defined(__FreeBSD__)
 # include <sys/endian.h>
@@ -84,7 +84,8 @@ enum TType {
   T_SET        = 14,
   T_LIST       = 15,
   T_UTF8       = 16,
-  T_UTF16      = 17
+  T_UTF16      = 17,
+  T_FLOAT      = 19,
 };
 
 
@@ -104,6 +105,8 @@ public:
   static StaticString s_ktype;
   static StaticString s_vtype;
   static StaticString s_etype;
+  static StaticString s_format;
+  static StaticString s_collection;
 
 public:
   Object protocol() { return p; }
@@ -111,13 +114,13 @@ public:
 protected:
   PHPTransport() {}
 
-  void construct_with_zval(CObjRef _p, size_t _buffer_size) {
+  void construct_with_zval(const Object& _p, size_t _buffer_size) {
     buffer = reinterpret_cast<char*>(malloc(_buffer_size));
     buffer_ptr = buffer;
     buffer_used = 0;
     buffer_size = _buffer_size;
     p = _p;
-    t = p->o_invoke_few_args(s_getTransport, 0);
+    t = p->o_invoke_few_args(s_getTransport, 0).toObject();
   }
   ~PHPTransport() {
     free(buffer);
@@ -135,7 +138,7 @@ protected:
 
 class PHPOutputTransport : public PHPTransport {
 public:
-  explicit PHPOutputTransport(CObjRef _p, size_t _buffer_size = 8192) {
+  explicit PHPOutputTransport(const Object& _p, size_t _buffer_size = 8192) {
     construct_with_zval(_p, _buffer_size);
   }
 

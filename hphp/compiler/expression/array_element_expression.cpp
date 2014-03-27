@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,12 +19,13 @@
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/analysis/code_error.h"
+#include "hphp/compiler/code_model_enums.h"
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/expression/static_member_expression.h"
 #include "hphp/compiler/analysis/function_scope.h"
-#include "hphp/util/parser/hphp.tab.hpp"
-#include "hphp/runtime/base/complex_types.h"
-#include "hphp/runtime/base/builtin_functions.h"
+#include "hphp/parser/hphp.tab.hpp"
+#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/builtin-functions.h"
 
 using namespace HPHP;
 
@@ -217,10 +218,10 @@ int ArrayElementExpression::getKidCount() const {
 void ArrayElementExpression::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_variable = boost::dynamic_pointer_cast<Expression>(cp);
+      m_variable = dynamic_pointer_cast<Expression>(cp);
       break;
     case 1:
-      m_offset = boost::dynamic_pointer_cast<Expression>(cp);
+      m_offset = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       assert(false);
@@ -245,23 +246,17 @@ ExpressionPtr ArrayElementExpression::preOptimize(AnalysisResultConstPtr ar) {
           return replaceValue(makeConstant(ar, "null"));
         }
         if (m_offset->isScalar() && m_offset->getScalarValue(o)) {
-          if (v.isString()) {
-            if (!o.isInteger() ||
-                o.toInt64Val() < 0 ||
-                o.toInt64Val() >= v.toCStrRef().size()) {
-              // warnings should be raised...
-              return ExpressionPtr();
+          if (v.isArray()) {
+            try {
+              g_context->setThrowAllErrors(true);
+              Variant res = v.toArrRef().rvalAt(
+                o, hasContext(ExistContext) ?
+                AccessFlags::None : AccessFlags::Error);
+              g_context->setThrowAllErrors(false);
+              return replaceValue(makeScalarExpression(ar, res));
+            } catch (...) {
+              g_context->setThrowAllErrors(false);
             }
-          }
-          try {
-            g_context->setThrowAllErrors(true);
-            Variant res = v.rvalAt(
-              o, hasContext(ExistContext) ?
-              AccessFlags::None : AccessFlags::Error);
-            g_context->setThrowAllErrors(false);
-            return replaceValue(makeScalarExpression(ar, res));
-          } catch (...) {
-            g_context->setThrowAllErrors(false);
           }
         }
       }
@@ -386,6 +381,32 @@ ExpressionPtr ArrayElementExpression::unneeded() {
     if (m_offset) return m_offset->unneeded();
   }
   return Expression::unneeded();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void ArrayElementExpression::outputCodeModel(CodeGenerator &cg) {
+  if (m_offset) {
+    cg.printObjectHeader("BinaryOpExpression", 4);
+    cg.printPropertyHeader("expression1");
+    m_variable->outputCodeModel(cg);
+    cg.printPropertyHeader("expression2");
+    cg.printExpression(m_offset, false);
+    cg.printPropertyHeader("operation");
+    cg.printValue(PHP_ARRAY_ELEMENT);
+    cg.printPropertyHeader("sourceLocation");
+    cg.printLocation(this->getLocation());
+    cg.printObjectFooter();
+  } else {
+    cg.printObjectHeader("UnaryOpExpression", 3);
+    cg.printPropertyHeader("expression");
+    m_variable->outputCodeModel(cg);
+    cg.printPropertyHeader("operation");
+    cg.printValue(PHP_ARRAY_APPEND_POINT_OP);
+    cg.printPropertyHeader("sourceLocation");
+    cg.printLocation(this->getLocation());
+    cg.printObjectFooter();
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

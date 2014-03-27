@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,15 +17,19 @@
 #ifndef incl_HPHP_FILE_SCOPE_H_
 #define incl_HPHP_FILE_SCOPE_H_
 
+#include <string>
 #include <map>
+#include <boost/algorithm/string.hpp>
 
 #include "hphp/compiler/analysis/block_scope.h"
 #include "hphp/compiler/analysis/function_container.h"
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/code_generator.h"
 #include <boost/graph/adjacency_list.hpp>
-#include "hphp/util/json.h"
-#include "hphp/runtime/base/md5.h"
+#include <set>
+#include <vector>
+#include "hphp/compiler/json.h"
+#include "hphp/util/md5.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -60,8 +64,9 @@ public:
     ContainsGetDefinedVars    = 0x400, // need VariableTable with getDefinedVars
     MixedVariableArgument     = 0x800, // variable args, may or may not be ref'd
     IsFoldable                = 0x1000,// function can be constant folded
-    NeedsActRec               = 0x2000,// builtin function needs ActRec
+    NoFCallBuiltin            = 0x2000,// function should not use FCallBuiltin
     AllowOverride             = 0x4000,// allow override of systemlib or builtin
+    NeedsFinallyLocals        = 0x8000,
   };
 
   typedef boost::adjacency_list<boost::setS, boost::vecS> Graph;
@@ -77,6 +82,7 @@ public:
 
   const std::string &getName() const { return m_fileName;}
   const MD5& getMd5() const { return m_md5; }
+  void setMd5(const MD5& md5) { m_md5 = md5; }
   StatementListPtr getStmt() const { return m_tree;}
   const StringToClassScopePtrVecMap &getClasses() const {
     return m_classes;
@@ -107,8 +113,11 @@ public:
    * are the only functions a parser calls upon analysis results.
    */
   FunctionScopePtr setTree(AnalysisResultConstPtr ar, StatementListPtr tree);
-  void cleanupForError(AnalysisResultConstPtr ar,
-                       int line, const std::string &msg);
+  void cleanupForError(AnalysisResultConstPtr ar);
+  void makeFatal(AnalysisResultConstPtr ar,
+                 const std::string& msg, int line);
+  void makeParseFatal(AnalysisResultConstPtr ar,
+                      const std::string& msg, int line);
 
   bool addFunction(AnalysisResultConstPtr ar, FunctionScopePtr funcScope);
   bool addClass(AnalysisResultConstPtr ar, ClassScopePtr classScope);
@@ -138,11 +147,24 @@ public:
                              const std::string &decname);
 
   void addClassAlias(const std::string& target, const std::string& alias) {
-    m_classAliasMap.insert(std::make_pair(target, alias));
+    m_classAliasMap.insert(
+      std::make_pair(
+        boost::to_lower_copy(target),
+        boost::to_lower_copy(alias)
+      )
+    );
   }
 
   std::multimap<std::string,std::string> const& getClassAliases() const {
     return m_classAliasMap;
+  }
+
+  void addTypeAliasName(const std::string& name) {
+    m_typeAliasNames.insert(boost::to_lower_copy(name));
+  }
+
+  std::set<std::string> const& getTypeAliasNames() const {
+    return m_typeAliasNames;
   }
 
   /**
@@ -153,10 +175,8 @@ public:
     m_vertex = vertex;
   }
 
-  void setModule() { m_module = true; }
-  void setPrivateInclude() { m_privateInclude = true; }
-  bool isPrivateInclude() const { return m_privateInclude && !m_externInclude; }
-  void setExternInclude() { m_externInclude = true; }
+  void setSystem();
+  bool isSystem() const { return m_system; }
 
   void analyzeProgram(AnalysisResultPtr ar);
   void analyzeIncludes(AnalysisResultPtr ar);
@@ -172,32 +192,22 @@ public:
   const std::string &pseudoMainName();
   void outputFileCPP(AnalysisResultPtr ar, CodeGenerator &cg);
   bool load();
-  bool needPseudoMainVariables() const;
   std::string outputFilebase() const;
-
-  void addPseudoMainVariable(const std::string &name) {
-    m_pseudoMainVariables.insert(name);
-  }
-  std::set<std::string> &getPseudoMainVariables() {
-    return m_pseudoMainVariables;
-  }
 
   FunctionScopeRawPtr getPseudoMain() const {
     return m_pseudoMain;
   }
 
   FileScopePtr shared_from_this() {
-    return boost::static_pointer_cast<FileScope>
+    return static_pointer_cast<FileScope>
       (BlockScope::shared_from_this());
   }
 
 private:
   int m_size;
   MD5 m_md5;
-  unsigned m_module : 1;
-  unsigned m_privateInclude : 1;
-  unsigned m_externInclude : 1;
   unsigned m_includeState : 2;
+  unsigned m_system : 1;
 
   std::vector<int> m_attributes;
   std::string m_fileName;
@@ -209,13 +219,17 @@ private:
   vertex_descriptor m_vertex;
 
   std::string m_pseudoMainName;
-  std::set<std::string> m_pseudoMainVariables;
   BlockScopeSet m_providedDefs;
   std::set<std::string> m_redecBases;
 
   // Map from class alias names to the class they are aliased to.
   // This is only needed in WholeProgram mode.
   std::multimap<std::string,std::string> m_classAliasMap;
+
+  // Set of names that are on the left hand side of type alias
+  // declarations.  We need this to make sure we don't mark classes
+  // with the same name Unique.
+  std::set<std::string> m_typeAliasNames;
 
   FunctionScopePtr createPseudoMain(AnalysisResultConstPtr ar);
   void setFileLevel(StatementListPtr stmt);

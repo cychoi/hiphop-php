@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,13 +14,22 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/debugger/debugger_proxy.h"
+
+#include <boost/lexical_cast.hpp>
+#include <exception>
+#include <map>
+#include <stack>
+#include <vector>
+
 #include "hphp/runtime/debugger/cmd/cmd_interrupt.h"
 #include "hphp/runtime/debugger/cmd/cmd_flow_control.h"
 #include "hphp/runtime/debugger/cmd/cmd_signal.h"
 #include "hphp/runtime/debugger/cmd/cmd_machine.h"
 #include "hphp/runtime/debugger/debugger.h"
-#include "hphp/runtime/base/runtime_option.h"
-#include "hphp/runtime/vm/debugger_hook.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/ext/ext_socket.h"
+#include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/util/process.h"
 #include "hphp/util/logger.h"
 
@@ -33,24 +42,85 @@ DebuggerProxy::DebuggerProxy(SmartPtr<Socket> socket, bool local)
     : m_stopped(false), m_local(local), m_dummySandbox(nullptr),
       m_hasBreakPoints(false), m_threadMode(Normal), m_thread(0),
       m_signalThread(this, &DebuggerProxy::pollSignal),
-      m_signum(CmdSignal::SignalNone) {
+      m_okayToPoll(true), m_signum(CmdSignal::SignalNone) {
   TRACE(2, "DebuggerProxy::DebuggerProxy\n");
   m_thrift.create(socket);
   m_dummyInfo = DSandboxInfo::CreateDummyInfo((int64_t)this);
-  Debugger::UsageLog("server", "connnect", socket->getAddress());
+  Variant address;
+  Variant port;
+  std::string clientDetails;
+  if (!local) {
+    if (getClientConnectionInfo(ref(address), ref(port))) {
+      clientDetails = folly::stringPrintf("From %s:%d",
+                                          address.toString().data(),
+                                          port.toInt32());
+    } else {
+      clientDetails = "Failed to get client connection details";
+    }
+  } else {
+    clientDetails = "Local script connection";
+  }
+  Debugger::UsageLog("server", m_dummyInfo.id(), "connect", clientDetails);
 }
 
-DebuggerProxy::~DebuggerProxy() {
-  TRACE_RB(2, "DebuggerProxy::~DebuggerProxy starting\n");
-  stop();
-  m_signalThread.waitForEnd();
-
+// Cleanup all resources owned by this proxy, including any threads it
+// owns. If a thread doesn't stop, return false so we can try again
+// later. This can be called multiple times, and this function leaves
+// the proxy usable by request threads which may still be handling an
+// interrupt.
+bool DebuggerProxy::cleanup(int timeout) {
+  TRACE_RB(2, "DebuggerProxy::cleanup starting\n");
+  // If we're not already marked as stopping then there may be other
+  // threads still attempting to use this object!
+  assert(m_stopped);
+  // No more client operation is possible, so drop the connection.
+  m_thrift.close();
+  TRACE(2, "Stopping signal thread...\n");
+  if (!m_signalThread.waitForEnd(timeout)) return false;
+  TRACE(2, "Stopping dummy sandbox...\n");
   if (m_dummySandbox) {
-    m_dummySandbox->stop();
+    if (!m_dummySandbox->stop(timeout)) return false;
+    delete m_dummySandbox;
+    m_dummySandbox = nullptr;
+  }
+  TRACE_RB(2, "DebuggerProxy::cleanup complete\n");
+  return true;
+}
+
+// Stop the proxy and ensure that no new uses of it can
+// occur. Schedule it for final cleanup on another thread. This may be
+// called from any thread wishing to stop the proxy, for any reason.
+void DebuggerProxy::stop() {
+  // Shared ref to keep us alive. Often the only reference to a proxy
+  // is in the debugger's proxy map, which we're about to alter below.
+  auto this_ = shared_from_this();
+  Debugger::UsageLog("server", getSandboxId(), "disconnect");
+
+  // After this we'll no longer be able to get this_ from
+  // Debugger::findProxy(), which means no new interrupts for this
+  // proxy. There may still be threads in existing interrupts, though.
+  Debugger::RemoveProxy(this_);
+
+  // Pop the signal polling thread, and any interrupting threads, out
+  // of their event loops and cause them to exit.
+  DSandboxInfo invalid;
+  {
+    Lock lock(this);
+    m_sandbox = invalid;
+    m_stopped = true;
   }
 
-  Debugger::UsageLog("server", "disconnect");
-  TRACE_RB(2, "DebuggerProxy::~DebuggerProxy complete\n");
+  // Retire the proxy, which will schedule it for cleanup and
+  // destruction on another thread. Threads for the dummy sandbox and
+  // signal polling can't destroy the proxy directly, since the proxy
+  // owns them and will want to destroy them.
+  Debugger::RetireProxy(this_);
+}
+
+// Stop the proxy, and stop execution of the current request.
+void DebuggerProxy::stopAndThrow() {
+  stop();
+  throw DebuggerClientExitException();
 }
 
 const char *DebuggerProxy::getThreadType() const {
@@ -58,19 +128,23 @@ const char *DebuggerProxy::getThreadType() const {
   return isLocal() ? "Command Line Script" : "Dummy Sandbox";
 }
 
-DSandboxInfo DebuggerProxy::getSandbox() const {
+DSandboxInfo DebuggerProxy::getSandbox() {
   TRACE(2, "DebuggerProxy::getSandbox\n");
-  Lock lock(m_mutex);
+  Lock lock(this);
   return m_sandbox;
 }
 
-std::string DebuggerProxy::getSandboxId() const {
+std::string DebuggerProxy::getSandboxId() {
   TRACE(2, "DebuggerProxy::getSandboxId\n");
-  Lock lock(m_mutex);
+  Lock lock(this);
   return m_sandbox.id();
 }
 
-void DebuggerProxy::getThreads(DThreadInfoPtrVec &threads) {
+// Forms a list of all threads which are currently blocked within this
+// proxy. There is the thread currently processing an interrupt, plus
+// any other threads stacked up in blockUntilOwn() (represented in the
+// m_threads set).
+void DebuggerProxy::getThreads(std::vector<DThreadInfoPtr> &threads) {
   TRACE(2, "DebuggerProxy::getThreads\n");
   Lock lock(this);
   std::stack<void *> &interrupts =
@@ -102,7 +176,7 @@ bool DebuggerProxy::switchSandbox(const std::string &newId, bool force) {
 // map.
 void DebuggerProxy::updateSandbox(DSandboxInfoPtr sandbox) {
   TRACE(2, "DebuggerProxy::updateSandbox\n");
-  Lock lock(m_mutex);
+  Lock lock(this);
   if (sandbox) {
     if (m_sandbox.id() != sandbox->id()) {
       m_sandbox = *sandbox;
@@ -112,6 +186,8 @@ void DebuggerProxy::updateSandbox(DSandboxInfoPtr sandbox) {
   }
 }
 
+// Cause the proxy to debug the given thread. Other threads will stack
+// up in blockUntilOwn() (depending on the thread mode).
 bool DebuggerProxy::switchThread(DThreadInfoPtr thread) {
   TRACE(2, "DebuggerProxy::switchThread\n");
   Lock lock(this);
@@ -122,6 +198,19 @@ bool DebuggerProxy::switchThread(DThreadInfoPtr thread) {
   return false;
 }
 
+// Change the thread mode, and mark the given (or calling) thread as
+// the current thread for this proxy, depending on the thread mode.
+//
+// We have three thread modes: Normal, Sticky, and Exclusive. For more
+// details, see the help for CmdThread. In short, in Normal mode any
+// thread may hit and process an interrupt. The first thread to hit an
+// interrupt becomes the current thread, and all others block until
+// the current thread is done with its interrupt.
+//
+// In Exclusive mode, only the current thread may process interrupts;
+// All others will ignore interrupts. In Sticky mode, the current
+// thread continues to block others (even while running) until the
+// mode is switched back to Normal.
 void DebuggerProxy::switchThreadMode(ThreadMode mode,
                                      int64_t threadId /* = 0 */) {
   TRACE(2, "DebuggerProxy::switchThreadMode\n");
@@ -129,7 +218,6 @@ void DebuggerProxy::switchThreadMode(ThreadMode mode,
   m_threadMode = mode;
   if (threadId) {
     m_thread = threadId;
-    m_newThread.reset();
     notifyAll(); // since threadId != 0, we're still waking up just one thread
   } else if (mode == Normal) {
     m_thread = 0;
@@ -137,9 +225,7 @@ void DebuggerProxy::switchThreadMode(ThreadMode mode,
   } else {
     m_thread = (int64_t)Process::GetThreadId();
   }
-  if (mode == Normal) {
-    m_flow.reset();
-  }
+  TRACE(2, "Current thread is now %" PRIx64 "\n", m_thread);
 }
 
 void DebuggerProxy::startDummySandbox() {
@@ -152,83 +238,51 @@ void DebuggerProxy::startDummySandbox() {
 
 void DebuggerProxy::notifyDummySandbox() {
   TRACE(2, "DebuggerProxy::notifyDummySandbox\n");
-  m_dummySandbox->notifySignal(CmdSignal::SignalBreak);
+  if (m_dummySandbox) m_dummySandbox->notifySignal(CmdSignal::SignalBreak);
 }
 
-// Hold the entire set of breakpoints, and sift breakpoints by function and
-// class name into separate containers for later.
-void DebuggerProxy::setBreakPoints(BreakPointInfoPtrVec &breakpoints) {
+void DebuggerProxy::setBreakPoints(
+    std::vector<BreakPointInfoPtr> &breakpoints) {
   TRACE(2, "DebuggerProxy::setBreakPoints\n");
   // Hold the break mutex while we update the proxy's state. There's no need
   // to hold it over the longer operation to set breakpoints in each file later.
   {
     WriteLock lock(m_breakMutex);
+    // breakpoints holds a list of fresh new BreakPointInfo objects that
+    // have been deserialized from the client's list of breakpoints.
+    // The existing BreakPointInfo objects may include non empty values
+    // for m_stack. If these get thrown away, breakpoints that are temporarily
+    // disabled will suddenly fire again, which is not what we want to
+    // happen if we create a new breakpoint or just even list breakpoints.
+    auto it = m_breakpoints.begin();
+    for (auto it1 = breakpoints.begin(); it1 != breakpoints.end(); ++it1)  {
+      BreakPointInfoPtr newBreakPoint = *it1;
+      do {
+        for (auto it2 = it; it2 != m_breakpoints.end(); ) {
+          BreakPointInfoPtr oldBreakPoint = *it2++;
+          if (oldBreakPoint->same(newBreakPoint)) {
+            newBreakPoint->transferStack(oldBreakPoint);
+            it = it2;
+            goto next_breakpoint;
+          }
+        }
+        if (it == m_breakpoints.begin()) goto next_breakpoint;
+        // Only searched a part of m_breakpoints. Reset it and try again.
+        it = m_breakpoints.begin();
+      } while (true);
+      next_breakpoint: continue;
+    }
     m_breakpoints = breakpoints;
     m_hasBreakPoints = !m_breakpoints.empty();
-    m_breaksEnterFunc.clear();
-    m_breaksEnterClsMethod.clear();
-    for (unsigned int i = 0; i < m_breakpoints.size(); i++) {
-      BreakPointInfoPtr bp = m_breakpoints[i];
-      std::string funcFullName = bp->getFuncName();
-      if (funcFullName.empty()) {
-        continue;
-      }
-      {
-        StringDataMap::accessor acc;
-        const StringData* sd = StringData::GetStaticString(funcFullName);
-        m_breaksEnterFunc.insert(acc, sd);
-      }
-      std::string clsName = bp->getClass();
-      if (!clsName.empty()) {
-        StringDataMap::accessor acc;
-        const StringData* sd = StringData::GetStaticString(clsName);
-        m_breaksEnterClsMethod.insert(acc, sd);
-      }
-    }
   }
-  phpSetBreakPointsInAllFiles(this); // Apply breakpoints to the code.
+  phpSetBreakPoints(this);
 }
 
-void DebuggerProxy::getBreakPoints(BreakPointInfoPtrVec &breakpoints) {
-  TRACE(2, "DebuggerProxy::getBreakPoints\n");
+void DebuggerProxy::getBreakPoints(
+    std::vector<BreakPointInfoPtr> &breakpoints) {
+  TRACE(7, "DebuggerProxy::getBreakPoints\n");
   ReadLock lock(m_breakMutex);
   breakpoints = m_breakpoints;
-}
-
-bool DebuggerProxy::couldBreakEnterClsMethod(const StringData* className) {
-  TRACE(5, "DebuggerProxy::couldBreakEnterClsMethod\n");
-  ReadLock lock(m_breakMutex);
-  StringDataMap::const_accessor acc;
-  return m_breaksEnterClsMethod.find(acc, className);
-}
-
-bool DebuggerProxy::couldBreakEnterFunc(const StringData* funcFullName) {
-  TRACE(5, "DebuggerProxy::couldBreakEnterFunc\n");
-  ReadLock lock(m_breakMutex);
-  StringDataMap::const_accessor acc;
-  return m_breaksEnterFunc.find(acc, funcFullName);
-}
-
-void DebuggerProxy::getBreakClsMethods(
-  std::vector<const StringData*>& classNames) {
-  TRACE(2, "DebuggerProxy::getBreakClsMethods\n");
-  classNames.clear();
-  WriteLock lock(m_breakMutex); // Write lock in case iteration causes a re-hash
-  for (StringDataMap::const_iterator iter = m_breaksEnterClsMethod.begin();
-       iter != m_breaksEnterClsMethod.end(); ++iter) {
-    classNames.push_back(iter->first);
-  }
-}
-
-void DebuggerProxy::getBreakFuncs(
-  std::vector<const StringData*>& funcFullNames) {
-  TRACE(2, "DebuggerProxy::getBreakFuncs\n");
-  funcFullNames.clear();
-  WriteLock lock(m_breakMutex); // Write lock in case iteration causes a re-hash
-  for (StringDataMap::const_iterator iter = m_breaksEnterFunc.begin();
-       iter != m_breaksEnterFunc.end(); ++iter) {
-    funcFullNames.push_back(iter->first);
-  }
 }
 
 // Proxy needs to be interrupted because it has something setup which may need
@@ -250,7 +304,7 @@ bool DebuggerProxy::needVMInterrupts() {
 void DebuggerProxy::interrupt(CmdInterrupt &cmd) {
   TRACE_RB(2, "DebuggerProxy::interrupt\n");
   // Make any breakpoints that have passed breakable again.
-  changeBreakPointDepth(cmd);
+  setBreakableForBreakpointsNotMatching(cmd);
 
   // At this point we have an interrupt, but we don't know if we're on the
   // thread the proxy considers "current".
@@ -258,58 +312,48 @@ void DebuggerProxy::interrupt(CmdInterrupt &cmd) {
   // the opcode hook. This could be for a breakpoint, stepping, etc.
 
   // Wait until this thread is the one this proxy wants to debug.
-  if (!blockUntilOwn(cmd, true)) {
-    return;
-  }
+  if (!blockUntilOwn(cmd, true)) return;
 
   // We know we're on the "current" thread, so we can process any active flow
   // command, stop if we're at a breakpoint, handle other interrupts, etc.
   if (checkFlowBreak(cmd)) {
+    // We've hit a breakpoint and now need to make sure that breakpoints
+    // wont be hit again for this site until control leaves this site.
+    // (Breakpoints can still get hit if control reaches this site during
+    // a call that is part of this site because the flags are stacked.)
+    unsetBreakableForBreakpointsMatching(cmd);
     while (true) {
       try {
-        Lock lock(m_signalMutex); // Block the signal polling thread.
-        m_signum = CmdSignal::SignalNone;
+        // We're about to send the client an interrupt and start
+        // waiting for commands back from it. Disable signal polling
+        // during this time, since our protocol requires that only one
+        // thread talk to the client at a time.
+        disableSignalPolling();
+        SCOPE_EXIT { enableSignalPolling(); };
         processInterrupt(cmd);
-        // If we've just processed a breakpoint, change it so we don't break at
-        // it again until we're off this site.
-        // Note: this feels quite out of place in here... should be part of
-        // processing the break point itself. Added a note to task #2361050.
-        if (cmd.getInterruptType() == BreakPointReached) {
-          BreakPointInfoPtr bp = getBreakPointAtCmd(cmd);
-          if (bp) {
-            int stackDepth = getRealStackDepth();
-            if (bp->breakable(stackDepth)) {
-              bp->unsetBreakable(stackDepth);
-            }
-          }
-        }
       } catch (const DebuggerException &e) {
+        TRACE(2, "DebuggerException from processInterrupt!\n");
         switchThreadMode(Normal);
         throw;
       } catch (...) {
+        TRACE(2, "Unknown exception from processInterrupt!\n");
         assert(false); // no other exceptions should be seen here
         switchThreadMode(Normal);
         throw;
       }
-      if (cmd.getInterruptType() == PSPEnded) {
-        switchThreadMode(Normal);
-        return; // we are done with this thread
-      }
-      if (!m_newThread) {
-        break; // we're not switching threads
-      }
-
+      if (cmd.getInterruptType() == PSPEnded) break;
+      if (!m_newThread) break; // we're not switching threads
       switchThreadMode(Normal, m_newThread->m_id);
+      m_newThread.reset();
       blockUntilOwn(cmd, false);
     }
   }
 
-  if (m_threadMode == Normal) {
-    Lock lock(this);
-    m_thread = 0;
-    notify();
-  } else if (cmd.getInterruptType() == PSPEnded) {
-    switchThreadMode(Normal); // we are done with this thread
+  if ((m_threadMode == Normal) || (cmd.getInterruptType() == PSPEnded)) {
+    // If the thread mode is Normal we let other threads with
+    // interrupts go ahead and process them. We also do this when the
+    // thread is at PSPEnded because the thread is done.
+    switchThreadMode(Normal);
   }
 }
 
@@ -319,6 +363,24 @@ void DebuggerProxy::interrupt(CmdInterrupt &cmd) {
 bool DebuggerProxy::sendToClient(DebuggerCommand *cmd) {
   TRACE(2, "DebuggerProxy::sendToClient\n");
   return cmd->send(m_thrift);
+}
+
+// Allow the signal polling thread to send CmdSignal messages to the
+// client to see if it there is a signal to repond to.
+void DebuggerProxy::enableSignalPolling() {
+  Lock lock(m_signalMutex);
+  m_okayToPoll = true;
+}
+
+// Prevent the signal polling thread from sending CmdSignal messages
+// to the client. Polling is disabled while a thread is stopped at an
+// interrupt and responding to messages from the client.
+void DebuggerProxy::disableSignalPolling() {
+  Lock lock(m_signalMutex);
+  m_okayToPoll = false;
+  // Drop any pending signal since we're about to start processing
+  // interrupts again anyway.
+  m_signum = CmdSignal::SignalNone;
 }
 
 void DebuggerProxy::startSignalThread() {
@@ -335,23 +397,26 @@ void DebuggerProxy::startSignalThread() {
 // it will be passed to the dummy sandbox instead.
 void DebuggerProxy::pollSignal() {
   TRACE_RB(2, "DebuggerProxy::pollSignal: starting\n");
+  int signalTimeout = RuntimeOption::DebuggerSignalTimeout;
   while (!m_stopped) {
     sleep(1);
-
-    // after 1 second that no active thread picks up the signal, we send it
-    // to dummy sandbox
-    if (m_signum != CmdSignal::SignalNone && m_dummySandbox) {
-      Lock lock(m_signumMutex);
-      if (m_signum != CmdSignal::SignalNone) {
-        TRACE_RB(2, "DebuggerProxy::pollSignal: sending to dummy sandbox\n");
-        m_dummySandbox->notifySignal(m_signum);
-        m_signum = CmdSignal::SignalNone;
-      }
-    }
 
     // Block any threads that might be interrupting from communicating with the
     // client until we're done with this poll.
     Lock lock(m_signalMutex);
+
+    // After DebuggerSignalTimeout seconds that no active thread picks
+    // up the signal, we send it to dummy sandbox.
+    if ((m_signum != CmdSignal::SignalNone) && m_dummySandbox &&
+        (--signalTimeout <= 0)) {
+      TRACE_RB(2, "DebuggerProxy::pollSignal: sending to dummy sandbox\n");
+      m_dummySandbox->notifySignal(m_signum);
+      m_signum = CmdSignal::SignalNone;
+    }
+
+    // Don't actually poll if another thread is already in a command
+    // processing loop with the client.
+    if (!m_okayToPoll) continue;
 
     // Send CmdSignal over to the client and wait for a response.
     CmdSignal cmd;
@@ -361,11 +426,13 @@ void DebuggerProxy::pollSignal() {
       break;
     }
 
-    // We will loop forever until DebuggerClient sends us something, modulo
-    // transport failure or a shutdown request.
+    // We've sent the client a command, and we expect an immediate
+    // response. Wait 10 times to give it a chance on especially
+    // overloaded computers.
     DebuggerCommandPtr res;
-    while (!DebuggerCommand::Receive(m_thrift, res,
-                                     "DebuggerProxy::pollSignal()")) {
+    for (int i = 0; i < 10; i++) {
+      if (DebuggerCommand::Receive(m_thrift, res,
+                                   "DebuggerProxy::pollSignal()")) break;
       if (m_stopped) {
         TRACE_RB(2, "DebuggerProxy::pollSignal: "
                  "signal thread asked to stop while waiting "
@@ -381,53 +448,38 @@ void DebuggerProxy::pollSignal() {
       break;
     }
 
-    CmdSignalPtr sig = dynamic_pointer_cast<CmdSignal>(res);
+    auto sig = std::dynamic_pointer_cast<CmdSignal>(res);
     if (!sig) {
       TRACE_RB(2, "DebuggerProxy::pollSignal: "
                "bad response from signal polling: %d", res->getType());
       break;
     }
 
-    m_signum = sig->getSignal();
+    auto newSignum = sig->getSignal();
 
-    if (m_signum != CmdSignal::SignalNone) {
+    if (newSignum != CmdSignal::SignalNone) {
       TRACE_RB(2, "DebuggerProxy::pollSignal: "
                "got interrupt signal from client\n");
+      m_signum = newSignum;
+      signalTimeout = RuntimeOption::DebuggerSignalTimeout;
       Debugger::RequestInterrupt(shared_from_this());
     }
   }
   if (!m_stopped) {
-    // We've noticed that the socket has closed. If there is a thread stopped at
-    // an interrrupt, stop() will help pop it out and cause the proxy to throw
-    // the proper exception to terminate the request.
+    // We've noticed that the socket has closed. Stop and destory this proxy.
     TRACE_RB(2, "DebuggerProxy::pollSignal: "
              "lost communication with the client, stopping proxy\n");
+    Debugger::UsageLog("server", getSandboxId(), "ProxyError", "Signal poll");
     stop();
   }
   TRACE_RB(2, "DebuggerProxy::pollSignal: ended\n");
 }
 
-// Ask this proxy to stop running and exit cleanly. Used during proxy cleanup,
-// and from the signal polling thread.
-void DebuggerProxy::stop() {
-  TRACE_RB(2, "DebuggerProxy::stop\n");
-  DSandboxInfo invalid;
-  Lock l(this);
-  m_sandbox = invalid;
-  m_stopped = true;
-  // the flag will take care of the rest
-}
-
-// Used to quit this proxy, typcially in response to either a quit command from
-// the client or loss of communication with the client. The proxy is removed
-// from the proxy map, ensuring no other threads can use the proxy. It stops
-// the proxy, and then tosses the client exit exception to ensure the current
-// request is terminated with a nice message.
-void DebuggerProxy::forceQuit() {
-  TRACE_RB(2, "DebuggerProxy::forceQuit\n");
-  Debugger::RemoveProxy(shared_from_this());
-  stop();
-  throw DebuggerClientExitException();
+// Grab the ip address and port of the client that is connected to this proxy.
+bool DebuggerProxy::getClientConnectionInfo(VRefParam address,
+                                            VRefParam port) {
+  Resource s(getSocket().get());
+  return f_socket_getpeername(s, address, port);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -443,6 +495,8 @@ std::string DebuggerProxy::MakePHPReturn(const std::string &php) {
   return "<?php return " + php + ";";
 }
 
+// Passed to the ExecutionContext during Eval to add writes to stdout
+// to the output buffer string.
 static void append_stdout(const char *s, int len, void *data) {
   TRACE(2, "DebuggerProxy::append_stdout\n");
   StringBuffer *sb = (StringBuffer*)data;
@@ -455,6 +509,8 @@ static void append_stdout(const char *s, int len, void *data) {
   }
 }
 
+// Passed to the ExecutionContext during Eval to add writes to stderr
+// to the output buffer string.
 static void append_stderr(const char *header, const char *msg,
                           const char *ending, void *data) {
   TRACE(2, "DebuggerProxy::append_stderr\n");
@@ -469,6 +525,8 @@ static void append_stderr(const char *header, const char *msg,
   }
 }
 
+// Record info about the current thread for the debugger client to use
+// when listing all threads which are interrupted.
 DThreadInfoPtr DebuggerProxy::createThreadInfo(const std::string &desc) {
   TRACE(2, "DebuggerProxy::createThreadInfo\n");
   DThreadInfoPtr info(new DThreadInfo());
@@ -490,28 +548,32 @@ DThreadInfoPtr DebuggerProxy::createThreadInfo(const std::string &desc) {
 // breakpoints, then if there are no breakpoints which could effect this
 // thread we simply return false and stop processing the current interrupt.
 bool DebuggerProxy::blockUntilOwn(CmdInterrupt &cmd, bool check) {
-  TRACE(2, "DebuggerProxy::blockUntilOwn\n");
   int64_t self = cmd.getThreadId();
+  TRACE(2, "DebuggerProxy::blockUntilOwn for thread %" PRIx64 "\n", self);
 
   Lock lock(this);
   if (m_thread && m_thread != self) {
     if (check && (m_threadMode == Exclusive || !checkBreakPoints(cmd))) {
       // Flow control commands only belong to sticky thread
+      TRACE(2, "No need to interrupt this thread\n");
       return false;
     }
     m_threads[self] = createThreadInfo(cmd.desc());
     while (!m_stopped && m_thread && m_thread != self) {
+      TRACE(2, "Waiting...\n");
       wait(1);
 
-      // if for whatever reason, m_thread isn't debugging anymore (for example,
+      // If for whatever reason, m_thread isn't debugging anymore (for example,
       // it runs in Sticky mode, but it finishes running), kick it out.
-      if (!Debugger::IsThreadDebugging(m_thread)) {
+      if (m_thread && !Debugger::IsThreadDebugging(m_thread)) {
+        TRACE(2, "Old thread abandoned debugging, taking over!\n");
         m_threadMode = Normal;
-        m_thread = self;
+        m_thread = 0;
         m_newThread.reset();
         m_flow.reset();
       }
     }
+    TRACE(2, "Ready to become current thread for this proxy\n");
     m_threads.erase(self);
     if (m_stopped) return false;
     if (!checkBreakPoints(cmd)) {
@@ -522,8 +584,10 @@ bool DebuggerProxy::blockUntilOwn(CmdInterrupt &cmd, bool check) {
 
   // This thread is now the one the proxy considers the current thread.
   if (m_thread == 0) {
+    TRACE(2, "Updating current thread\n");
     m_thread = self;
   }
+  TRACE(2, "Current thread for this proxy tid=%" PRIx64 "\n", self);
   return true;
 }
 
@@ -534,7 +598,7 @@ bool DebuggerProxy::blockUntilOwn(CmdInterrupt &cmd, bool check) {
 bool DebuggerProxy::checkBreakPoints(CmdInterrupt &cmd) {
   TRACE(2, "DebuggerProxy::checkBreakPoints\n");
   ReadLock lock(m_breakMutex);
-  return cmd.shouldBreak(m_breakpoints, getRealStackDepth());
+  return cmd.shouldBreak(*this, m_breakpoints, getRealStackDepth());
 }
 
 // Check if we should stop due to flow control, breakpoints, and signals.
@@ -543,7 +607,7 @@ bool DebuggerProxy::checkFlowBreak(CmdInterrupt &cmd) {
   // If there is an outstanding Ctrl-C from the client, go ahead and break now.
   // Note: this stops any flow control command we might have in-flight.
   if (m_signum == CmdSignal::SignalBreak) {
-    Lock lock(m_signumMutex);
+    Lock lock(m_signalMutex);
     if (m_signum == CmdSignal::SignalBreak) {
       m_signum = CmdSignal::SignalNone;
       m_flow.reset();
@@ -594,7 +658,7 @@ bool DebuggerProxy::checkFlowBreak(CmdInterrupt &cmd) {
 
 void DebuggerProxy::checkStop() {
   TRACE(5, "DebuggerProxy::checkStop\n");
-  if (m_stopped) forceQuit();
+  if (m_stopped) stopAndThrow();
 }
 
 void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
@@ -602,11 +666,12 @@ void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
   // Do the server-side work for this interrupt, which just notifies the client.
   if (!cmd.onServer(*this)) {
     TRACE_RB(1, "Failed to send CmdInterrupt to client\n");
-    Debugger::RemoveProxy(shared_from_this()); // on socket error
-    return;
+    Debugger::UsageLog("server", getSandboxId(), "ProxyError",
+                       "Send interrupt");
+    stopAndThrow();
   }
 
-  Debugger::UsageLogInterrupt("server", cmd);
+  Debugger::UsageLogInterrupt("server", getSandboxId(), cmd);
 
   // Wait for commands from the debugger client and process them. We'll stay
   // here until we get a command that should cause the thread to continue.
@@ -620,15 +685,18 @@ void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
     checkStop();
     if (res) {
       TRACE_RB(2, "Proxy got cmd type %d\n", res->getType());
-      Debugger::UsageLog("server", boost::lexical_cast<string>(res->getType()));
+      Debugger::UsageLog("server", getSandboxId(),
+                         boost::lexical_cast<std::string>(res->getType()));
       // Any control flow command gets installed here and we continue execution.
-      m_flow = dynamic_pointer_cast<CmdFlowControl>(res);
+      m_flow = std::dynamic_pointer_cast<CmdFlowControl>(res);
       if (m_flow) {
         m_flow->onSetup(*this, cmd);
         if (!m_flow->complete()) {
           TRACE_RB(2, "Incomplete flow command %d remaining on proxy for "
                    "further processing\n", m_flow->getType());
           if (m_threadMode == Normal) {
+            // We want the flow command to complete on the thread that
+            // starts it.
             switchThreadMode(Sticky);
           }
         } else {
@@ -642,7 +710,7 @@ void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
       if (res->is(DebuggerCommand::KindOfQuit)) {
         TRACE_RB(2, "Received quit command\n");
         res->onServer(*this); // acknowledge receipt so that client can quit.
-        forceQuit();
+        stopAndThrow();
       }
     }
     bool cmdFailure = false;
@@ -651,20 +719,32 @@ void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
       if (res) {
         if (!res->onServer(*this)) {
           TRACE_RB(1, "Failed to execute cmd %d from client\n", res->getType());
+          Debugger::UsageLog("server", getSandboxId(), "ProxyError",
+                             "Command failed");
           cmdFailure = true;
         }
       } else {
         TRACE_RB(1, "Failed to receive cmd from client\n");
+        Debugger::UsageLog("server", getSandboxId(), "ProxyError",
+                           "Command receive failed");
         cmdFailure = true;
       }
     } catch (const DebuggerException &e) {
       throw;
+    } catch (const std::exception& e) {
+      Logger::Warning(DEBUGGER_LOG_TAG
+       "Cmd type %d onServer() threw exception %s", res->getType(), e.what());
+      Debugger::UsageLog("server", getSandboxId(), "ProxyError",
+                         "Command exception");
+      cmdFailure = true;
     } catch (...) {
-      TRACE_RB(1, "Cmd type %d onServer() threw non DebuggerException",
-               res->getType());
+      Logger::Warning(DEBUGGER_LOG_TAG
+       "Cmd type %d onServer() threw non standard exception", res->getType());
+      Debugger::UsageLog("server", getSandboxId(), "ProxyError",
+                         "Command exception");
       cmdFailure = true;
     }
-    if (cmdFailure) forceQuit();
+    if (cmdFailure) stopAndThrow();
     if (res->shouldExitInterrupt()) return;
   }
 }
@@ -672,63 +752,53 @@ void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
 ///////////////////////////////////////////////////////////////////////////////
 
 Variant DebuggerProxy::ExecutePHP(const std::string &php, String &output,
-                                  bool log, int frame) {
+                                  int frame, bool &failed, int flags) {
   TRACE(2, "DebuggerProxy::ExecutePHP\n");
   Variant ret;
+  // Wire up stdout and stderr to our own string buffer so we can pass
+  // any output back to the client.
   StringBuffer sb;
   StringBuffer *save = g_context->swapOutputBuffer(nullptr);
   g_context->setStdout(append_stdout, &sb);
-  if (log) {
+  if (flags & ExecutePHPFlagsLog) {
     Logger::SetThreadHook(append_stderr, &sb);
   }
-  try {
-    String code(php.c_str(), php.size(), CopyString);
-    g_vmContext->evalPHPDebugger((TypedValue*)&ret, code.get(), frame);
-  } catch (InvalidFunctionCallException &e) {
-    sb.append(Debugger::ColorStderr(String(e.what())));
-    sb.append(Debugger::ColorStderr(
-              "You may also need to connect to a host "
-              "(e.g., machine connect localhost)."));
-  } catch (Exception &e) {
-    sb.append(Debugger::ColorStderr(String(e.what())));
-  } catch (Object &e) {
-    try {
-      sb.append(Debugger::ColorStderr(e.toString()));
-    } catch (BadTypeConversionException &e) {
-      sb.append(Debugger::ColorStderr
-                (String("(object without __toString() is thrown)")));
-    }
-  } catch (...) {
-    sb.append(Debugger::ColorStderr(String("(unknown exception was thrown)")));
-  }
+  String code(php.c_str(), php.size(), CopyString);
+  // We're about to start executing more PHP. This is typically done
+  // in response to commands from the client, and the client expects
+  // those commands to send more interrupts since, of course, the
+  // user might want to debug the code we're about to run. If we're
+  // already processing an interrupt, enable signal polling around
+  // the execution of the new PHP to ensure that we can handle
+  // signals while doing so.
+  //
+  // Note: we must switch the thread mode to Sticky so we block
+  // other threads which may hit interrupts while we're running,
+  // since nested processInterrupt() calls would normally release
+  // other threads on the way out.
+  assert(m_thread == (int64_t)Process::GetThreadId());
+  ThreadMode origThreadMode = m_threadMode;
+  switchThreadMode(Sticky, m_thread);
+  if (flags & ExecutePHPFlagsAtInterrupt) enableSignalPolling();
+  SCOPE_EXIT {
+    if (flags & ExecutePHPFlagsAtInterrupt) disableSignalPolling();
+    switchThreadMode(origThreadMode, m_thread);
+  };
+  failed = g_context->evalPHPDebugger((TypedValue*)&ret, code.get(), frame);
   g_context->setStdout(nullptr, nullptr);
   g_context->swapOutputBuffer(save);
-  if (log) {
+  if (flags & ExecutePHPFlagsLog) {
     Logger::SetThreadHook(nullptr, nullptr);
   }
   output = sb.detach();
   return ret;
 }
 
-// There could be multiple breakpoints at one place but we can manage this
-// with only one breakpoint.
-BreakPointInfoPtr DebuggerProxy::getBreakPointAtCmd(CmdInterrupt& cmd) {
-  TRACE(2, "DebuggerProxy::getBreakPointAtCmd\n");
-  for (unsigned int i = 0; i < m_breakpoints.size(); ++i) {
-    BreakPointInfoPtr bp = m_breakpoints[i];
-    if (bp->m_state != BreakPointInfo::Disabled &&
-        bp->match(cmd.getInterruptType(), *cmd.getSite())) {
-      return bp;
-    }
-  }
-  return BreakPointInfoPtr();
-}
-
 int DebuggerProxy::getRealStackDepth() {
   TRACE(2, "DebuggerProxy::getRealStackDepth\n");
   int depth = 0;
-  VMExecutionContext* context = g_vmContext;
-  ActRec *fp = context->getFP();
+  auto const context = g_context.getNoCheck();
+  auto fp = context->getFP();
   if (!fp) return 0;
 
   while (fp != nullptr) {
@@ -741,8 +811,8 @@ int DebuggerProxy::getRealStackDepth() {
 int DebuggerProxy::getStackDepth() {
   TRACE(2, "DebuggerProxy::getStackDepth\n");
   int depth = 0;
-  VMExecutionContext* context = g_vmContext;
-  ActRec *fp = context->getFP();
+  auto const context = g_context.getNoCheck();
+  auto fp = context->getFP();
   if (!fp) return 0;
   ActRec *prev = fp->arGetSfp();
   while (fp != prev) {
@@ -753,20 +823,38 @@ int DebuggerProxy::getStackDepth() {
   return depth;
 }
 
-/**
- * If a breakpoint is set at that depth,
- * this function clears the current depth information
- * after the breakpoint has passed
- */
+// Allow breaks for previously disabled breakpoints that do not match the site
+// of cmd. (Call this when processing an interrupt since this probably means
+// that execution has moved away from the previous interrupt site.)
+void DebuggerProxy::setBreakableForBreakpointsNotMatching(CmdInterrupt& cmd) {
+  TRACE(2, "DebuggerProxy::setBreakableForBreakpointsNotMatching\n");
+  auto site = cmd.getSite();
+  if (site != nullptr) {
+    auto stackDepth = getRealStackDepth();
+    for (unsigned int i = 0; i < m_breakpoints.size(); ++i) {
+      BreakPointInfoPtr bp = m_breakpoints[i];
+      if (bp != nullptr && bp->m_state != BreakPointInfo::Disabled &&
+          !bp->match(*this, cmd.getInterruptType(), *site)) {
+        bp->setBreakable(stackDepth);
+      }
+    }
+  }
+}
 
-void DebuggerProxy::changeBreakPointDepth(CmdInterrupt& cmd) {
-  TRACE(2, "DebuggerProxy::changeBreakPointDepth\n");
-  for (unsigned int i = 0; i < m_breakpoints.size(); ++i) {
-    // if the site changes, then update the breakpoint depth
-    BreakPointInfoPtr bp = m_breakpoints[i];
-    if (bp->m_state != BreakPointInfo::Disabled &&
-        !bp->match(cmd.getInterruptType(), *cmd.getSite())) {
-      m_breakpoints[i]->changeBreakPointDepth(getRealStackDepth());
+// Do not allow further breaks on the site of cmd, except during
+// calls made from the current site.
+void DebuggerProxy::unsetBreakableForBreakpointsMatching(CmdInterrupt& cmd) {
+  TRACE(2, "DebuggerProxy::unsetBreakableForBreakpointsMatching\n");
+  auto site = cmd.getSite();
+  if (site != nullptr) {
+    auto offset = site->getCurOffset();
+    auto stackDepth = getRealStackDepth();
+    for (unsigned int i = 0; i < m_breakpoints.size(); ++i) {
+      BreakPointInfoPtr bp = m_breakpoints[i];
+      if (bp != nullptr && bp->m_state != BreakPointInfo::Disabled &&
+          bp->match(*this, cmd.getInterruptType(), *site)) {
+        bp->unsetBreakable(stackDepth, offset);
+      }
     }
   }
 }

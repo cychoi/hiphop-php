@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -35,12 +35,6 @@ void CmdStep::help(DebuggerClient &client) {
 
 void CmdStep::onSetup(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
   assert(!m_complete); // Complete cmds should not be asked to do work.
-  // Allows a breakpoint on this same line to be hit again when control returns
-  // from function call.
-  BreakPointInfoPtr bp = proxy.getBreakPointAtCmd(interrupt);
-  if (bp) {
-    bp->setBreakable(proxy.getRealStackDepth());
-  }
   installLocationFilterForLine(interrupt.getSite());
   m_needsVMInterrupt = true;
 }
@@ -49,6 +43,8 @@ void CmdStep::onBeginInterrupt(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
   // Step doesn't care about this interrupt... we just stay the course and
   // keep stepping.
   if (interrupt.getInterruptType() == ExceptionHandler) return;
+  // Don't step into generated functions, keep looking.
+  if (interrupt.getSite()->getLine0() == 0) return;
   m_complete = (decCount() == 0);
   if (!m_complete) {
     installLocationFilterForLine(interrupt.getSite());

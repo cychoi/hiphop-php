@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,9 +15,11 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/ext/ext_asio.h"
+#include "hphp/runtime/ext/asio/reschedule_wait_handle.h"
+
 #include "hphp/runtime/ext/asio/asio_context.h"
 #include "hphp/runtime/ext/asio/asio_session.h"
+#include "hphp/runtime/ext/asio/blockable_wait_handle.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
@@ -27,15 +29,10 @@ namespace {
   StaticString s_reschedule("<reschedule>");
 }
 
-const int q_RescheduleWaitHandle$$QUEUE_DEFAULT = AsioContext::QUEUE_DEFAULT;
-const int q_RescheduleWaitHandle$$QUEUE_NO_PENDING_IO = AsioContext::QUEUE_NO_PENDING_IO;
-
-c_RescheduleWaitHandle::c_RescheduleWaitHandle(Class *cb)
-    : c_WaitableWaitHandle(cb) {
-}
-
-c_RescheduleWaitHandle::~c_RescheduleWaitHandle() {
-}
+const int64_t q_RescheduleWaitHandle$$QUEUE_DEFAULT =
+  AsioContext::QUEUE_DEFAULT;
+const int64_t q_RescheduleWaitHandle$$QUEUE_NO_PENDING_IO =
+  AsioContext::QUEUE_NO_PENDING_IO;
 
 void c_RescheduleWaitHandle::t___construct() {
   Object e(SystemLib::AllocInvalidOperationExceptionObject(
@@ -43,7 +40,7 @@ void c_RescheduleWaitHandle::t___construct() {
   throw e;
 }
 
-Object c_RescheduleWaitHandle::ti_create(int queue, int priority) {
+Object c_RescheduleWaitHandle::ti_create(int64_t queue, int priority) {
   if (UNLIKELY(
       queue != q_RescheduleWaitHandle$$QUEUE_DEFAULT &&
       queue != q_RescheduleWaitHandle$$QUEUE_NO_PENDING_IO)) {
@@ -79,26 +76,14 @@ void c_RescheduleWaitHandle::run() {
     return;
   }
 
-  setResult(init_null_variant.asTypedValue());
+  setResult(make_tv<KindOfNull>());
 }
 
 String c_RescheduleWaitHandle::getName() {
   return s_reschedule;
 }
 
-void c_RescheduleWaitHandle::enterContext(context_idx_t ctx_idx) {
-  assert(AsioSession::Get()->getContext(ctx_idx));
-
-  // stop before corrupting unioned data
-  if (isFinished()) {
-    return;
-  }
-
-  // already in the more specific context?
-  if (LIKELY(getContextIdx() >= ctx_idx)) {
-    return;
-  }
-
+void c_RescheduleWaitHandle::enterContextImpl(context_idx_t ctx_idx) {
   assert(getState() == STATE_SCHEDULED);
 
   setContextIdx(ctx_idx);
@@ -120,8 +105,8 @@ void c_RescheduleWaitHandle::exitContext(context_idx_t ctx_idx) {
   }
 
   if (UNLIKELY(getState() != STATE_SCHEDULED)) {
-    throw new FatalErrorException(
-        "Invariant violation: encountered unexpected state");
+    throw FatalErrorException(
+      "Invariant violation: encountered unexpected state");
   }
 
   // move us to the parent context

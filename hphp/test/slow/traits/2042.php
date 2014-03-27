@@ -3,8 +3,9 @@
 function get_declared_user_traits() {
   $ret = array();
   foreach (get_declared_traits() as $v) {
-    $lv = strtolower($v);
-    if ($lv !== 'iterabletrait' && $lv !== 'keyediterabletrait') {
+    // exclude system traits
+    $rc = new ReflectionClass($v);
+    if ('systemlib.php' !== basename($rc->getFileName())) {
       $ret[] = $v;
     }
   }

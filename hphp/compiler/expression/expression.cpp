@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,10 +15,11 @@
 */
 
 #include "hphp/compiler/expression/expression.h"
+#include <vector>
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/parser/parser.h"
-#include "hphp/util/parser/hphp.tab.hpp"
-#include "hphp/util/util.h"
+#include "hphp/parser/hphp.tab.hpp"
+#include "hphp/util/text-util.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/compiler/expression/scalar_expression.h"
@@ -30,12 +31,13 @@
 #include "hphp/compiler/expression/array_element_expression.h"
 #include "hphp/compiler/expression/object_property_expression.h"
 #include "hphp/compiler/expression/unary_op_expression.h"
+#include "hphp/compiler/expression/binary_op_expression.h"
 #include "hphp/compiler/analysis/constant_table.h"
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/expression/function_call.h"
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/util/hash.h"
-#include "hphp/runtime/base/array/array_iterator.h"
+#include "hphp/runtime/base/array-iterator.h"
 
 using namespace HPHP;
 
@@ -368,14 +370,14 @@ void Expression::setTypes(AnalysisResultConstPtr ar, TypePtr actualType,
   }
 
   if (m_actualType->isSpecificObject()) {
-    boost::const_pointer_cast<AnalysisResult>(ar)->
+    std::const_pointer_cast<AnalysisResult>(ar)->
       addClassDependency(getFileScope(), m_actualType->getName());
   }
 }
 
 void Expression::setDynamicByIdentifier(AnalysisResultPtr ar,
                                         const std::string &value) {
-  string id = Util::toLower(value);
+  string id = toLower(value);
   size_t c = id.find("::");
   FunctionScopePtr fi;
   ClassScopePtr ci;
@@ -674,6 +676,14 @@ bool Expression::isArray() const {
   return false;
 }
 
+bool Expression::isCollection() const {
+  if (is(KindOfBinaryOpExpression)) {
+    return
+      static_cast<const BinaryOpExpression*>(this)->getOp() == T_COLLECTION;
+  }
+  return false;
+}
+
 bool Expression::isUnquotedScalar() const {
   if (!is(KindOfScalarExpression)) return false;
   return !((ScalarExpression*)this)->isQuoted();
@@ -682,12 +692,12 @@ bool Expression::isUnquotedScalar() const {
 ExpressionPtr Expression::MakeScalarExpression(AnalysisResultConstPtr ar,
                                                BlockScopePtr scope,
                                                LocationPtr loc,
-                                               CVarRef value) {
+                                               const Variant& value) {
   if (value.isArray()) {
     ExpressionListPtr el(new ExpressionList(scope, loc,
                                             ExpressionList::ListKindParam));
 
-    for (ArrayIter iter(value); iter; ++iter) {
+    for (ArrayIter iter(value.toArray()); iter; ++iter) {
       ExpressionPtr k(MakeScalarExpression(ar, scope, loc, iter.first()));
       ExpressionPtr v(MakeScalarExpression(ar, scope, loc, iter.second()));
       if (!k || !v) return ExpressionPtr();
@@ -701,7 +711,7 @@ ExpressionPtr Expression::MakeScalarExpression(AnalysisResultConstPtr ar,
   } else if (value.isNull()) {
     return MakeConstant(ar, scope, loc, "null");
   } else if (value.isBoolean()) {
-    return MakeConstant(ar, scope, loc, value ? "true" : "false");
+    return MakeConstant(ar, scope, loc, value.toBoolean() ? "true" : "false");
   } else {
     return ScalarExpressionPtr
       (new ScalarExpression(scope, loc, value));

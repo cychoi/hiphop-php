@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,17 +17,23 @@
 #ifndef incl_HPHP_VM_UNIT_H_
 #define incl_HPHP_VM_UNIT_H_
 
-// Expects that runtime/vm/core_types.h is already included.
-#include "hphp/runtime/base/runtime_option.h"
-#include "hphp/runtime/vm/hhbc.h"
+#include "hphp/parser/location.h"
+
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-string.h"
+
 #include "hphp/runtime/vm/class.h"
-#include "hphp/runtime/vm/repo_helpers.h"
-#include "hphp/runtime/vm/named_entity.h"
-#include "hphp/runtime/base/array/hphp_array.h"
+#include "hphp/runtime/vm/hhbc.h"
+#include "hphp/runtime/vm/named-entity.h"
+#include "hphp/runtime/vm/repo-helpers.h"
+#include "hphp/runtime/vm/type-alias.h"
+
+#include "hphp/util/md5.h"
 #include "hphp/util/range.h"
-#include "hphp/util/parser/location.h"
-#include "hphp/runtime/base/md5.h"
-#include "hphp/util/tiny_vector.h"
+#include "hphp/util/tiny-vector.h"
+
+#include <memory>
 
 namespace HPHP {
 // Forward declarations.
@@ -39,10 +45,11 @@ class FuncEmitter;
 class Repo;
 class FuncDict;
 class Unit;
+class PreClassEmitter;
 
-enum UnitOrigin {
-  UnitOriginFile = 0,
-  UnitOriginEval = 1
+enum class UnitOrigin {
+  File = 0,
+  Eval = 1
 };
 
 enum UnitMergeKind {
@@ -70,7 +77,8 @@ enum UnitMergeState {
   UnitMergeStateEmpty = 32
 };
 
-inline bool ALWAYS_INLINE isMergeKindReq(UnitMergeKind k) {
+ALWAYS_INLINE
+bool isMergeKindReq(UnitMergeKind k) {
   return k == UnitMergeKindReqDoc;
 }
 
@@ -114,11 +122,11 @@ struct UnitMergeInfo {
 // Exception handler table entry.
 class EHEnt {
  public:
-  enum EHType {
-    EHType_Catch,
-    EHType_Fault
+  enum class Type {
+    Catch,
+    Fault
   };
-  EHType m_ehtype;
+  Type m_type;
   Offset m_base;
   Offset m_past;
   int m_iterId;
@@ -129,15 +137,15 @@ class EHEnt {
   CatchVec m_catches;
 
   template<class SerDe> void serde(SerDe& sd) {
-    sd(m_ehtype)
+    sd(m_type)
       (m_base)
       (m_past)
       (m_iterId)
       (m_fault)
       (m_itRef)
-      // eh.m_parentIndex is re-computed in sortEHTab, not serialized.
+      (m_parentIndex)
       ;
-    if (m_ehtype == EHType_Catch) {
+    if (m_type == Type::Catch) {
       sd(m_catches);
     }
   }
@@ -157,13 +165,6 @@ class FPIEnt {
     // These fields are recomputed by sortFPITab:
     // m_parentIndex;
     // m_fpiDepth;
-  }
-};
-
-class FPIEntComp {
- public:
-  bool operator() (const FPIEnt &fpi1, const FPIEnt &fpi2) {
-    return fpi1.m_fpushOff < fpi2.m_fpushOff;
   }
 };
 
@@ -235,38 +236,67 @@ class TableEntry {
 
 typedef TableEntry<int> LineEntry;
 typedef std::vector<LineEntry> LineTable;
+typedef TableEntry<SourceLoc> SourceLocEntry;
+typedef std::vector<SourceLocEntry> SourceLocTable;
+typedef std::map<int, OffsetRangeVec> LineToOffsetRangeVecMap;
 typedef TableEntry<const Func*> FuncEntry;
 typedef std::vector<FuncEntry> FuncTable;
-
-/*
- * This is the runtime representation of a typedef.  Typedefs are only
- * allowed when hip hop extensions are enabled.
- *
- * The m_kind field is KindOfObject whenever the typedef is basically
- * just a name.  At runtime we still might resolve this name to
- * another typedef, becoming a typedef for KindOfArray or something in
- * that request.
- */
-struct Typedef {
-  const StringData* m_name;
-  const StringData* m_value;
-  DataType          m_kind;
-
-  template<class SerDe> void serde(SerDe& sd) {
-    sd(m_name)
-      (m_value)
-      (m_kind)
-      ;
-  }
-};
 
 //==============================================================================
 // (const StringData*) versus (StringData*)
 //
 // All (const StringData*) values are static strings that came from e.g.
-// StringData::GetStaticString().  Therefore no reference counting is required.
+// makeStaticString().  Therefore no reference counting is required.
 //
 //==============================================================================
+
+// Functions for differentiating global litstrId's from unit-local Id's.
+const int kGlobalLitstrOffset = 0x40000000;
+inline bool isGlobalLitstrId(Id id) { return id >= kGlobalLitstrOffset; }
+inline Id encodeGlobalLitstrId(Id id) { return id + kGlobalLitstrOffset; }
+inline Id decodeGlobalLitstrId(Id id) { return id - kGlobalLitstrOffset; }
+
+/*
+ * Global table of literal strings.  This can only be safely used when
+ * the repo is built in WholeProgram mode and run in RepoAuthoritative
+ * mode.
+ */
+class LitstrTable {
+private:
+  static LitstrTable* s_litstrTable;
+
+public:
+  static void init() {
+    LitstrTable::s_litstrTable = new LitstrTable();
+  }
+
+  static LitstrTable& get() {
+    return *LitstrTable::s_litstrTable;
+  }
+
+  ~LitstrTable() {}
+  Id mergeLitstr(const StringData* litstr);
+  size_t numLitstrs() { return m_namedInfo.size(); }
+  StringData* lookupLitstrId(Id id) const;
+  const NamedEntity* lookupNamedEntityId(Id id) const;
+  const NamedEntityPair& lookupNamedEntityPairId(Id id) const;
+  void insert(RepoTxn& txn, UnitOrigin uo);
+  Mutex& mutex() { return m_mutex; }
+
+  void setReading() { m_safeToRead = true; }
+  void setWriting() { m_safeToRead = false; }
+
+private:
+  LitstrTable() {}
+  typedef hphp_hash_map<const StringData*, Id,
+                        string_data_hash, string_data_same> LitstrMap;
+
+  LitstrMap m_litstr2id;
+  std::vector<const StringData*> m_litstrs;
+  std::vector<NamedEntityPair> m_namedInfo;
+  Mutex m_mutex;
+  std::atomic<bool> m_safeToRead;
+};
 
 /*
  * Metadata about a compilation unit.
@@ -289,11 +319,9 @@ struct Unit {
 
   class MetaInfo {
    public:
-    enum Kind {
+    enum class Kind {
       None,
-      String,
       Class,
-      NopOut,
 
       /*
        * Marks types that are proven to be a particular type by static
@@ -309,8 +337,6 @@ struct Unit {
 
       GuardedThis,
       GuardedCls,
-      NoSurprise,
-      ArrayCapacity,
 
       /*
        * Information about the known class of a property base in the
@@ -324,13 +350,6 @@ struct Unit {
        * an object of the supplied class type (or a null).
        */
       MVecPropClass,
-
-      /*
-       * At a Ret{C,V} site, indicates which locals are known not to
-       * be reference counted.  m_data is the id of the local variable
-       * that cannot be reference counted at this point.
-       */
-      NonRefCounted,
     };
 
     /*
@@ -344,7 +363,7 @@ struct Unit {
     MetaInfo(Kind k, int a, Id d) : m_kind(k), m_arg(a), m_data(d) {
       assert((int)m_arg == a);
     }
-    MetaInfo() : m_kind(None), m_arg(-1), m_data(0) {}
+    MetaInfo() : m_kind(Kind::None), m_arg(-1), m_data(0) {}
 
     /*
      * m_arg indicates which input the MetaInfo applies to.
@@ -403,21 +422,25 @@ struct Unit {
   PC entry() const { return m_bc; }
   Offset bclen() const { return m_bclen; }
 
-  PC at(const Offset off) const {
+  PC at(Offset off) const {
     assert(off >= 0 && off <= Offset(m_bclen));
     return m_bc + off;
   }
 
-  Offset offsetOf(const Opcode* op) const {
-    assert(op >= m_bc && op <= (m_bc + m_bclen));
-    return op - m_bc;
+  Offset offsetOf(PC pc) const {
+    assert(contains(pc));
+    return pc - m_bc;
+  }
+
+  bool contains(PC pc) const {
+    return pc >= m_bc && pc <= m_bc + m_bclen;
   }
 
   const StringData* filepath() const {
     assert(m_filepath);
     return m_filepath;
   }
-  CStrRef filepathRef() const {
+  const String& filepathRef() const {
     assert(m_filepath);
     return *(String*)(&m_filepath);
   }
@@ -428,35 +451,58 @@ struct Unit {
 
   MD5 md5() const { return m_md5; }
 
-  static NamedEntity* GetNamedEntity(const StringData *)
-    __attribute__((__flatten__));
+  static NamedEntity* GetNamedEntity(const StringData *str,
+                                     bool allowCreate = true,
+                                     String* normStr = nullptr) FLATTEN;
+
   static size_t GetNamedEntityTableSize();
-  static Array getUserFunctions();
   static Array getClassesInfo();
   static Array getInterfacesInfo();
   static Array getTraitsInfo();
+  static Array getClassesWithAttrInfo(HPHP::Attr attrs, bool inverse = false);
+  static Array getUserFunctions() { return getFunctions(false); }
+  static Array getSystemFunctions() { return getFunctions(true); }
 
+ private:
+  static Array getFunctions(bool system);
+
+ public:
   size_t numLitstrs() const {
     return m_namedInfo.size();
   }
+
   StringData* lookupLitstrId(Id id) const {
+    if (isGlobalLitstrId(id)) {
+      return LitstrTable::get().lookupLitstrId(decodeGlobalLitstrId(id));
+    }
     assert(id >= 0 && id < Id(m_namedInfo.size()));
     return const_cast<StringData*>(m_namedInfo[id].first);
   }
 
   const NamedEntity* lookupNamedEntityId(Id id) const {
+    if (isGlobalLitstrId(id)) {
+      return LitstrTable::get().lookupNamedEntityId(decodeGlobalLitstrId(id));
+    }
     return lookupNamedEntityPairId(id).second;
   }
 
   const NamedEntityPair& lookupNamedEntityPairId(Id id) const {
+    if (isGlobalLitstrId(id)) {
+      auto decodedId = decodeGlobalLitstrId(id);
+      return LitstrTable::get().lookupNamedEntityPairId(decodedId);
+    }
     assert(id < Id(m_namedInfo.size()));
     const NamedEntityPair &ne = m_namedInfo[id];
     assert(ne.first);
+    assert(ne.first->data()[ne.first->size()] == 0);
+    assert(ne.first->data()[0] != '\\');
     if (UNLIKELY(!ne.second)) {
       const_cast<const NamedEntity*&>(ne.second) = GetNamedEntity(ne.first);
     }
     return ne;
   }
+
+  bool checkStringId(Id id) const;
 
   size_t numArrays() const {
     return m_arrays.size();
@@ -473,11 +519,11 @@ struct Unit {
   static Class* defClass(const HPHP::PreClass* preClass,
                          bool failIsFatal = true);
   static bool aliasClass(Class* original, const StringData* alias);
-  void defTypedef(Id id);
+  void defTypeAlias(Id id);
 
-  static TypedValue* lookupCns(const StringData* cnsName);
-  static TypedValue* lookupPersistentCns(const StringData* cnsName);
-  static TypedValue* loadCns(const StringData* cnsName);
+  static Cell* lookupCns(const StringData* cnsName);
+  static Cell* lookupPersistentCns(const StringData* cnsName);
+  static Cell* loadCns(const StringData* cnsName);
   static bool defCns(const StringData* cnsName, const TypedValue* value,
                      bool persistent = false);
   static uint64_t defCnsHelper(uint64_t ch,
@@ -540,14 +586,24 @@ struct Unit {
                           const StringData *name);
 
   static Class *loadClass(const StringData *name) {
-    return loadClass(GetNamedEntity(name), name);
+    String normStr;
+    auto ne = GetNamedEntity(name, true, &normStr);
+    if (normStr) {
+      name = normStr.get();
+    }
+    return loadClass(ne, name);
   }
 
   static Class *loadMissingClass(const NamedEntity *ne,
                                  const StringData *name);
 
   static Class* getClass(const StringData* name, bool tryAutoload) {
-    return getClass(GetNamedEntity(name), name, tryAutoload);
+    String normStr;
+    auto ne = GetNamedEntity(name, true, &normStr);
+    if (normStr) {
+      name = normStr.get();
+    }
+    return getClass(ne, name, tryAutoload);
   }
 
   static Class* getClass(const NamedEntity *ne, const StringData *name,
@@ -556,9 +612,12 @@ struct Unit {
                           Attr typeAttrs);
 
   bool compileTimeFatal(const StringData*& msg, int& line) const;
+  bool parseFatal(const StringData*& msg, int& line) const;
   const TypedValue *getMainReturn() const {
+    assert(isMergeOnly());
     return &m_mainReturn;
   }
+
 private:
   template <bool debugger>
   void mergeImpl(void* tcbase, UnitMergeInfo* mi);
@@ -607,9 +666,9 @@ public:
   bool getOffsetRanges(int line, OffsetRangeVec& offsets) const;
   bool getOffsetRange(Offset pc, OffsetRange& range) const;
 
-  Opcode getOpcode(size_t instrOffset) const {
+  Op getOpcode(size_t instrOffset) const {
     assert(instrOffset < m_bclen);
-    return (Opcode)m_bc[instrOffset];
+    return static_cast<Op>(m_bc[instrOffset]);
   }
 
   /*
@@ -624,10 +683,12 @@ public:
     m_cacheOffset = id >> 3;
     m_cacheMask = 1 << (id & 7);
   }
+  bool isInterpretOnly() const { return m_interpretOnly; }
+  void setInterpretOnly() { m_interpretOnly = true; }
   bool isMergeOnly() const { return m_mergeOnly; }
-  void clearMergeOnly() { m_mergeOnly = false; }
   bool isEmpty() const { return m_mergeState & UnitMergeStateEmpty; }
   void* replaceUnit() const;
+
 public:
   static Mutex s_classesMutex;
 
@@ -636,6 +697,7 @@ public:
       : startOffset(kInvalidOffset)
       , stopOffset(kInvalidOffset)
       , showLines(true)
+      , showFuncs(true)
       , indentSize(1)
     {}
 
@@ -650,6 +712,11 @@ public:
       return *this;
     }
 
+    PrintOpts& noFuncs() {
+      showFuncs = false;
+      return *this;
+    }
+
     PrintOpts& indent(int i) {
       indentSize = i;
       return *this;
@@ -658,6 +725,7 @@ public:
     Offset startOffset;
     Offset stopOffset;
     bool showLines;
+    bool showFuncs;
     int indentSize;
   };
 
@@ -668,30 +736,57 @@ public: // Translator field access
   static size_t bcOff() { return offsetof(Unit, m_bc); }
 
 private:
+  // List of (offset, sourceLoc) where offset is the offset of the first byte
+  // code of the next source location if there is one, m_bclen otherwise.
+  // Sorted by offset. sourceLocs are not assumed to be unique.
+  SourceLocTable getSourceLocTable() const;
+  // A map from all source lines that correspond to one or more byte codes.
+  // The result from the map is a list of offset ranges, so a single line
+  // with several sub-statements may correspond to the byte codes of all
+  // of the sub-statements.
+  LineToOffsetRangeVecMap getLineToOffsetRangeVecMap() const;
+
+  /*
+    Frequently used fields.
+    Do not reorder without good reason
+  */
+  unsigned char const* m_bc{nullptr};
+  size_t m_bclen{0};
+  const StringData* m_filepath{nullptr};
+  // List of (line, offset) where offset is the offset of the first byte code
+  // of the next line if there is one, m_bclen otherwise.
+  // Sorted by offset. line values are not assumed to be unique.
+  LineTable m_lineTable;
+  UnitMergeInfo* m_mergeInfo{nullptr};
+  unsigned m_cacheOffset{0};
+  int8_t m_repoId{-1};
+  uint8_t m_mergeState{UnitMergeStateUnmerged};
+  uint8_t m_cacheMask{0};
+  bool m_mergeOnly{false};
+  bool m_interpretOnly;
   // pseudoMain's return value, or KindOfUninit if its not known.
   TypedValue m_mainReturn;
-  int64_t m_sn;
-  uchar const* m_bc;
-  size_t m_bclen;
-  uchar const* m_bc_meta;
-  size_t m_bc_meta_len;
-  const StringData* m_filepath;
-  const StringData* m_dirpath;
+  PreClassPtrVec m_preClasses;
+  FixedVector<TypeAlias> m_typeAliases;
+  /*
+    End of freqently used fields
+  */
+
+  int64_t m_sn{-1};
+  unsigned char const* m_bc_meta{nullptr};
+  size_t m_bc_meta_len{0};
+  const StringData* m_dirpath{nullptr};
   MD5 m_md5;
   std::vector<NamedEntityPair> m_namedInfo;
   std::vector<const ArrayData*> m_arrays;
-  PreClassPtrVec m_preClasses;
-  FixedVector<Typedef> m_typedefs;
-  UnitMergeInfo* m_mergeInfo;
-  unsigned m_cacheOffset;
-  int8_t m_repoId;
-  uint8_t m_mergeState;
-  uint8_t m_cacheMask;
-  bool m_mergeOnly;
-  LineTable m_lineTable;
+  SourceLocTable m_sourceLocTable;
+  LineToOffsetRangeVecMap m_lineToOffsetRangeVecMap;
   FuncTable m_funcTable;
-  mutable PseudoMainCacheMap *m_pseudoMainCache;
+  mutable PseudoMainCacheMap *m_pseudoMainCache{nullptr};
 };
+
+int getLineNumber(const LineTable& table, Offset pc);
+bool getSourceLoc(const SourceLocTable& table, Offset pc, SourceLoc& sLoc);
 
 class UnitEmitter {
   friend class UnitRepoProxy;
@@ -700,22 +795,34 @@ class UnitEmitter {
   explicit UnitEmitter(const MD5& md5);
   ~UnitEmitter();
 
+  bool isASystemLib() const {
+    static const char systemlib_prefix[] = "/:systemlib";
+    return !*getFilepath()->data() ||
+      !strncmp(getFilepath()->data(),
+        systemlib_prefix, sizeof systemlib_prefix - 1);
+  }
+
   void addTrivialPseudoMain();
   int repoId() const { return m_repoId; }
   void setRepoId(int repoId) { m_repoId = repoId; }
   int64_t sn() const { return m_sn; }
   void setSn(int64_t sn) { m_sn = sn; }
+  const unsigned char* bc() const { return m_bc; }
   Offset bcPos() const { return (Offset)m_bclen; }
-  void setBc(const uchar* bc, size_t bclen);
-  void setBcMeta(const uchar* bc_meta, size_t bc_meta_len);
-  const StringData* getFilepath() { return m_filepath; }
+  void setBc(const unsigned char* bc, size_t bclen);
+  void setBcMeta(const unsigned char* bc_meta, size_t bc_meta_len);
+  const StringData* getFilepath() const { return m_filepath; }
   void setFilepath(const StringData* filepath) { m_filepath = filepath; }
   void setMainReturn(const TypedValue* v) { m_mainReturn = *v; }
   void setMergeOnly(bool b) { m_mergeOnly = b; }
   const MD5& md5() const { return m_md5; }
-  Id addTypedef(const Typedef& td);
+  Id addTypeAlias(const TypeAlias& td);
   Id mergeLitstr(const StringData* litstr);
-  Id mergeArray(ArrayData* a, const StringData* key=nullptr);
+  Id mergeUnitLitstr(const StringData* litstr);
+  Id mergeArray(const ArrayData* a);
+  Id mergeArray(const ArrayData* a, const std::string& key);
+  const StringData* lookupLitstr(Id id) const;
+  const ArrayData* lookupArray(Id id) const;
   FuncEmitter* getMain();
   void initMain(int line1, int line2);
   FuncEmitter* newFuncEmitter(const StringData* n);
@@ -724,6 +831,12 @@ class UnitEmitter {
   PreClassEmitter* newPreClassEmitter(const StringData* n,
                                       PreClass::Hoistable hoistable);
   PreClassEmitter* pce(Id preClassId) { return m_pceVec[preClassId]; }
+  const PreClassEmitter* pce(Id preClassId) const {
+    return m_pceVec[preClassId];
+  }
+  size_t numPreClasses() const { return m_pceVec.size(); }
+  const std::vector<FuncEmitter*>& fevec() const { return m_fes; }
+  const std::vector<TypeAlias>& typeAliases() const { return m_typeAliases; }
 
   /*
    * Record source location information for the last chunk of bytecode
@@ -731,6 +844,25 @@ class UnitEmitter {
    * same source line will be collapsed as this is created.
    */
   void recordSourceLocation(const Location *sLoc, Offset start);
+
+  /*
+   * Return the SrcLocTable for this unit emitter, if it has one.
+   * Otherwise an empty table is returned.
+   */
+  SourceLocTable createSourceLocTable() const;
+
+  /*
+   * Returns whether this unit emitter contains full SourceLoc
+   * information.
+   */
+  bool hasSourceLocInfo() const { return !m_sourceLocTab.empty(); }
+
+  /*
+   * Returns access to this UnitEmitter's LineTable.  Generally
+   * UnitEmitters loaded from a production repo will have a line table
+   * instead of a full SourceLocTable.
+   */
+  const LineTable& lineTable() const { return m_lineTable; }
 
   /*
    * Adds a new FuncEmitter to the unit.  You can only do this once
@@ -744,11 +876,11 @@ class UnitEmitter {
  private:
   template<class T>
   void emitImpl(T n, int64_t pos) {
-    uchar *c = (uchar*)&n;
+    auto *c = (unsigned char*)&n;
     if (pos == -1) {
       // Make sure m_bc is large enough.
       while (m_bclen + sizeof(T) > m_bcmax) {
-        m_bc = (uchar*)realloc(m_bc, m_bcmax << 1);
+        m_bc = (unsigned char*)realloc(m_bc, m_bcmax << 1);
         m_bcmax <<= 1;
       }
       memcpy(&m_bc[m_bclen], c, sizeof(T));
@@ -762,9 +894,9 @@ class UnitEmitter {
   }
  public:
   void emitOp(Op op, int64_t pos = -1) {
-    emitByte((uchar)op, pos);
+    emitByte((unsigned char)op, pos);
   }
-  void emitByte(uchar n, int64_t pos = -1) { emitImpl(n, pos); }
+  void emitByte(unsigned char n, int64_t pos = -1) { emitImpl(n, pos); }
   void emitInt32(int n, int64_t pos = -1) { emitImpl(n, pos); }
   template<typename T> void emitIVA(T n) {
     if (LIKELY((n & 0x7f) == n)) {
@@ -778,16 +910,11 @@ class UnitEmitter {
   void emitDouble(double n, int64_t pos = -1) { emitImpl(n, pos); }
   bool insert(UnitOrigin unitOrigin, RepoTxn& txn);
   void commit(UnitOrigin unitOrigin);
-  Func* newFunc(const FuncEmitter* fe, Unit& unit, Id id, int line1, int line2,
-                Offset base, Offset past,
-                const StringData* name, Attr attrs, bool top,
-                const StringData* docComment, int numParams,
-                bool isClosureBody, bool isGenerator);
-  Func* newFunc(const FuncEmitter* fe, Unit& unit, PreClass* preClass,
+  Func* newFunc(const FuncEmitter* fe, Unit& unit, Id id, PreClass* preClass,
                 int line1, int line2, Offset base, Offset past,
                 const StringData* name, Attr attrs, bool top,
                 const StringData* docComment, int numParams,
-                bool isClosureBody, bool isGenerator);
+                bool needsNextClonedClosure);
   Unit* create();
   void returnSeen() { m_returnSeen = true; }
   void pushMergeableClass(PreClassEmitter* e);
@@ -805,9 +932,9 @@ class UnitEmitter {
   int64_t m_sn;
   static const size_t BCMaxInit = 4096; // Initial bytecode size.
   size_t m_bcmax;
-  uchar* m_bc;
+  unsigned char* m_bc;
   size_t m_bclen;
-  uchar* m_bc_meta;
+  unsigned char* m_bc_meta;
   size_t m_bc_meta_len;
   TypedValue m_mainReturn;
   const StringData* m_filepath;
@@ -816,13 +943,12 @@ class UnitEmitter {
                         string_data_hash, string_data_same> LitstrMap;
   LitstrMap m_litstr2id;
   std::vector<const StringData*> m_litstrs;
-  typedef hphp_hash_map<const StringData*, Id,
-                        string_data_hash, string_data_same> ArrayIdMap;
+  typedef hphp_hash_map<std::string, Id, string_hash> ArrayIdMap;
   ArrayIdMap m_array2id;
-  typedef struct {
-    const StringData* serialized;
+  struct ArrayVecElm {
+    std::string serialized;
     const ArrayData* array;
-  } ArrayVecElm;
+  };
   typedef std::vector<ArrayVecElm> ArrayVec;
   ArrayVec m_arrays;
   int m_nextFuncSn;
@@ -833,12 +959,12 @@ class UnitEmitter {
                         pointer_hash<FuncEmitter> > FMap;
   FMap m_fMap;
   typedef std::vector<PreClassEmitter*> PceVec;
-  typedef std::vector<Id> IdVec;
+  typedef std::list<Id> IdList;
   PceVec m_pceVec;
   typedef hphp_hash_set<const StringData*, string_data_hash,
                         string_data_isame> HoistedPreClassSet;
   HoistedPreClassSet m_hoistablePreClassSet;
-  IdVec m_hoistablePceIdVec;
+  IdList m_hoistablePceIdList;
   typedef std::vector<std::pair<UnitMergeKind, Id> > MergeableStmtVec;
   MergeableStmtVec m_mergeableStmts;
   std::vector<std::pair<Id,TypedValue> > m_mergeableValues;
@@ -857,8 +983,44 @@ class UnitEmitter {
    */
   std::vector<std::pair<Offset,SourceLoc> > m_sourceLocTab;
   std::vector<std::pair<Offset,const FuncEmitter*> > m_feTab;
-  std::vector<Typedef> m_typedefs;
+  LineTable m_lineTable;
+  std::vector<TypeAlias> m_typeAliases;
 };
+
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * Member functions of LitstrTable inlined for perf.  Must come after
+ * Unit definition to break circular dependences.
+ */
+inline
+StringData* LitstrTable::lookupLitstrId(Id id) const {
+  assert(m_safeToRead);
+  assert(id >= 0 && id < Id(s_litstrTable->m_litstrs.size()));
+  return const_cast<StringData*>(s_litstrTable->m_litstrs[id]);
+}
+
+inline
+const NamedEntity* LitstrTable::lookupNamedEntityId(Id id) const {
+  assert(m_safeToRead);
+  return lookupNamedEntityPairId(id).second;
+}
+
+inline
+const NamedEntityPair& LitstrTable::lookupNamedEntityPairId(Id id) const {
+  assert(m_safeToRead);
+  assert(id >= 0 && id < Id(s_litstrTable->m_namedInfo.size()));
+  const NamedEntityPair& ne = s_litstrTable->m_namedInfo[id];
+  assert(ne.first);
+  assert(ne.first->data()[ne.first->size()] == 0);
+  assert(ne.first->data()[0] != '\\');
+  if (UNLIKELY(!ne.second)) {
+    const_cast<const NamedEntity*&>(ne.second) = Unit::GetNamedEntity(ne.first);
+  }
+  return ne;
+}
+
+//////////////////////////////////////////////////////////////////////
 
 class UnitRepoProxy : public RepoProxy {
   friend class Unit;
@@ -868,6 +1030,8 @@ class UnitRepoProxy : public RepoProxy {
   ~UnitRepoProxy();
   void createSchema(int repoId, RepoTxn& txn);
   Unit* load(const std::string& name, const MD5& md5);
+  std::unique_ptr<UnitEmitter> loadEmitter(const std::string& name,
+                                           const MD5& md5);
 
 #define URP_IOP(o) URP_OP(Insert##o, insert##o)
 #define URP_GOP(o) URP_OP(Get##o, get##o)
@@ -882,6 +1046,7 @@ class UnitRepoProxy : public RepoProxy {
   URP_GOP(UnitMergeables) \
   URP_IOP(UnitSourceLoc) \
   URP_GOP(SourceLoc) \
+  URP_GOP(SourceLocTab) \
   URP_GOP(SourceLocPastOffsets) \
   URP_GOP(SourceLocBaseOffset) \
   URP_GOP(BaseOffsetAtPCLoc) \
@@ -889,11 +1054,13 @@ class UnitRepoProxy : public RepoProxy {
   class InsertUnitStmt : public RepoProxy::Stmt {
    public:
     InsertUnitStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    void insert(RepoTxn& txn, int64_t& unitSn, const MD5& md5, const uchar* bc,
-                size_t bclen, const uchar* bc_meta, size_t bc_meta_len,
+    void insert(RepoTxn& txn, int64_t& unitSn, const MD5& md5,
+                const unsigned char* bc,
+                size_t bclen, const unsigned char* bc_meta,
+                size_t bc_meta_len,
                 const TypedValue* mainReturn, bool mergeOnly,
                 const LineTable& lines,
-                const std::vector<Typedef>&);
+                const std::vector<TypeAlias>&);
   };
   class GetUnitStmt : public RepoProxy::Stmt {
    public:
@@ -915,7 +1082,7 @@ class UnitRepoProxy : public RepoProxy {
    public:
     InsertUnitArrayStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     void insert(RepoTxn& txn, int64_t unitSn, Id arrayId,
-                const StringData* array);
+                const std::string& array);
   };
   class GetUnitArraysStmt : public RepoProxy::Stmt {
    public:
@@ -945,6 +1112,11 @@ class UnitRepoProxy : public RepoProxy {
     GetSourceLocStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     bool get(int64_t unitSn, Offset pc, SourceLoc& sLoc);
   };
+  class GetSourceLocTabStmt : public RepoProxy::Stmt {
+   public:
+    GetSourceLocTabStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
+    bool get(int64_t unitSn, SourceLocTable& sourceLocTab);
+  };
   class GetSourceLocPastOffsetsStmt : public RepoProxy::Stmt {
    public:
     GetSourceLocPastOffsetsStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
@@ -965,6 +1137,10 @@ class UnitRepoProxy : public RepoProxy {
     GetBaseOffsetAfterPCLocStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     bool get(int64_t unitSn, Offset pc, Offset& offset);
   };
+
+private:
+  bool loadHelper(UnitEmitter& ue, const std::string&, const MD5&);
+
 #define URP_OP(c, o) \
  public: \
   c##Stmt& o(int repoId) { return *m_##o[repoId]; } \
@@ -976,12 +1152,7 @@ class UnitRepoProxy : public RepoProxy {
 #undef URP_OP
 };
 
-/**
- * AllFuncs
- * MutableAllFuncs
- *
- * Range over all Func's in a single unit.
- */
+//////////////////////////////////////////////////////////////////////
 
 struct ConstPreClassMethodRanger {
   typedef Func* const* Iter;
@@ -998,10 +1169,10 @@ struct MutablePreClassMethodRanger {
     return pc->mutableMethods();
   }
 };
+
 template<typename FuncRange,
          typename GetMethods>
-class AllFuncsImpl {
- public:
+struct AllFuncsImpl {
   explicit AllFuncsImpl(const Unit* unit)
     : fr(unit->funcs())
     , mr(0, 0)
@@ -1024,7 +1195,8 @@ class AllFuncsImpl {
     if (fr.empty() && mr.empty()) skip();
     return f;
   }
- private:
+
+private:
   void skip() {
     assert(fr.empty());
     while (!cr.empty() && mr.empty()) {
@@ -1039,19 +1211,19 @@ class AllFuncsImpl {
   Unit::PreClassRange cr;
 };
 
-typedef AllFuncsImpl<Unit::FuncRange, ConstPreClassMethodRanger> AllFuncs;
-typedef AllFuncsImpl<Unit::MutableFuncRange, MutablePreClassMethodRanger> MutableAllFuncs;
+typedef AllFuncsImpl<Unit::FuncRange,ConstPreClassMethodRanger> AllFuncs;
+typedef AllFuncsImpl<Unit::MutableFuncRange,MutablePreClassMethodRanger>
+  MutableAllFuncs;
 
-/**
- *
+/*
  * Range over all defined classes.
  */
 class AllClasses {
-protected:
   NamedEntityMap::iterator m_next, m_end;
   Class* m_current;
   void next();
   void skip();
+
 public:
   AllClasses();
   bool empty() const;
@@ -1059,17 +1231,7 @@ public:
   Class* popFront();
 };
 
-/**
- * If name starts with '\\', returns a new String with the leading
- * slash stripped. Otherwise returns a null string.
- */
-inline const String normalizeNS(const StringData* name) {
-  assert(name->data()[name->size()] == 0);
-  if (name->data()[0] == '\\') {
-    return String(name->data() + 1);
-  }
-  return null_string;
-}
+//////////////////////////////////////////////////////////////////////
 
 }
 #endif

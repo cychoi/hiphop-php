@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,38 +17,67 @@
 #ifndef incl_HPHP_PREG_H_
 #define incl_HPHP_PREG_H_
 
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/complex_types.h"
+#include "hphp/runtime/base/type-string.h"
+
+#include <cstdint>
+#include <cstddef>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant preg_grep(CStrRef pattern, CArrRef input, int flags = 0);
+class Array;
+struct Variant;
 
-Variant preg_match(CStrRef pattern, CStrRef subject, Variant &matches,
+struct PCREglobals {
+  // pcre ini_settings
+  int64_t m_preg_backtrace_limit;
+  int64_t m_preg_recursion_limit;
+};
+
+Variant preg_grep(const String& pattern, const Array& input, int flags = 0);
+
+Variant preg_match(const String& pattern, const String& subject,
+                   Variant& matches,
                    int flags = 0, int offset = 0);
 
-Variant preg_match(CStrRef pattern, CStrRef subject, int flags = 0,
+Variant preg_match(const String& pattern,
+                   const String& subject,
+                   int flags = 0,
                    int offset = 0);
 
-Variant preg_match_all(CStrRef pattern, CStrRef subject, Variant &matches,
+Variant preg_match_all(const String& pattern, const String& subject,
+                       Variant& matches,
                        int flags = 0, int offset = 0);
 
-Variant preg_match_all(CStrRef pattern, CStrRef subject,
+Variant preg_match_all(const String& pattern, const String& subject,
                        int flags = 0, int offset = 0);
 
-Variant preg_replace_impl(CVarRef pattern, CVarRef replacement,
-                          CVarRef subject, int limit, Variant &count,
-                          bool is_callable);
-int preg_replace(Variant &result, CVarRef pattern, CVarRef replacement,
-                 CVarRef subject, int limit = -1);
-int preg_replace_callback(Variant &result, CVarRef pattern, CVarRef callback,
-                          CVarRef subject, int limit = -1);
+Variant preg_replace_impl(const Variant& pattern, const Variant& replacement,
+                          const Variant& subject, int limit, Variant& count,
+                          bool is_callable, bool is_filter);
+int preg_replace(Variant& result,
+                 const Variant& pattern,
+                 const Variant& replacement,
+                 const Variant& subject,
+                 int limit = -1);
+int preg_replace_callback(Variant& result,
+                          const Variant& pattern,
+                          const Variant& callback,
+                          const Variant& subject,
+                          int limit = -1);
+int preg_filter(Variant& result,
+                const Variant& pattern,
+                const Variant& replacement,
+                const Variant& subject,
+                int limit = -1);
 
-Variant preg_split(CVarRef pattern, CVarRef subject, int limit = -1,
+Variant preg_split(const String& pattern,
+                   const String& subject,
+                   int limit = -1,
                    int flags = 0);
-String preg_quote(CStrRef str, CStrRef delimiter = null_string);
-Variant php_split(CStrRef spliton, CStrRef str, int count, bool icase);
+String preg_quote(const String& str, const String& delimiter = null_string);
+Variant php_split(const String& spliton, const String& str, int count,
+                  bool icase);
 
 int preg_last_error();
 

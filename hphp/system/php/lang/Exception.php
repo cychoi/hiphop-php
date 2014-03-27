@@ -16,7 +16,7 @@ class Exception {
   protected $trace;         // full stacktrace
   private $inited = false;
 
-  private static $traceOpts = false;
+  private static $traceOpts = 0;
 
   /**
    * This cannot be implemented in __construct, because a derived class may
@@ -84,7 +84,7 @@ class Exception {
     $next = $cur->getPrevious();
     while ($next instanceof Exception) {
       $cur = $next;
-      $next = $cur->getPrevious;
+      $next = $cur->getPrevious();
     }
     $cur->setPrevious($previous);
   }
@@ -176,9 +176,23 @@ class Exception {
    * @return     mixed   Returns the string representation of the exception.
    */
   function __toString() {
-    return "exception '" . get_class($this) . "' with message '" .
-      $this->getMessage() . "' in " . $this->getFile() . ":" .
-      $this->getLine() . "\nStack trace:\n" . $this->getTraceAsString();
+    $res = "";
+    $lst = array();
+    $ex = $this;
+    while ($ex != null) {
+      $lst[] = $ex;
+      $ex = $ex->previous;
+    }
+    $lst = array_reverse($lst);
+    foreach ($lst as $i => $ex) {
+      if ($i > 0) {
+        $res .= "\n\nNext ";
+      }
+      $res .= "exception '" . get_class($ex) . "' with message '" .
+        $ex->getMessage() . "' in " . $ex->getFile() . ":" .
+        $ex->getLine() . "\nStack trace:\n" . $ex->getTraceAsString();
+    }
+    return $res;
   }
 
   /**
@@ -206,7 +220,7 @@ class Exception {
   }
 
   public static function setTraceOptions($opts) {
-    self::$traceOpts = $opts;
+    self::$traceOpts = (int)$opts;
   }
 }
 

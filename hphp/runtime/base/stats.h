@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,16 +13,16 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#ifndef STATS_H_
-#define STATS_H_
+#ifndef incl_HPHP_STATS_H_
+#define incl_HPHP_STATS_H_
+
+#include <atomic>
 
 #include "hphp/runtime/vm/hhbc.h"
-#include "hphp/util/asm-x64.h"
+#include "hphp/util/data-block.h"
 #include "hphp/util/trace.h"
 
 namespace HPHP {
-
- namespace Transl { class X64Assembler; }
 namespace Stats {
 
 #include "hphp/runtime/vm/stats-opcodeDef.h"
@@ -36,8 +36,6 @@ namespace Stats {
   STAT(TgtCache_StaticMiss) \
   STAT(TgtCache_ClsCnsHit) \
   STAT(TgtCache_ClsCnsMiss) \
-  STAT(TgtCache_KnownClsHit) \
-  STAT(TgtCache_KnownClsMiss) \
   STAT(TgtCache_FuncDHit) \
   STAT(TgtCache_FuncDMiss) \
   STAT(TgtCache_CtorDHit) \
@@ -61,62 +59,62 @@ namespace Stats {
   STAT(TgtCache_StaticMethodFFill) \
   STAT(TgtCache_ClassExistsHit) \
   STAT(TgtCache_ClassExistsMiss) \
-  STAT(Tx64_FusedTypeCheck) \
-  STAT(Tx64_UnfusedTypeCheck) \
-  STAT(Tx64_VerifyParamTypeSlow) \
-  STAT(Tx64_VerifyParamTypeFast) \
-  STAT(Tx64_VerifyParamTypeBit) \
-  STAT(Tx64_VerifyParamTypeSlowShortcut) \
-  STAT(Tx64_VerifyParamTypePass) \
-  STAT(Tx64_VerifyParamTypeEqual) \
-  STAT(Tx64_InstanceOfDFused) \
-  STAT(Tx64_InstanceOfDBypass) \
-  STAT(Tx64_InstanceOfDInterface) \
-  STAT(Tx64_InstanceOfDSlow) \
-  STAT(Tx64_InstanceOfDFast) \
-  STAT(Tx64_InstanceOfDBit) \
-  STAT(Tx64_InstanceOfDEqual) \
-  STAT(Tx64_InstanceOfDFinalTrue) \
-  STAT(Tx64_InstanceOfDFinalFalse) \
-  STAT(Tx64_CGetMLEE) \
-  STAT(Tx64_CGetMGE) \
-  STAT(Tx64_CGetMArray) \
-  STAT(Tx64_CGetMGeneric) \
-  STAT(Tx64_MLitKey) \
-  STAT(Tx64_MRegKey) \
-  STAT(Tx64_MTVKey) \
-  STAT(Tx64_CnsFast) \
-  STAT(Tx64_CnsSlow) \
-  STAT(Tx64_ContCreateFast) \
-  STAT(Tx64_ContCreateSlow) \
-  STAT(Tx64_ContUnpackFast) \
-  STAT(Tx64_ContUnpackSlow) \
-  STAT(Tx64_ContPackFast) \
-  STAT(Tx64_ContPackSlow) \
-  STAT(Tx64_Spill) \
-  STAT(Tx64_SpillHome) \
-  STAT(Tx64_ClassExistsFast) \
-  STAT(Tx64_ClassExistsSlow) \
-  STAT(Tx64_StaticLocFast) \
-  STAT(Tx64_StaticLocSlow) \
-  STAT(Tx64_OneGuardShort) \
-  STAT(Tx64_OneGuardLong) \
-  STAT(Tx64_SideExit) \
-  STAT(Tx64_SideExitClean) \
-  STAT(Tx64_NewInstancePropCheck) \
-  STAT(Tx64_NewInstancePropInit) \
-  STAT(Tx64_NewInstanceSPropCheck) \
-  STAT(Tx64_NewInstanceSPropInit) \
-  STAT(Tx64_NewInstanceNoCtorFast) \
-  STAT(Tx64_NewInstanceNoCtor) \
-  STAT(Tx64_NewInstanceFast) \
-  STAT(Tx64_NewInstanceGeneric) \
-  STAT(Tx64_StringSwitchSlow) \
-  STAT(Tx64_StringSwitchFast) \
-  STAT(Tx64_StringSwitchHit) \
-  STAT(Tx64_StringSwitchChain) \
-  STAT(Tx64_StringSwitchFailFast) \
-  STAT(Tx64_StringSwitchFailSlow) \
+  STAT(MCG_FusedTypeCheck) \
+  STAT(MCG_UnfusedTypeCheck) \
+  STAT(MCG_VerifyParamTypeSlow) \
+  STAT(MCG_VerifyParamTypeFast) \
+  STAT(MCG_VerifyParamTypeBit) \
+  STAT(MCG_VerifyParamTypeSlowShortcut) \
+  STAT(MCG_VerifyParamTypePass) \
+  STAT(MCG_VerifyParamTypeEqual) \
+  STAT(MCG_InstanceOfDFused) \
+  STAT(MCG_InstanceOfDBypass) \
+  STAT(MCG_InstanceOfDInterface) \
+  STAT(MCG_InstanceOfDSlow) \
+  STAT(MCG_InstanceOfDFast) \
+  STAT(MCG_InstanceOfDBit) \
+  STAT(MCG_InstanceOfDEqual) \
+  STAT(MCG_InstanceOfDFinalTrue) \
+  STAT(MCG_InstanceOfDFinalFalse) \
+  STAT(MCG_CGetMLEE) \
+  STAT(MCG_CGetMGE) \
+  STAT(MCG_CGetMArray) \
+  STAT(MCG_CGetMGeneric) \
+  STAT(MCG_MLitKey) \
+  STAT(MCG_MRegKey) \
+  STAT(MCG_MTVKey) \
+  STAT(MCG_CnsFast) \
+  STAT(MCG_CnsSlow) \
+  STAT(MCG_ContCreateFast) \
+  STAT(MCG_ContCreateSlow) \
+  STAT(MCG_ContUnpackFast) \
+  STAT(MCG_ContUnpackSlow) \
+  STAT(MCG_ContPackFast) \
+  STAT(MCG_ContPackSlow) \
+  STAT(MCG_Spill) \
+  STAT(MCG_SpillHome) \
+  STAT(MCG_ClassExistsFast) \
+  STAT(MCG_ClassExistsSlow) \
+  STAT(MCG_StaticLocFast) \
+  STAT(MCG_StaticLocSlow) \
+  STAT(MCG_OneGuardShort) \
+  STAT(MCG_OneGuardLong) \
+  STAT(MCG_SideExit) \
+  STAT(MCG_SideExitClean) \
+  STAT(MCG_NewInstancePropCheck) \
+  STAT(MCG_NewInstancePropInit) \
+  STAT(MCG_NewInstanceSPropCheck) \
+  STAT(MCG_NewInstanceSPropInit) \
+  STAT(MCG_NewInstanceNoCtorFast) \
+  STAT(MCG_NewInstanceNoCtor) \
+  STAT(MCG_NewInstanceFast) \
+  STAT(MCG_NewInstanceGeneric) \
+  STAT(MCG_StringSwitchSlow) \
+  STAT(MCG_StringSwitchFast) \
+  STAT(MCG_StringSwitchHit) \
+  STAT(MCG_StringSwitchChain) \
+  STAT(MCG_StringSwitchFailFast) \
+  STAT(MCG_StringSwitchFailSlow) \
   /* Type prediction stats */ \
   STAT(TypePred_Insert) \
   STAT(TypePred_Evict) \
@@ -176,13 +174,14 @@ namespace Stats {
   /* astubs stats */ \
   STAT(Astubs_New) \
   STAT(Astubs_Reused) \
-  /* HphpArray */ \
-  STAT(HA_FindIntFast) \
-  STAT(HA_FindIntSlow) \
   /* Switches */ \
   STAT(Switch_Generic) \
   STAT(Switch_Integer) \
   STAT(Switch_String) \
+  /* ARM simulator */ \
+  STAT(vixl_SimulatedInstr) \
+  STAT(vixl_SimulatedLoad) \
+  STAT(vixl_SimulatedStore) \
 
 enum StatCounter {
 #define STAT(name) \
@@ -197,7 +196,7 @@ extern const char* g_counterNames[kNumStatCounters];
 extern __thread uint64_t tl_counters[kNumStatCounters];
 
 extern __thread uint64_t tl_helper_counters[];
-extern const char* volatile helperNames[];
+extern std::atomic<const char*> helperNames[];
 
 inline bool enabled() {
   return Trace::moduleEnabled(Trace::stats, 1);
@@ -217,45 +216,33 @@ inline void inc(StatCounter stat, int n = 1) {
   }
 }
 
-inline StatCounter opcodeToStatCounter(Opcode opc) {
-  assert(OpLowInvalid == 0);
-  return StatCounter(Instr_InterpBBLowInvalid + STATS_PER_OPCODE * opc);
+static_assert(static_cast<uint64_t>(OpLowInvalid) == 0,
+              "stats.h assumes OpLowInvalid == 0");
+
+inline StatCounter opcodeToStatCounter(Op opc) {
+  return StatCounter(Instr_InterpBBLowInvalid +
+                     STATS_PER_OPCODE * uint8_t(opc));
 }
 
-inline void incOp(Opcode opc) {
+inline void incOp(Op opc) {
   inc(opcodeToStatCounter(opc));
 }
 
-inline StatCounter opcodeToTranslStatCounter(Opcode opc) {
-  assert(OpLowInvalid == 0);
-  return StatCounter(Instr_TranslLowInvalid + STATS_PER_OPCODE * opc);
+inline StatCounter opcodeToTranslStatCounter(Op opc) {
+  return StatCounter(Instr_TranslLowInvalid +
+                     STATS_PER_OPCODE * uint8_t(opc));
 }
 
-inline StatCounter opcodeToIRPreStatCounter(Opcode opc) {
-  assert(OpLowInvalid == 0);
-  return StatCounter(Instr_TranslIRPreLowInvalid + STATS_PER_OPCODE * opc);
+inline StatCounter opcodeToIRPreStatCounter(Op opc) {
+  return StatCounter(Instr_TranslIRPreLowInvalid +
+                     STATS_PER_OPCODE * uint8_t(opc));
 }
 
-inline StatCounter opcodeToIRPostStatCounter(Opcode opc) {
-  assert(OpLowInvalid == 0);
-  return StatCounter(Instr_TranslIRPostLowInvalid + STATS_PER_OPCODE * opc);
+inline StatCounter opcodeToIRPostStatCounter(Op opc) {
+  return StatCounter(Instr_TranslIRPostLowInvalid +
+                     STATS_PER_OPCODE * uint8_t(opc));
 }
 
-// Both emitIncs use r10.
-extern void emitInc(Transl::X64Assembler& a,
-                    uint64_t* tl_table,
-                    uint index,
-                    int n = 1,
-                    Transl::ConditionCode cc = Transl::CC_None,
-                    bool force = false);
-inline void emitInc(Transl::X64Assembler& a, StatCounter stat, int n = 1,
-                    Transl::ConditionCode cc = Transl::CC_None,
-                    bool force = false) {
-  emitInc(a, &tl_counters[0], stat, n, cc, force);
-}
-
-extern void emitIncTranslOp(Transl::X64Assembler& a, Opcode opc,
-                            bool force = false);
 extern void init();
 extern void dump();
 extern void clear();

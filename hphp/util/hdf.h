@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,11 +17,17 @@
 #ifndef incl_HPHP_CONFIG_HDF_H_
 #define incl_HPHP_CONFIG_HDF_H_
 
-#include "hphp/util/base.h"
 #include <string>
+#include <map>
+#include <set>
+#include <vector>
+
+#include <boost/container/flat_set.hpp>
+
 #include "hphp/util/exception.h"
-#include "hphp/util/case_insensitive.h"
-#include "neo/neo_hdf.h"
+#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/util/functional.h"
+#include "hphp/neo/neo_hdf.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -120,7 +126,7 @@ public:
   const char *get(const char *defValue = nullptr) const;
   std::string getString(const std::string &defValue = "") const;
   char   getByte  (char   defValue = 0) const;
-  uchar  getUByte (uchar  defValue = 0) const;
+  unsigned char  getUByte (unsigned char  defValue = 0) const;
   int16_t  getInt16 (int16_t  defValue = 0) const;
   uint16_t getUInt16(uint16_t defValue = 0) const;
   int32_t  getInt32 (int32_t  defValue = 0) const;
@@ -132,6 +138,7 @@ public:
   void get(std::vector<std::string> &values) const;
   void get(std::set<std::string> &values) const;
   void get(std::set<std::string, stdltistr> &values) const;
+  void get(boost::container::flat_set<std::string> &values) const;
   void get(std::map<std::string, std::string> &values) const;
   void get(hphp_string_imap<std::string> &values) const;
 
@@ -142,7 +149,7 @@ public:
   void set(const std::string &value) { set(value.c_str());}
   void set(bool   value) { set(value ? "1" : "0");}
   void set(char   value) { set((int64_t)value);}
-  void set(uchar  value) { set((uint64_t)value);}
+  void set(unsigned char  value) { set((uint64_t)value);}
   void set(int16_t  value) { set((int64_t)value);}
   void set(uint16_t value) { set((uint64_t)value);}
   void set(int32_t  value) { set((int64_t)value);}
@@ -155,7 +162,7 @@ public:
   Hdf &operator=(const std::string &value) { set(value); return *this;}
   Hdf &operator=(bool   value) { set(value); return *this;}
   Hdf &operator=(char   value) { set(value); return *this;}
-  Hdf &operator=(uchar  value) { set(value); return *this;}
+  Hdf &operator=(unsigned char  value) { set(value); return *this;}
   Hdf &operator=(int16_t  value) { set(value); return *this;}
   Hdf &operator=(uint16_t value) { set(value); return *this;}
   Hdf &operator=(int32_t  value) { set(value); return *this;}
@@ -226,7 +233,7 @@ public:
   int compare(const char *v) const;
   int compare(const std::string &v) const;
   int compare(char   v) const;
-  int compare(uchar  v) const;
+  int compare(unsigned char  v) const;
   int compare(int16_t  v) const;
   int compare(uint16_t v) const;
   int compare(int32_t  v) const;
@@ -256,12 +263,12 @@ public:
   bool operator> (char v) const { return compare(v) >  0;}
   bool operator< (char v) const { return compare(v) <  0;}
 
-  bool operator==(uchar v) const { return compare(v) == 0;}
-  bool operator!=(uchar v) const { return compare(v) != 0;}
-  bool operator>=(uchar v) const { return compare(v) >= 0;}
-  bool operator<=(uchar v) const { return compare(v) <= 0;}
-  bool operator> (uchar v) const { return compare(v) >  0;}
-  bool operator< (uchar v) const { return compare(v) <  0;}
+  bool operator==(unsigned char v) const { return compare(v) == 0;}
+  bool operator!=(unsigned char v) const { return compare(v) != 0;}
+  bool operator>=(unsigned char v) const { return compare(v) >= 0;}
+  bool operator<=(unsigned char v) const { return compare(v) <= 0;}
+  bool operator> (unsigned char v) const { return compare(v) >  0;}
+  bool operator< (unsigned char v) const { return compare(v) <  0;}
 
   bool operator==(int16_t v) const { return compare(v) == 0;}
   bool operator!=(int16_t v) const { return compare(v) != 0;}
@@ -360,9 +367,7 @@ private:
  */
 class HdfException : public Exception {
 public:
-  HdfException(const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt); format(fmt, ap); va_end(ap);
-  }
+  HdfException(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
   EXCEPTION_COMMON_IMPL(HdfException);
 };
 

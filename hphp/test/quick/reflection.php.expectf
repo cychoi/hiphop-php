@@ -11,7 +11,7 @@ int(13)
 int(20)
 
 --- getFileName("f") ---
-string(%d) "%s"
+string(%d) "%s/test/quick/reflection.php"
 
 --- getName("f") ---
 string(1) "f"
@@ -200,7 +200,7 @@ int(126)
 int(142)
 
 --- getFileName() ---
-string(%d) "%s"
+string(%d) "%s/test/quick/reflection.php"
 
 --- getInterfaceNames() ---
 array(4) {
@@ -209,9 +209,9 @@ array(4) {
   [1]=>
   string(1) "K"
   [2]=>
-  string(1) "J"
-  [3]=>
   string(1) "H"
+  [3]=>
+  string(1) "J"
 }
 
 --- getInterfaces() ---
@@ -227,10 +227,12 @@ int(0)
 string(1) "B"
 
 --- getParentClass() ---
-object(ReflectionClass)#23 (2) {
+object(ReflectionClass)#23 (3) {
   ["name"]=>
   string(1) "A"
   ["info":"ReflectionClass":private]=>
+  NULL
+  ["obj":"ReflectionClass":private]=>
   NULL
 }
 
@@ -293,7 +295,7 @@ bool(false)
 bool(true)
 
 --- newInstance() ---
-object(B)#34 (4) {
+object(B)#51 (4) {
   ["p0":"B":private]=>
   int(1)
   ["p1":protected]=>
@@ -305,7 +307,7 @@ object(B)#34 (4) {
 }
 
 --- newInstanceArgs() ---
-object(B)#34 (4) {
+object(B)#51 (4) {
   ["p0":"B":private]=>
   int(1)
   ["p1":protected]=>

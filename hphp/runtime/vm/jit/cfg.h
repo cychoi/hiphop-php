@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,110 +19,74 @@
 
 #include <boost/dynamic_bitset.hpp>
 
-#include "hphp/runtime/base/memory/smart_containers.h"
+#include "hphp/runtime/base/smart-containers.h"
 #include "hphp/runtime/vm/jit/block.h"
-#include "hphp/runtime/vm/jit/trace.h"
+#include "hphp/runtime/vm/jit/ir-unit.h"
+#include "hphp/runtime/vm/jit/state-vector.h"
 
 namespace HPHP { namespace JIT {
-
-/*
- * This header contains classes and functions for iterating over and
- * inspecting the control flow graph of a Trace's Blocks.
- */
-
-/**
- * PostorderSort encapsulates a depth-first postorder walk
- */
-template <class Visitor>
-struct PostorderSort {
-  PostorderSort(Visitor& visitor, unsigned num_blocks)
-    : m_visited(num_blocks), m_visitor(visitor)
-  {}
-
-  void walk(Block* block) {
-    assert(!block->empty());
-    if (m_visited.test(block->id())) return;
-    m_visited.set(block->id());
-    Block* taken = block->taken();
-    if (taken && taken->trace()->isMain() != block->trace()->isMain()) {
-      walk(taken);
-      taken = nullptr;
-    }
-    if (Block* next = block->next()) walk(next);
-    if (taken) walk(taken);
-    m_visitor(block);
-  }
-
-private:
-  boost::dynamic_bitset<> m_visited;
-  Visitor &m_visitor;
-};
 
 /**
  * perform a depth-first postorder walk
  */
 template <class Visitor>
-void postorderWalk(Visitor visitor, unsigned num_blocks, Block* head) {
-  PostorderSort<Visitor> ps(visitor, num_blocks);
-  ps.walk(head);
-}
+void postorderWalk(const IRUnit&, Visitor visitor, Block* start = nullptr);
 
 /*
  * Compute a reverse postorder list of the basic blocks reachable from
- * the first block in trace.
- *
- * Post: isRPOSorted(return value)
+ * the IR's entry block.
  */
-BlockList rpoSortCfg(IRTrace*, const IRFactory&);
+BlockList rpoSortCfg(const IRUnit&);
+
 
 /*
- * Return an iterator into an rpo-sorted BlockList for a given Block.
- * Uses the postId() assigned by rpoSortCfg.
- *
- * Pre: isRPOSorted(cfg)
+ * Similar to repoSortCfg, but also returns a StateVector mapping Blocks to
+ * their index in the BlockList.
  */
-inline BlockList::const_iterator
-rpoIteratorTo(const BlockList& cfg, Block* b) {
-  return cfg.end() - (b->postId() + 1);
-}
+struct BlocksWithIds {
+  BlockList blocks;
+  StateVector<Block, uint32_t> ids;
+};
+BlocksWithIds rpoSortCfgWithIds(const IRUnit&);
 
 /*
- * Returns: true if the supplied block list is sorted in reverse post
- * order.
+ * Removes unreachable blocks from the unit and then splits any critical edges.
+ *
+ * Returns: true iff any modifications were made to the unit.
  */
-bool isRPOSorted(const BlockList&);
+bool splitCriticalEdges(IRUnit&);
+
+/*
+ * Remove unreachable blocks from the given unit.
+ *
+ * Returns: true iff one or more blocks were deleted.
+ */
+bool removeUnreachable(IRUnit& unit);
 
 /*
  * Compute the postorder number of each immediate dominator of each
  * block, using a list produced by rpoSortCfg().
  *
- * Pre: isRPOSorted(blocks)
+ * Pre: blocks is in reverse postorder
  */
-typedef smart::vector<int> IdomVector;
-IdomVector findDominators(const BlockList& blocks);
+typedef StateVector<Block,Block*> IdomVector;
+IdomVector findDominators(const IRUnit&, const BlocksWithIds& blocks);
 
 /*
- * A vector of children lists, indexed by block->postId()
+ * A vector of children lists, indexed by block
  */
-typedef smart::vector<BlockList> DomChildren;
+typedef StateVector<Block,BlockList> DomChildren;
 
 /*
  * Compute the dominator tree, then populate a list of dominator children
- * for each block.  Note that DomChildren is indexed by block->postId(),
- * not block->id(); that's why we don't use StateVector here.
+ * for each block.
  */
-DomChildren findDomChildren(const BlockList& blocks);
+DomChildren findDomChildren(const IRUnit&, const BlocksWithIds& blocks);
 
 /*
  * return true if b1 == b2 or if b1 dominates b2.
  */
 bool dominates(const Block* b1, const Block* b2, const IdomVector& idoms);
-
-/*
- * Return true if trace has internal control flow (IE it has a branch
- * to itself somewhere.
- */
-bool hasInternalFlow(IRTrace*);
 
 /*
  * Visit basic blocks in a preorder traversal over the dominator tree.
@@ -133,42 +97,72 @@ bool hasInternalFlow(IRTrace*);
  */
 template <class State, class Body>
 void forPreorderDoms(Block* block, const DomChildren& children,
-                     State state, Body body) {
-  body(block, state);
-  for (Block* child : children[block->postId()]) {
-    forPreorderDoms(child, children, state, body);
-  }
-}
+                     State state, Body body);
 
 /*
  * Visit the main trace followed by exit traces.
  */
-template <class Body>
-void forEachTrace(IRTrace* main, Body body) {
-  body(main);
-  for (IRTrace* exit : main->exitTraces()) {
-    body(exit);
-  }
-}
+template <class Body> void forEachTrace(const IRUnit&, Body body);
 
 /*
- * Visit the blocks in the main trace followed by exit trace blocks.
+ * Visit the instructions in this blocklist, in block order.
  */
-template <class Body>
-void forEachTraceBlock(IRTrace* main, Body body) {
-  for (Block* block : main->blocks()) {
-    body(block);
-  }
-  for (IRTrace* exit : main->exitTraces()) {
-    for (Block* block : exit->blocks()) {
-      body(block);
+template <class BlockList, class Body>
+void forEachInst(const BlockList& blocks, Body body);
+
+namespace detail {
+   // PostorderSort encapsulates a depth-first postorder walk.
+  template <class Visitor>
+  struct PostorderSort {
+    PostorderSort(Visitor& visitor, unsigned num_blocks)
+      : m_visited(num_blocks), m_visitor(visitor)
+    {}
+
+    void walk(Block* block) {
+      if (m_visited.test(block->id())) return;
+      m_visited.set(block->id());
+
+      // Blocks aren't allowed to be empty but this function is used when
+      // printing debug information, so we want to handle invalid Blocks
+      // gracefully.
+      if (!block->empty()) {
+        Block* taken = block->taken();
+        if (taken && !cold(block) && cold(taken)) {
+          walk(taken);
+          taken = nullptr;
+        }
+        if (Block* next = block->next()) walk(next);
+        if (taken) walk(taken);
+      }
+      m_visitor(block);
     }
+  private:
+    static bool cold(Block* b) { return b->hint() == Block::Hint::Unlikely; }
+  private:
+    boost::dynamic_bitset<> m_visited;
+    Visitor &m_visitor;
+  };
+}
+
+/**
+ * Perform a depth-first postorder walk. If a starting Block is not supplied,
+ * unit's entry Block will be used.
+ */
+template <class Visitor>
+void postorderWalk(const IRUnit& unit, Visitor visitor, Block* start) {
+  detail::PostorderSort<Visitor> ps(visitor, unit.numBlocks());
+  ps.walk(start ? start : unit.entry());
+}
+
+template <class State, class Body>
+void forPreorderDoms(Block* block, const DomChildren& children,
+                     State state, Body body) {
+  body(block, state);
+  for (Block* child : children[block]) {
+    forPreorderDoms(child, children, state, body);
   }
 }
 
-/*
- * Visit the instructions in this trace, in block order.
- */
 template <class BlockList, class Body>
 void forEachInst(const BlockList& blocks, Body body) {
   for (Block* block : blocks) {
@@ -176,21 +170,6 @@ void forEachInst(const BlockList& blocks, Body body) {
       body(&inst);
     }
   }
-}
-
-template <class Body>
-void forEachInst(IRTrace* trace, Body body) {
-  forEachInst(trace->blocks(), body);
-}
-
-/*
- * Visit each instruction in the main trace, then the exit traces
- */
-template <class Body>
-void forEachTraceInst(IRTrace* main, Body body) {
-  forEachTrace(main, [=](IRTrace* t) {
-    forEachInst(t, body);
-  });
 }
 
 }}

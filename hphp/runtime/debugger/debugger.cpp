@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,14 +15,16 @@
 */
 
 #include "hphp/runtime/debugger/debugger.h"
+#include <set>
+#include <stack>
+#include <vector>
 #include "hphp/runtime/debugger/debugger_server.h"
 #include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/debugger/cmd/cmd_interrupt.h"
-#include "hphp/runtime/base/hphp_system.h"
-#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/base/hphp-system.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/util/text_color.h"
-#include "hphp/util/util.h"
+#include "hphp/util/text-color.h"
 #include "hphp/util/logger.h"
 
 namespace HPHP { namespace Eval {
@@ -53,6 +55,7 @@ void Debugger::Stop() {
   LogShutdown(ShutdownKind::Normal);
   s_debugger.m_proxyMap.clear();
   DebuggerServer::Stop();
+  CleanupRetiredProxies();
   if (s_clientStarted) {
     DebuggerClient::Stop();
   }
@@ -65,14 +68,9 @@ void Debugger::RegisterSandbox(const DSandboxInfo &sandbox) {
   s_debugger.registerSandbox(sandbox);
 }
 
-void Debugger::UnregisterSandbox(CStrRef id) {
+void Debugger::UnregisterSandbox(const String& id) {
   TRACE(2, "Debugger::UnregisterSandbox\n");
   s_debugger.unregisterSandbox(id.get());
-}
-
-void Debugger::RegisterThread() {
-  TRACE(2, "Debugger::RegisterThread\n");
-  s_debugger.registerThread();
 }
 
 DebuggerProxyPtr Debugger::CreateProxy(SmartPtr<Socket> socket, bool local) {
@@ -91,8 +89,8 @@ int Debugger::CountConnectedProxy() {
 }
 
 DebuggerProxyPtr Debugger::GetProxy() {
-  TRACE(2, "Debugger::GetProxy\n");
-  CStrRef sandboxId = g_context->getSandboxId();
+  TRACE(7, "Debugger::GetProxy\n");
+  const String& sandboxId = g_context->getSandboxId();
   return s_debugger.findProxy(sandboxId.get());
 }
 
@@ -103,7 +101,8 @@ bool Debugger::SwitchSandbox(DebuggerProxyPtr proxy,
   return s_debugger.switchSandbox(proxy, newId, force);
 }
 
-void Debugger::GetRegisteredSandboxes(DSandboxInfoPtrVec &sandboxes) {
+void Debugger::GetRegisteredSandboxes(
+    std::vector<DSandboxInfoPtr> &sandboxes) {
   TRACE(2, "Debugger::GetRegisteredSandboxes\n");
   s_debugger.getSandboxes(sandboxes);
 }
@@ -118,18 +117,16 @@ void Debugger::RequestInterrupt(DebuggerProxyPtr proxy) {
   s_debugger.requestInterrupt(proxy);
 }
 
-void Debugger::RetireDummySandboxThread(DummySandbox* toRetire) {
-  TRACE(2, "Debugger::RetireDummySandboxThread\n");
-  s_debugger.retireDummySandboxThread(toRetire);
+void Debugger::RetireProxy(DebuggerProxyPtr proxy) {
+  s_debugger.retireProxy(proxy);
 }
 
-void Debugger::CleanupDummySandboxThreads() {
-  TRACE(7, "Debugger::CleanupDummySandboxThreads\n");
-  s_debugger.cleanupDummySandboxThreads();
+void Debugger::CleanupRetiredProxies() {
+  s_debugger.cleanupRetiredProxies();
 }
 
 void Debugger::DebuggerSession(const DebuggerClientOptions& options,
-                               const std::string& file, bool restart) {
+                                bool restart) {
   TRACE(2, "Debugger::DebuggerSession: restart=%d\n", restart);
   if (options.extension.empty()) {
     // even if it's empty, still need to call for warmup
@@ -141,14 +138,14 @@ void Debugger::DebuggerSession(const DebuggerClientOptions& options,
   ti->m_reqInjectionData.setDebugger(true);
   if (!restart) {
     DebuggerDummyEnv dde;
-    Debugger::InterruptSessionStarted(file.c_str());
+    Debugger::InterruptSessionStarted(options.fileName.c_str());
   }
-  if (!file.empty()) {
-    hphp_invoke_simple(file);
+  if (!options.fileName.empty()) {
+    hphp_invoke_simple(options.fileName);
   }
   {
     DebuggerDummyEnv dde;
-    Debugger::InterruptSessionEnded(file.c_str());
+    Debugger::InterruptSessionEnded(options.fileName.c_str());
   }
 }
 
@@ -162,7 +159,7 @@ void Debugger::LogShutdown(ShutdownKind shutdownKind) {
     for (const auto& proxyEntry: s_debugger.m_proxyMap) {
       auto sid = proxyEntry.first;
       auto proxy = proxyEntry.second;
-      auto dummySid = StringData::GetStaticString(proxy->getDummyInfo().id());
+      auto dummySid = makeStaticString(proxy->getDummyInfo().id());
       if (sid != dummySid) {
         auto sandbox = proxy->getSandbox();
         if (sandbox.valid()) {
@@ -180,6 +177,7 @@ void Debugger::InterruptSessionStarted(const char *file,
                                        const char *error /* = NULL */) {
   TRACE(2, "Debugger::InterruptSessionStarted\n");
   ThreadInfo::s_threadInfo->m_reqInjectionData.setDebugger(true);
+  s_debugger.registerThread(); // Register this thread as being debugged
   Interrupt(SessionStarted, file, nullptr, error);
 }
 
@@ -199,6 +197,7 @@ void Debugger::InterruptWithUrl(int type, const char *url) {
 void Debugger::InterruptRequestStarted(const char *url) {
   TRACE(2, "Debugger::InterruptRequestStarted\n");
   if (ThreadInfo::s_threadInfo->m_reqInjectionData.getDebugger()) {
+    s_debugger.registerThread(); // Register this thread as being debugged
     InterruptWithUrl(RequestStarted, url);
   }
 }
@@ -208,7 +207,7 @@ void Debugger::InterruptRequestEnded(const char *url) {
   if (ThreadInfo::s_threadInfo->m_reqInjectionData.getDebugger()) {
     InterruptWithUrl(RequestEnded, url);
   }
-  CStrRef sandboxId = g_context->getSandboxId();
+  const String& sandboxId = g_context->getSandboxId();
   s_debugger.unregisterSandbox(sandboxId.get());
 }
 
@@ -275,7 +274,7 @@ void Debugger::Interrupt(int type, const char *program,
 // as "BreakPointReached". Currently this results in spurious work in the
 // debugger.
 void Debugger::InterruptVMHook(int type /* = BreakPointReached */,
-                               CVarRef e /* = null_variant */) {
+                               const Variant& e /* = null_variant */) {
   TRACE(2, "Debugger::InterruptVMHook\n");
   // Computing the interrupt site here pulls in more data from the Unit to
   // describe the current execution point.
@@ -296,7 +295,7 @@ void Debugger::SetTextColors() {
   s_stderr_color = ANSI_COLOR_RED;
 }
 
-String Debugger::ColorStdout(CStrRef s) {
+String Debugger::ColorStdout(const String& s) {
   TRACE(2, "Debugger::ColorStdout\n");
   if (s_stdout_color) {
     return String(s_stdout_color) + s + String(ANSI_COLOR_END);
@@ -304,7 +303,7 @@ String Debugger::ColorStdout(CStrRef s) {
   return s;
 }
 
-String Debugger::ColorStderr(CStrRef s) {
+String Debugger::ColorStderr(const String& s) {
   TRACE(2, "Debugger::ColorStderr\n");
   if (s_stderr_color) {
     return String(s_stderr_color) + s + String(ANSI_COLOR_END);
@@ -314,16 +313,26 @@ String Debugger::ColorStderr(CStrRef s) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+// The flag for this is in the VM's normal ThreadInfo, but we don't
+// have a way to get that given just a tid. Use our own map to find it
+// and answer the question.
 bool Debugger::isThreadDebugging(int64_t tid) {
-  TRACE(2, "Debugger::isThreadDebugging\n");
+  TRACE(2, "Debugger::isThreadDebugging tid=%" PRIx64 "\n", tid);
   ThreadInfoMap::const_accessor acc;
   if (m_threadInfos.find(acc, tid)) {
     ThreadInfo* ti = acc->second;
-    return (ti->m_reqInjectionData.getDebugger());
+    auto isDebugging = ti->m_reqInjectionData.getDebugger();
+    TRACE(2, "Is thread debugging? %d\n", isDebugging);
+    return isDebugging;
   }
+  TRACE(2, "Thread was never registered, assuming it is not debugging\n");
   return false;
 }
 
+// Remeber this thread's VM ThreadInfo so we can find it later via
+// isThreadDebugging(). This is called when a thread interrupts for
+// either session- or request-started, as these each signal the start
+// of debugging for request and other threads.
 void Debugger::registerThread() {
   TRACE(2, "Debugger::registerThread\n");
   ThreadInfo* ti = ThreadInfo::s_threadInfo.getNoCheck();
@@ -335,7 +344,7 @@ void Debugger::registerThread() {
 
 void Debugger::addOrUpdateSandbox(const DSandboxInfo &sandbox) {
   TRACE(2, "Debugger::addOrUpdateSandbox\n");
-  const StringData* sd = StringData::GetStaticString(sandbox.id());
+  const StringData* sd = makeStaticString(sandbox.id());
   SandboxMap::accessor acc;
   if (m_sandboxMap.insert(acc, sd)) {
     DSandboxInfoPtr sb(new DSandboxInfo());
@@ -346,7 +355,7 @@ void Debugger::addOrUpdateSandbox(const DSandboxInfo &sandbox) {
   }
 }
 
-void Debugger::getSandboxes(DSandboxInfoPtrVec &sandboxes) {
+void Debugger::getSandboxes(std::vector<DSandboxInfoPtr> &sandboxes) {
   TRACE(2, "Debugger::getSandboxes\n");
   sandboxes.reserve(m_sandboxMap.size());
   for (SandboxMap::const_iterator iter =
@@ -368,7 +377,7 @@ void Debugger::registerSandbox(const DSandboxInfo &sandbox) {
   addOrUpdateSandbox(sandbox);
 
   // add thread to m_sandboxThreadInfoMap
-  const StringData* sid = StringData::GetStaticString(sandbox.id());
+  const StringData* sid = makeStaticString(sandbox.id());
   ThreadInfo* ti = ThreadInfo::s_threadInfo.getNoCheck();
   {
     SandboxThreadInfoMap::accessor acc;
@@ -405,20 +414,25 @@ void Debugger::unregisterSandbox(const StringData* sandboxId) {
 
 #define FOREACH_SANDBOX_THREAD_END()    } } }                          \
 
-// Ask every thread in this proxy's sandbox and the dummy sandbox to "stop".
-// Gaining control of these threads is the intention... the mechanism is to
-// force them all to start interpreting all of their code in an effort to gain
-// control in phpDebuggerOpcodeHook().
+// Ask every thread in this proxy's sandbox and the dummy sandbox to
+// "stop".  Gaining control of these threads is the intention... the
+// mechanism is to force them all to start interpreting all of their
+// code in an effort to gain control in phpDebuggerOpcodeHook(). We
+// set the "debugger interrupt" flag to ensure we interpret code
+// rather than entering translated code, and we set the "debugger
+// signal" surprise flag to pop out of loops in translated code.
 void Debugger::requestInterrupt(DebuggerProxyPtr proxy) {
   TRACE(2, "Debugger::requestInterrupt\n");
-  const StringData* sid = StringData::GetStaticString(proxy->getSandboxId());
+  const StringData* sid = makeStaticString(proxy->getSandboxId());
   FOREACH_SANDBOX_THREAD_BEGIN(sid, ti)
     ti->m_reqInjectionData.setDebuggerIntr(true);
+    ti->m_reqInjectionData.setDebuggerSignalFlag();
   FOREACH_SANDBOX_THREAD_END()
 
-  sid = StringData::GetStaticString(proxy->getDummyInfo().id());
+  sid = makeStaticString(proxy->getDummyInfo().id());
   FOREACH_SANDBOX_THREAD_BEGIN(sid, ti)
     ti->m_reqInjectionData.setDebuggerIntr(true);
+    ti->m_reqInjectionData.setDebuggerSignalFlag();
   FOREACH_SANDBOX_THREAD_END()
 }
 
@@ -443,7 +457,7 @@ DebuggerProxyPtr Debugger::createProxy(SmartPtr<Socket> socket, bool local) {
     // this function on the floor. It also makes the proxy findable when we a
     // dummy sandbox thread needs to interrupt.
     const StringData* sid =
-      StringData::GetStaticString(proxy->getDummyInfo().id());
+      makeStaticString(proxy->getDummyInfo().id());
     assert(sid);
     ProxyMap::accessor acc;
     m_proxyMap.insert(acc, sid);
@@ -456,25 +470,35 @@ DebuggerProxyPtr Debugger::createProxy(SmartPtr<Socket> socket, bool local) {
   return proxy;
 }
 
-void Debugger::retireDummySandboxThread(DummySandbox* toRetire) {
-  TRACE(2, "Debugger::retireDummySandboxThread\n");
-  m_cleanupDummySandboxQ.push(toRetire);
+// Place the proxy onto the retired proxy queue. It will be cleaned up
+// and destroyed later by another thread.
+void Debugger::retireProxy(DebuggerProxyPtr proxy) {
+  TRACE(2, "Debugger::retireProxy %p\n", proxy.get());
+  m_retiredProxyQueue.push(proxy);
 }
 
-void Debugger::cleanupDummySandboxThreads() {
-  TRACE(7, "Debugger::cleanupDummySandboxThreads\n");
-  DummySandbox* ptr = nullptr;
-  while (m_cleanupDummySandboxQ.try_pop(ptr)) {
-    ptr->notify();
+// Cleanup any proxies in our retired proxy queue. We'll pull a proxy
+// out of the queue, ask it to cleanup which will wait for threads it
+// owns to exit, then drop our shared reference to it. That may
+// destroy the proxy here, or it may remain alive if there is a thread
+// still processing an interrupt with it since such threads have their
+// own shared reference.
+void Debugger::cleanupRetiredProxies() {
+  TRACE(7, "Debugger::cleanupRetiredProxies\n");
+  DebuggerProxyPtr proxy;
+  while (m_retiredProxyQueue.try_pop(proxy)) {
     try {
-      // we can't block the server for waiting
-      if (ptr->waitForEnd(1)) {
-        delete ptr;
-      } else {
-        Logger::Error("Dummy sandbox %p refused to stop", ptr);
+      // We give the proxy a short period of time to wait for any
+      // threads it owns. If it doesn't succeed, we put it back and
+      // try again later.
+      TRACE(2, "Cleanup proxy %p\n", proxy.get());
+      if (!proxy->cleanup(1)) {
+        TRACE(2, "Proxy %p has not stopped yet\n", proxy.get());
+        m_retiredProxyQueue.push(proxy);
       }
     } catch (Exception &e) {
-      Logger::Error("Dummy sandbox exception: " + e.getMessage());
+      Logger::Error("Exception during proxy %p retirement: %s",
+                    proxy.get(), e.getMessage().c_str());
     }
   }
 }
@@ -485,21 +509,21 @@ void Debugger::cleanupDummySandboxThreads() {
 void Debugger::removeProxy(DebuggerProxyPtr proxy) {
   TRACE(2, "Debugger::removeProxy\n");
   if (proxy->getSandbox().valid()) {
-    const StringData* sid = StringData::GetStaticString(proxy->getSandboxId());
+    const StringData* sid = makeStaticString(proxy->getSandboxId());
     setDebuggerFlag(sid, false);
     m_proxyMap.erase(sid);
   }
   const StringData* dummySid =
-    StringData::GetStaticString(proxy->getDummyInfo().id());
+    makeStaticString(proxy->getDummyInfo().id());
   m_proxyMap.erase(dummySid);
   // Clear the debugger blacklist PC upon last detach if JIT is used
   if (RuntimeOption::EvalJit && countConnectedProxy() == 0) {
-    Transl::Translator::Get()->clearDbgBL();
+    JIT::tx->clearDbgBL();
   }
 }
 
 DebuggerProxyPtr Debugger::findProxy(const StringData* sandboxId) {
-  TRACE(2, "Debugger::findProxy\n");
+  TRACE(7, "Debugger::findProxy\n");
   if (sandboxId) {
     ProxyMap::const_accessor acc;
     if (m_proxyMap.find(acc, sandboxId)) {
@@ -513,7 +537,7 @@ bool Debugger::switchSandbox(DebuggerProxyPtr proxy,
                              const std::string &newId,
                              bool force) {
   TRACE(2, "Debugger::switchSandbox\n");
-  const StringData* newSid = StringData::GetStaticString(newId);
+  const StringData* newSid = makeStaticString(newId);
   // Lock the proxy during the switch
   Lock l(proxy.get());
   if (proxy->getSandboxId() != newId) {
@@ -530,7 +554,7 @@ bool Debugger::switchSandbox(DebuggerProxyPtr proxy,
 bool Debugger::switchSandboxImpl(DebuggerProxyPtr proxy,
                                  const StringData* newSid,
                                  bool force) {
-  TRACE(2, "Debugger::switchSandboxImpln");
+  TRACE(2, "Debugger::switchSandboxImpl\n");
   // Take the new sandbox
   DebuggerProxyPtr otherProxy;
   {
@@ -553,14 +577,14 @@ bool Debugger::switchSandboxImpl(DebuggerProxyPtr proxy,
   if (proxy->getSandbox().valid()) {
     // Detach from the old sandbox
     const StringData* oldSid =
-      StringData::GetStaticString(proxy->getSandboxId());
+      makeStaticString(proxy->getSandboxId());
     setDebuggerFlag(oldSid, false);
     m_proxyMap.erase(oldSid);
   }
   setDebuggerFlag(newSid, true);
 
   if (otherProxy) {
-    otherProxy->forceQuit();
+    otherProxy->stop();
   }
 
   return true;
@@ -577,7 +601,7 @@ void Debugger::updateProxySandbox(DebuggerProxyPtr proxy,
     // don't have the sandbox on file yet. create a sandbox info with
     // no path for now. Sandbox path will be updated upon first request
     // with that sandbox arrives
-    DSandboxInfoPtr sb(new DSandboxInfo(sandboxId->toCPPString()));
+    DSandboxInfoPtr sb(new DSandboxInfo(sandboxId->toCppString()));
     proxy->updateSandbox(sb);
   }
 }
@@ -597,9 +621,10 @@ void Debugger::InitUsageLogging() {
   if (s_debugger.m_usageLogger) s_debugger.m_usageLogger->init();
 }
 
-void Debugger::UsageLog(const std::string &mode, const std::string &cmd,
-                        const std::string &data) {
-  if (s_debugger.m_usageLogger) s_debugger.m_usageLogger->log(mode, cmd, data);
+void Debugger::UsageLog(const std::string &mode, const std::string &sandboxId,
+                        const std::string &cmd, const std::string &data) {
+  if (s_debugger.m_usageLogger) s_debugger.m_usageLogger->log(mode, sandboxId,
+                                                              cmd, data);
 }
 
 const char *Debugger::InterruptTypeName(CmdInterrupt &cmd) {
@@ -618,33 +643,35 @@ const char *Debugger::InterruptTypeName(CmdInterrupt &cmd) {
   }
 }
 
-void Debugger::UsageLogInterrupt(const std::string &mode, CmdInterrupt &cmd) {
-  UsageLog(mode, "interrupt", InterruptTypeName(cmd));
+void Debugger::UsageLogInterrupt(const std::string &mode,
+                                 const std::string &sandboxId,
+                                 CmdInterrupt &cmd) {
+  UsageLog(mode, sandboxId, "interrupt", InterruptTypeName(cmd));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 DebuggerDummyEnv::DebuggerDummyEnv() {
   TRACE(2, "DebuggerDummyEnv::DebuggerDummyEnv\n");
-  g_vmContext->enterDebuggerDummyEnv();
+  g_context->enterDebuggerDummyEnv();
 }
 
 DebuggerDummyEnv::~DebuggerDummyEnv() {
   TRACE(2, "DebuggerDummyEnv::~DebuggerDummyEnv\n");
-  g_vmContext->exitDebuggerDummyEnv();
+  g_context->exitDebuggerDummyEnv();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 EvalBreakControl::EvalBreakControl(bool noBreak) {
   TRACE(2, "EvalBreakControl::EvalBreakControl\n");
-  m_noBreakSave = g_vmContext->m_dbgNoBreak;
-  g_vmContext->m_dbgNoBreak = noBreak;
+  m_noBreakSave = g_context->m_dbgNoBreak;
+  g_context->m_dbgNoBreak = noBreak;
 }
 
 EvalBreakControl::~EvalBreakControl() {
   TRACE(2, "EvalBreakControl::~EvalBreakControl\n");
-  g_vmContext->m_dbgNoBreak = m_noBreakSave;
+  g_context->m_dbgNoBreak = m_noBreakSave;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

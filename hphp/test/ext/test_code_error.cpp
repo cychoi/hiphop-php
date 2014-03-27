@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -656,21 +656,6 @@ bool TestCodeError::TestUnknownTraitMethod() {
   return true;
 }
 
-bool TestCodeError::TestInvalidAccessModifier() {
-  VE(InvalidAccessModifier,
-    "<?php\n"
-     "trait T1 {\n"
-     "  public function Func1() { }\n"
-     "}\n"
-     "class C {\n"
-     "  use T1 {\n"
-     "    T1::Func1 as static Func2;\n"
-     "  }\n"
-     "}\n");
-
-  return true;
-}
-
 bool TestCodeError::TestCyclicDependentTraits() {
   VE(CyclicDependentTraits,
      "<?php\n"
@@ -750,16 +735,34 @@ bool TestCodeError::TestInvalidYield() {
   WithOpt w0(Option::EnableHipHopSyntax);
 
   VE(InvalidYield, "<?php function f() { yield 1; return 2; }");
+  VE(InvalidYield, "<?php async function f() { await f(); yield 1; }");
   VE(InvalidYield, "<?php yield 1; }");
   VE(InvalidYield, "<?php class X { function __get() { yield 1; } }");
   VE(InvalidYield, "<?php class X { function X() { yield 1; } }");
   return true;
 }
 
+
+bool TestCodeError::TestInvalidAwait() {
+  WithOpt w0(Option::EnableHipHopSyntax);
+
+  VE(InvalidAwait, "<?php function f() { yield 1; await f(); }");
+  VE(InvalidAwait, "<?php await f(); }");
+  VE(InvalidAwait, "<?php class X { function __get() { await f(); } }");
+  VE(InvalidAwait, "<?php class X { function X() { await f(); } }");
+  return true;
+}
+
+
 bool TestCodeError::TestBadDefaultValueType() {
   WithOpt w0(Option::EnableHipHopSyntax);
 
   VE(BadDefaultValueType, "<?php class C { function f(int $i1 = array()) {} }");
   VE(BadDefaultValueType, "<?php function f(int $i1 = array()) {}");
+  return true;
+}
+
+bool TestCodeError::TestInvalidMethodDefinition() {
+  VE(InvalidMethodDefinition, "<?php interface I {public function f() {}}");
   return true;
 }

@@ -57,7 +57,7 @@ function idl_format_cpp_header($header) {
 #ifndef incl_${PREFIX}_${NAME}_H_
 #define incl_${PREFIX}_${NAME}_H_
 
-#include "hphp/runtime/base/base_includes.h"
+#include "hphp/runtime/base/base-includes.h"
 
 EOT
           );
@@ -267,7 +267,7 @@ function idl_format_extmap_header($map_header) {
   fprintf($f,
           <<<EOT
 
-#include <util/base.h>
+#include <util/deprecated/base.h>
 ///////////////////////////////////////////////////////////////////////////////
 
 extern "C" {

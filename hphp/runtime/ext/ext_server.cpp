@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -14,20 +14,25 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/ext/ext_server.h"
-#include "hphp/runtime/base/server/satellite_server.h"
-#include "hphp/runtime/base/server/pagelet_server.h"
-#include "hphp/runtime/base/server/xbox_server.h"
-#include "hphp/runtime/base/server/http_protocol.h"
-#include "hphp/runtime/base/runtime_option.h"
-#include "hphp/runtime/base/util/string_buffer.h"
-#include "hphp/runtime/base/server/rpc_request_handler.h"
+
+#include <boost/lexical_cast.hpp>
+
+#include "hphp/runtime/server/satellite-server.h"
+#include "hphp/runtime/server/pagelet-server.h"
+#include "hphp/runtime/server/xbox-server.h"
+#include "hphp/runtime/server/http-protocol.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/server/rpc-request-handler.h"
 
 #define DANGLING_HEADER "HPHP_DANGLING"
 
 namespace HPHP {
-IMPLEMENT_DEFAULT_EXTENSION(server);
+
+IMPLEMENT_DEFAULT_EXTENSION_VERSION(server, NO_EXTENSION_VERSION_YET);
+
 ///////////////////////////////////////////////////////////////////////////////
 // dangling server
 
@@ -48,8 +53,8 @@ bool f_dangling_server_proxy_old_request() {
     return false;
   }
 
-  string url = "http://localhost:" +
-    lexical_cast<string>(SatelliteServerInfo::DanglingServerPort) +
+  std::string url = "http://localhost:" +
+    boost::lexical_cast<std::string>(SatelliteServerInfo::DanglingServerPort) +
     transport->getServerObject();
 
   int code = 0;
@@ -67,39 +72,6 @@ bool f_dangling_server_proxy_old_request() {
   return true;
 }
 
-bool f_dangling_server_proxy_new_request(CStrRef host) {
-  if (host.empty()) {
-    raise_warning("proxy new request needs host name");
-    return false;
-  }
-
-  Transport *transport = g_context->getTransport();
-  if (transport == NULL) {
-    return false;
-  }
-  if (!transport->getHeader(DANGLING_HEADER).empty()) {
-    // if we are processing a dangling server request, do not do it again
-    return false;
-  }
-
-  string url = string("http://") + host.data() + ":" +
-    lexical_cast<string>(RuntimeOption::ServerPort) +
-    transport->getServerObject();
-
-  int code = 0;
-  std::string error;
-  StringBuffer response;
-  HeaderMap headers;
-  headers[DANGLING_HEADER].push_back("1");
-  if (!HttpProtocol::ProxyRequest(transport, false, url, code, error,
-                                  response, &headers)) {
-    return false;
-  }
-  transport->setResponse(code, "dangling_server_proxy_new_request");
-  echo(response.detach());
-  return true;
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // Pagelet Server
 
@@ -111,31 +83,35 @@ bool f_pagelet_server_is_enabled() {
   return PageletServer::Enabled();
 }
 
-static const StaticString s_Host("Host");
+const StaticString s_Host("Host");
 
-Object f_pagelet_server_task_start(CStrRef url,
-                                   CArrRef headers /* = null_array */,
-                                   CStrRef post_data /* = null_string */,
-                                   CArrRef files /* = null_array */) {
+Resource f_pagelet_server_task_start(const String& url,
+                                     const Array& headers /* = null_array */,
+                                     const String& post_data /* = null_string */,
+                                     const Array& files /* = null_array */) {
   String remote_host;
   Transport *transport = g_context->getTransport();
+  int timeout = ThreadInfo::s_threadInfo->m_reqInjectionData.getRemainingTime();
   if (transport) {
     remote_host = transport->getRemoteHost();
     if (!headers.exists(s_Host) && RuntimeOption::SandboxMode) {
       Array tmp = headers;
       tmp.set(s_Host, transport->getHeader("Host"));
-      return PageletServer::TaskStart(url, tmp, remote_host, post_data, files);
+      return PageletServer::TaskStart(url, tmp, remote_host,
+                                      post_data, files, timeout);
     }
   }
-  return PageletServer::TaskStart(url, headers, remote_host, post_data);
+  return PageletServer::TaskStart(url, headers, remote_host,
+                                  post_data, files, timeout);
 }
 
-int64_t f_pagelet_server_task_status(CObjRef task) {
+int64_t f_pagelet_server_task_status(const Resource& task) {
   return PageletServer::TaskStatus(task);
 }
 
-String f_pagelet_server_task_result(CObjRef task, VRefParam headers,
-                                    VRefParam code, int64_t timeout_ms /* = 0 */) {
+String f_pagelet_server_task_result(const Resource& task, VRefParam headers,
+                                    VRefParam code,
+                                    int64_t timeout_ms /* = 0 */) {
   Array rheaders;
   int rcode;
   String response = PageletServer::TaskResult(task, rheaders, rcode,
@@ -148,11 +124,12 @@ String f_pagelet_server_task_result(CObjRef task, VRefParam headers,
 void f_pagelet_server_flush() {
   ExecutionContext *context = g_context.getNoCheck();
   Transport *transport = context->getTransport();
-  if (transport && transport->getThreadType() == Transport::PageletThread) {
+  if (transport &&
+      transport->getThreadType() == Transport::ThreadType::PageletThread) {
     // this method is only meaningful in a pagelet thread
     context->obFlushAll();
     String content = context->obDetachContents();
-    string s(content.data(), content.size());
+    std::string s(content.data(), content.size());
     if (!s.empty()) {
       PageletServer::AddToPipeline(s);
     }
@@ -162,28 +139,33 @@ void f_pagelet_server_flush() {
 ///////////////////////////////////////////////////////////////////////////////
 // xbox
 
-bool f_xbox_send_message(CStrRef msg, VRefParam ret, int64_t timeout_ms,
-                         CStrRef host /* = "localhost" */) {
-  return XboxServer::SendMessage(msg, ret, timeout_ms, host);
+bool f_xbox_send_message(const String& msg,
+                         VRefParam retRef,
+                         int64_t timeout_ms,
+                         const String& host /* = "localhost" */) {
+  Array ret;
+  auto b = XboxServer::SendMessage(msg, ret, timeout_ms, host);
+  retRef = ret;
+  return b;
 }
 
-bool f_xbox_post_message(CStrRef msg, CStrRef host /* = "localhost" */) {
+bool f_xbox_post_message(const String& msg, const String& host /* = "localhost" */) {
   return XboxServer::PostMessage(msg, host);
 }
 
-Object f_xbox_task_start(CStrRef message) {
+Resource f_xbox_task_start(const String& message) {
   return XboxServer::TaskStart(message);
 }
 
-bool f_xbox_task_status(CObjRef task) {
+bool f_xbox_task_status(const Resource& task) {
   return XboxServer::TaskStatus(task);
 }
 
-int64_t f_xbox_task_result(CObjRef task, int64_t timeout_ms, VRefParam ret) {
+int64_t f_xbox_task_result(const Resource& task, int64_t timeout_ms, VRefParam ret) {
   return XboxServer::TaskResult(task, timeout_ms, ret);
 }
 
-Variant f_xbox_process_call_message(CStrRef msg) {
+Variant f_xbox_process_call_message(const String& msg) {
   Variant v = unserialize_from_string(msg);
   if (!v.isArray()) {
     raise_error("Error decoding xbox call message");
@@ -209,7 +191,7 @@ Variant f_xbox_process_call_message(CStrRef msg) {
 }
 
 int64_t f_xbox_get_thread_timeout() {
-  XboxServerInfoPtr server_info = XboxServer::GetServerInfo();
+  auto server_info = XboxServer::GetServerInfo();
   if (server_info) {
     return server_info->getMaxDuration();
   }
@@ -221,7 +203,7 @@ void f_xbox_set_thread_timeout(int timeout) {
     raise_warning("Cannot set timeout/duration to a negative number.");
     return;
   }
-  XboxServerInfoPtr server_info = XboxServer::GetServerInfo();
+  auto server_info = XboxServer::GetServerInfo();
   if (server_info) {
     server_info->setMaxDuration(timeout);
   } else {

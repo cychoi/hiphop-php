@@ -6,21 +6,21 @@
     ],
     "classes": [
         {
-            "name": "Vector",
+            "name": "HH\\Vector",
             "ifaces": [
                 "MutableVector"
             ],
             "desc": "An ordered collection where values are keyed using integers 0 thru n-1 in order.",
             "flags": [
                 "IsFinal",
-                "HasDocComment"
+                "IsCppSerializable",
+                "NoDefaultSweep"
             ],
             "footer": "\n private:\n  TypedValue* m_data;\n  int size;\n  int capacity;",
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns a Vector built from the values produced by the specified Iterable.",
                     "return": {
@@ -37,7 +37,6 @@
                 {
                     "name": "isEmpty",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if the Vector is empty, false otherwise.",
                     "return": {
@@ -49,7 +48,6 @@
                 {
                     "name": "count",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the number of values in the Vector.",
                     "return": {
@@ -61,7 +59,6 @@
                 {
                     "name": "items",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an Iterable that produces the values from this Vector.",
                     "return": {
@@ -73,9 +70,8 @@
                 {
                     "name": "keys",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an Iterable that produces the keys from this Vector.",
+                    "desc": "Returns a Vector built from the keys of this Vector.",
                     "return": {
                         "type": "Object"
                     },
@@ -83,9 +79,19 @@
                     ]
                 },
                 {
-                    "name": "view",
+                    "name": "values",
                     "flags": [
-                        "HasDocComment"
+                    ],
+                    "desc": "Returns a clone of this Vector.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "lazy",
+                    "flags": [
                     ],
                     "desc": "Returns a lazy iterable view of this Vector.",
                     "return": {
@@ -97,7 +103,6 @@
                 {
                     "name": "kvzip",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an Iterable that produces the key\/value pairs from this Vector.",
                     "return": {
@@ -109,7 +114,6 @@
                 {
                     "name": "at",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the value at the specified key. If the key is not present, an exception is thrown.",
                     "return": {
@@ -125,7 +129,6 @@
                 {
                     "name": "get",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the value at the specified key. If the key is not present, null is returned.",
                     "return": {
@@ -141,7 +144,6 @@
                 {
                     "name": "set",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Stores a value into the Vector with the specified key, overwriting any previous value that was associated with the key; if the key is outside the bounds of the Vector, an exception is thrown.",
                     "return": {
@@ -161,7 +163,6 @@
                 {
                     "name": "setAll",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Stores each value produced by the specified KeyedIterable into the Vector using its corresponding key, overwriting any previous value that was associated with that key; if the key is outside the bounds of the Vector, an exception is thrown.",
                     "return": {
@@ -175,29 +176,8 @@
                     ]
                 },
                 {
-                    "name": "put",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Stores a value into the Vector with the specified key, overwriting any previous value that was associated with the key. If the key is outside the bounds of the Vector, an exception is thrown.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "key",
-                            "type": "Variant"
-                        },
-                        {
-                            "name": "value",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
                     "name": "clear",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Removes all values from the Vector.",
                     "return": {
@@ -209,7 +189,6 @@
                 {
                     "name": "contains",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if the specified key is present in the Vector, returns false otherwise.",
                     "return": {
@@ -225,7 +204,6 @@
                 {
                     "name": "containsKey",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if the specified key is present in the Vector, returns false otherwise.",
                     "return": {
@@ -241,7 +219,6 @@
                 {
                     "name": "removeKey",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Removes the element with the specified key from this Vector and renumbers the keys of all subsequent elements.",
                     "return": {
@@ -257,7 +234,6 @@
                 {
                     "name": "append",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Object"
@@ -272,7 +248,6 @@
                 {
                     "name": "add",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Adds the specified value to the end of this Vector using the next available integer key.",
                     "return": {
@@ -288,7 +263,6 @@
                 {
                     "name": "addAll",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Adds the values produced by the specified Iterable to the end of this Vector using the next available integer keys.",
                     "return": {
@@ -304,7 +278,6 @@
                 {
                     "name": "pop",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -315,7 +288,6 @@
                 {
                     "name": "resize",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -334,7 +306,6 @@
                 {
                     "name": "reserve",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -349,7 +320,105 @@
                 {
                     "name": "toArray",
                     "flags": [
-                        "HasDocComment"
+                    ],
+                    "desc": "Returns an array built from the values from this Vector.",
+                    "return": {
+                        "type": "VariantMap"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a copy of this Vector.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+		            {
+                    "name": "toImmVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmVector built from the values of this Vector.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "immutable",
+                    "flags": [
+                    ],
+                    "desc": "Returns an immutable version of this collection.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toMap",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Map built from the keys and values of this Vector.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toImmMap",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmMap built from the keys and values of this Vector.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toSet",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Set built from the values of this Vector.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toImmSet",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmSet built from the values of this Vector.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toKeysArray",
+                    "flags": [
+                    ],
+                    "desc": "Returns an array built from the keys from this Vector.",
+                    "return": {
+                        "type": "VariantMap"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toValuesArray",
+                    "flags": [
                     ],
                     "desc": "Returns an array built from the values from this Vector.",
                     "return": {
@@ -361,7 +430,6 @@
                 {
                     "name": "getIterator",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an iterator that points to beginning of this Vector.",
                     "return": {
@@ -373,9 +441,23 @@
                 {
                     "name": "map",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a KeyedIterable of the values produced by applying the specified callback on the values of this Vector.",
+                    "desc": "Returns a Vector of the values produced by applying the specified callback on each value from this Vector.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "mapWithKey",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector of the values produced by applying the specified callback on each key and value from this Vector.",
                     "return": {
                         "type": "Object"
                     },
@@ -389,9 +471,23 @@
                 {
                     "name": "filter",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a KeyedIterable of all the values from this Vector for which the specified callback returns true.",
+                    "desc": "Returns a Vector of all the values from this Vector for which the specified callback returns true.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "filterWithKey",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector of all the values from this Vector for which the specified callback returns true.",
                     "return": {
                         "type": "Object"
                     },
@@ -405,7 +501,6 @@
                 {
                     "name": "zip",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns a KeyedIterable produced by combined the specified Iterables pair-wise.",
                     "return": {
@@ -419,26 +514,68 @@
                     ]
                 },
                 {
-                    "name": "sort",
+                    "name": "take",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Uses the specified Collator to sort the Vector in place.",
+                    "desc": "Returns a Vector containing the first n values of this Vector.",
                     "return": {
-                        "type": null
+                        "type": "Object"
                     },
                     "args": [
                         {
-                            "name": "col",
-                            "type": "Variant",
-                            "value": "null"
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "takeWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector containing the values of this Vector up to but not including the first value that produces false when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skip",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector containing all the values except the first n of this Vector.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skipWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector containing the values of this Vector excluding the first values that produces true when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "fn",
+                            "type": "Variant"
                         }
                     ]
                 },
                 {
                     "name": "reverse",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Reverses the values of the Vector in place.",
                     "return": {
@@ -450,7 +587,6 @@
                 {
                     "name": "splice",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Splices the values of the Vector in place (see the documentation for array_splice() on php.net for more details.",
                     "return": {
@@ -476,7 +612,6 @@
                 {
                     "name": "linearSearch",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns index of the specified value if it is present, -1 otherwise.",
                     "return": {
@@ -492,7 +627,6 @@
                 {
                     "name": "shuffle",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Shuffles the values of the Vector randomly in place.",
                     "return": {
@@ -514,7 +648,6 @@
                 {
                     "name": "__get",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -529,7 +662,6 @@
                 {
                     "name": "__set",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -548,7 +680,6 @@
                 {
                     "name": "__isset",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean"
@@ -563,7 +694,6 @@
                 {
                     "name": "__unset",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -578,8 +708,7 @@
                 {
                     "name": "fromItems",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "desc": "Returns a Vector built from the values produced by the specified Iterable.",
                     "return": {
@@ -595,8 +724,7 @@
                 {
                     "name": "fromArray",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "desc": "Returns a Vector built from the values from the specified array.",
                     "return": {
@@ -610,27 +738,9 @@
                     ]
                 },
                 {
-                    "name": "fromVector",
-                    "flags": [
-                        "IsStatic",
-                        "HasDocComment"
-                    ],
-                    "desc": "Returns a copy of the specified Vector.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "vec",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
                     "name": "slice",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "desc": "Returns a Vector built from the specified slice of values from the specified Vector.",
                     "return": {
@@ -657,14 +767,507 @@
             ]
         },
         {
+          "name": "HH\\ImmVector",
+          "ifaces": [
+            "ConstVector"
+          ],
+          "desc": "An immutable ordered collection where values are keyed using integers 0 thru n-1 in order.",
+          "flags": [
+            "IsFinal",
+            "IsCppSerializable",
+            "NoDefaultSweep"
+          ],
+          "funcs": [
+            {
+                "name": "__construct",
+                "flags": [
+                ],
+                "desc": "Returns a ImmVector built from the values produced by the specified Iterable.",
+                "return": {
+                    "type": null
+                },
+                "args": [
+                    {
+                        "name": "iterable",
+                        "type": "Variant",
+                        "value": "null"
+                    }
+                ]
+            },
+            {
+                  "name": "isEmpty",
+                  "flags": [
+                  ],
+                  "desc": "Returns true if the ImmVector is empty, false otherwise.",
+                  "return": {
+                      "type": "Boolean"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "count",
+                  "flags": [
+                  ],
+                  "desc": "Returns the number of values in the ImmVector.",
+                  "return": {
+                      "type": "Int64"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "items",
+                  "flags": [
+                  ],
+                  "desc": "Returns an Iterable that produces the values from this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "containsKey",
+                  "flags": [
+                  ],
+                  "desc": "Returns true if the specified key is present in the ImmVector, returns false otherwise.",
+                  "return": {
+                      "type": "Boolean"
+                  },
+                  "args": [
+                      {
+                          "name": "key",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "at",
+                  "flags": [
+                  ],
+                  "desc": "Returns the value at the specified key. If the key is not present, an exception is thrown.",
+                  "return": {
+                      "type": "Variant"
+                  },
+                  "args": [
+                      {
+                          "name": "key",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "get",
+                  "flags": [
+                  ],
+                  "desc": "Returns the value at the specified key. If the key is not present, null is returned.",
+                  "return": {
+                      "type": "Variant"
+                  },
+                  "args": [
+                      {
+                          "name": "key",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "getIterator",
+                  "flags": [
+                  ],
+                  "desc": "Returns an iterator that points to beginning of this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "map",
+                  "flags": [
+                  ],
+                  "desc": "Returns a Vector of the values produced by applying the specified callback on each value from this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                      {
+                          "name": "callback",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                 "name": "mapWithKey",
+                 "flags": [
+                  ],
+                  "desc": "Returns a Vector of the values produced by applying the specified callback on each key and value from this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                      {
+                          "name": "callback",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "filter",
+                  "flags": [
+                  ],
+                  "desc": "Returns a Vector of all the values from this ImmVector for which the specified callback returns true.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                    {
+                        "name": "callback",
+                        "type": "Variant"
+                    }
+                  ]
+              },
+              {
+                  "name": "filterWithKey",
+                  "flags": [
+                  ],
+                  "desc": "Returns a Vector of all the values from this ImmVector for which the specified callback returns true.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                      {
+                          "name": "callback",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "zip",
+                  "flags": [
+                  ],
+                  "desc": "Returns a KeyedIterable produced by combined the specified Iterables pair-wise.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                      {
+                          "name": "iterable",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "take",
+                  "flags": [
+                  ],
+                  "desc": "Returns a ImmVector containing the first n values of this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                      {
+                          "name": "n",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "takeWhile",
+                  "flags": [
+                  ],
+                  "desc": "Returns a ImmVector containing the values of this ImmVector up to but not including the first value that produces false when passed to the specified callback.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                      {
+                          "name": "callback",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "skip",
+                  "flags": [
+                  ],
+                  "desc": "Returns a ImmVector containing all values except the first n of this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                      {
+                          "name": "n",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "skipWhile",
+                  "flags": [
+                  ],
+                  "desc": "Returns a ImmVector containing the values of this ImmVector excluding the first values that produces true when passed to the specified callback.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                      {
+                          "name": "fn",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "kvzip",
+                  "flags": [
+                  ],
+                  "desc": "Returns an Iterable that produces the key\/value pairs from this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "keys",
+                  "flags": [
+                  ],
+                  "desc": "Returns an Iterable that produces the keys from this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "__toString",
+                  "return": {
+                      "type": "String"
+                  },
+                  "flags": [
+                  ],
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "__get",
+                  "flags": [
+                  ],
+                  "return": {
+                      "type": "Variant"
+                  },
+                  "args": [
+                      {
+                          "name": "name",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "__set",
+                  "flags": [
+                  ],
+                  "return": {
+                      "type": "Variant"
+                  },
+                  "args": [
+                      {
+                          "name": "name",
+                          "type": "Variant"
+                      },
+                      {
+                          "name": "value",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "__isset",
+                  "flags": [
+                  ],
+                  "return": {
+                      "type": "Boolean"
+                  },
+                  "args": [
+                      {
+                          "name": "name",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "__unset",
+                  "flags": [
+                  ],
+                  "return": {
+                      "type": "Variant"
+                  },
+                  "args": [
+                      {
+                          "name": "name",
+                          "type": "Variant"
+                      }
+                  ]
+              },
+              {
+                  "name": "toVector",
+                  "flags": [
+                  ],
+                  "desc": "Returns a Vector built from the values of this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "toImmVector",
+                  "flags": [
+                  ],
+                  "desc": "Returns an immutable version of this collection.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "toMap",
+                  "flags": [
+                  ],
+                  "desc": "Returns a Map built from the keys and values of this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "toImmMap",
+                  "flags": [
+                  ],
+                  "desc": "Returns a ImmMap built from the keys and values of this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "toSet",
+                  "flags": [
+                  ],
+                  "desc": "Returns a Set built from the values of this ImmVector.",
+                  "return": {
+                      "type": "Object"
+                  },
+                  "args": [
+                  ]
+             },
+             {
+                 "name": "toImmSet",
+                 "flags": [
+                 ],
+                  "desc": "Returns a ImmSet built from the values of this ImmVector.",
+                 "return": {
+                     "type": "Object"
+                 },
+                 "args": [
+                 ]
+             },
+             {
+                 "name": "immutable",
+                 "flags": [
+                 ],
+                 "desc": "Returns an immutable version of this collection.",
+                 "return": {
+                     "type": "Object"
+                 },
+                 "args": [
+                 ]
+             },
+             {
+                 "name": "values",
+                 "flags": [
+                 ],
+                 "desc": "Returns a clone of this ImmVector.",
+                 "return": {
+                     "type": "Object"
+                 },
+                 "args": [
+                 ]
+             },
+             {
+                 "name": "lazy",
+                 "flags": [
+                 ],
+                 "desc": "Returns a lazy iterable view of this ImmVector.",
+                 "return": {
+                     "type": "Object"
+                 },
+                 "args": [
+                 ]
+             },
+             {
+                 "name": "toArray",
+                  "flags": [
+                  ],
+                  "desc": "Returns an array built from the values from this ImmVector.",
+                  "return": {
+                      "type": "VariantMap"
+                  },
+                  "args": [
+                  ]
+             },
+             {
+                  "name": "toKeysArray",
+                  "flags": [
+                  ],
+                  "desc": "Returns an array built from the keys from this ImmVector.",
+                  "return": {
+                      "type": "VariantMap"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "toValuesArray",
+                  "flags": [
+                  ],
+                  "desc": "Returns an array built from the values from this ImmVector.",
+                  "return": {
+                      "type": "VariantMap"
+                  },
+                  "args": [
+                  ]
+              },
+              {
+                  "name": "linearSearch",
+                  "flags": [
+                  ],
+                  "desc": "Returns index of the specified value if it is present, -1 otherwise.",
+                  "return": {
+                      "type": "Int64"
+                  },
+                  "args": [
+                      {
+                          "name": "search_value",
+                          "type": "Variant"
+                      }
+                  ]
+              }
+            ]
+        },
+        {
             "name": "VectorIterator",
             "ifaces": [
-                "KeyedIterator"
+                "HH\\KeyedIterator"
             ],
-            "desc": "An iterator implementation for iterating over a Vector.",
+            "desc": "An iterator implementation for iterating over a Vector\/ImmVector.",
             "flags": [
                 "IsFinal",
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
@@ -681,7 +1284,6 @@
                     "name": "current",
                     "desc": "Returns the current value that the iterator points to.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -693,7 +1295,6 @@
                     "name": "key",
                     "desc": "Returns the current key that the iterator points to.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -705,7 +1306,6 @@
                     "name": "valid",
                     "desc": "Returns true if the iterator points to a valid value, returns false otherwise.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean"
@@ -717,7 +1317,6 @@
                     "name": "next",
                     "desc": "Advance this iterator forward one position.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -729,7 +1328,6 @@
                     "name": "rewind",
                     "desc": "Move this iterator back to the first position.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -742,20 +1340,20 @@
             ]
         },
         {
-            "name": "Map",
+            "name": "HH\\Map",
             "ifaces": [
                 "MutableMap"
             ],
-            "desc": "An unordered dictionary-style collection.",
+            "desc": "An ordered dictionary-style collection.",
             "flags": [
                 "IsFinal",
-                "HasDocComment"
+                "IsCppSerializable",
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns a Map built from the keys and values produced by the specified KeyedIterable.",
                     "return": {
@@ -772,7 +1370,6 @@
                 {
                     "name": "isEmpty",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if the Map is empty, false otherwise.",
                     "return": {
@@ -784,7 +1381,6 @@
                 {
                     "name": "count",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the number of key\/value pairs in the Map.",
                     "return": {
@@ -796,7 +1392,6 @@
                 {
                     "name": "items",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an Iterable that produces the key\/value Pairs from this Map.",
                     "return": {
@@ -808,9 +1403,8 @@
                 {
                     "name": "keys",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an Iterable that produces the keys from this Map.",
+                    "desc": "Returns a Vector built from the keys of this Map.",
                     "return": {
                         "type": "Object"
                     },
@@ -818,9 +1412,8 @@
                     ]
                 },
                 {
-                    "name": "view",
+                    "name": "lazy",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns a lazy iterable view of this Map.",
                     "return": {
@@ -832,7 +1425,6 @@
                 {
                     "name": "kvzip",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an Iterable that produces the key\/value pairs from this Map.",
                     "return": {
@@ -844,7 +1436,6 @@
                 {
                     "name": "at",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the value at the specified key. If the key is not present, an exception is thrown.",
                     "return": {
@@ -860,7 +1451,6 @@
                 {
                     "name": "get",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the value at the specified key. If the key is not present, null is returned.",
                     "return": {
@@ -876,7 +1466,6 @@
                 {
                     "name": "set",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Stores a value into the Map with the specified key, overwriting any previous value that was associated with the key.",
                     "return": {
@@ -896,7 +1485,6 @@
                 {
                     "name": "setAll",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Stores each value produced by the specified KeyedIterable into the Map using its corresponding key, overwriting any previous value that was associated with that key.",
                     "return": {
@@ -910,29 +1498,8 @@
                     ]
                 },
                 {
-                    "name": "put",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Stores a value into the Map with the specified key, overwriting any previous value that was associated with the key.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "key",
-                            "type": "Variant"
-                        },
-                        {
-                            "name": "value",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
                     "name": "clear",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Removes all key\/value pairs from the Map.",
                     "return": {
@@ -944,7 +1511,6 @@
                 {
                     "name": "contains",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if the specified key is present in the Map, false otherwise.",
                     "return": {
@@ -960,7 +1526,6 @@
                 {
                     "name": "containsKey",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if the specified key is present in the Map, false otherwise.",
                     "return": {
@@ -976,7 +1541,6 @@
                 {
                     "name": "remove",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Removes the specified key from this Map.",
                     "return": {
@@ -992,23 +1556,6 @@
                 {
                     "name": "removeKey",
                     "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Removes the specified key from this Map.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "key",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "discard",
-                    "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Removes the specified key from this Map.",
                     "return": {
@@ -1024,7 +1571,6 @@
                 {
                     "name": "add",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Adds the specified key\/value Pair to this Map. If an element with the same key is already present, an exception is thrown.",
                     "return": {
@@ -1040,7 +1586,6 @@
                 {
                     "name": "addAll",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Adds the key\/value Pairs produced by the specified Iterable to this Map.",
                     "return": {
@@ -1056,7 +1601,6 @@
                 {
                     "name": "toArray",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an array built from the keys and values from this Map.",
                     "return": {
@@ -1066,13 +1610,89 @@
                     ]
                 },
                 {
-                    "name": "copyAsArray",
+                    "name": "toVector",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an array built from the keys and values from this Map.",
+                    "desc": "Returns a Vector built from the values of this Map.",
                     "return": {
-                        "type": "VariantMap"
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+		            {
+                    "name": "toImmVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmVector built from the values of this Map.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toMap",
+                    "flags": [
+                    ],
+                    "desc": "Returns a copy of this Map.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toImmMap",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmMap built from the keys and values of this Map.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toSet",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Set built from the values of this Map.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toImmSet",
+                    "flags": [
+                    ],
+                     "desc": "Returns a ImmSet built from the values of this Map.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "immutable",
+                    "flags": [
+                    ],
+                    "desc": "Returns an immutable version of this collection.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "values",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector built from the values of this Map.",
+                    "return": {
+                        "type": "Object"
                     },
                     "args": [
                     ]
@@ -1080,7 +1700,6 @@
                 {
                     "name": "toKeysArray",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an array built from the keys from this Map.",
                     "return": {
@@ -1090,21 +1709,8 @@
                     ]
                 },
                 {
-                    "name": "values",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Returns a Vector built from the values from this Map.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                    ]
-                },
-                {
                     "name": "toValuesArray",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an array built from the values from this Map.",
                     "return": {
@@ -1114,41 +1720,8 @@
                     ]
                 },
                 {
-                    "name": "updateFromArray",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Inserts the keys and values from the specified array into this Map.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "arr",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "updateFromIterable",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Inserts the keys and values produced by the specified KeyedIterable.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "it",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
                     "name": "differenceByKey",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Object"
@@ -1163,7 +1736,6 @@
                 {
                     "name": "getIterator",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an iterator that points to beginning of this Map.",
                     "return": {
@@ -1175,9 +1747,23 @@
                 {
                     "name": "map",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a KeyedIterable of the values produced by applying the specified callback on the values of this Map.",
+                    "desc": "Returns a Map of the keys/values produced by applying the specified callback on each value from this Map.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "mapWithKey",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Map of the keys/values produced by applying the specified callback on each key and value from this Map.",
                     "return": {
                         "type": "Object"
                     },
@@ -1191,9 +1777,53 @@
                 {
                     "name": "filter",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a KeyedIterable of all the values from this Map for which the specified callback returns true.",
+                    "desc": "Returns a new Map of all the keys/values from this Map for which the specified callback returns true.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "filterWithKey",
+                    "flags": [
+                    ],
+                    "desc": "Returns a new Map of all the keys/values from this Map for which the specified callback returns true.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "retain",
+                    "flags": [
+                    ],
+                    "desc": "Ensures that this Map contains only keys/values for which the specified callback returns true when passed the value.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "retainWithKey",
+                    "flags": [
+                    ],
+                    "desc": "Ensures that this Map contains only keys/values for which the specified callback returns true when passed the key and the value.",
                     "return": {
                         "type": "Object"
                     },
@@ -1207,7 +1837,6 @@
                 {
                     "name": "zip",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns a KeyedIterable produced by combined the specified Iterables pair-wise.",
                     "return": {
@@ -1216,6 +1845,66 @@
                     "args": [
                         {
                             "name": "iterable",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "take",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Map containing the first n key/value pairs of this Map.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "takeWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Map containing the key/value pairs of this Map up to but not including the first value that produces false when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skip",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Map containing all key/value pairs except the first n of this Map.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skipWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Map containing the key/value pairs of this Map excluding the first values that produces true when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "fn",
                             "type": "Variant"
                         }
                     ]
@@ -1233,7 +1922,6 @@
                 {
                     "name": "__get",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -1248,7 +1936,6 @@
                 {
                     "name": "__set",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -1267,7 +1954,6 @@
                 {
                     "name": "__isset",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean"
@@ -1282,7 +1968,6 @@
                 {
                     "name": "__unset",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -1297,8 +1982,7 @@
                 {
                     "name": "fromItems",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "desc": "Returns a Map built from the key\/value Pairs produced by the specified Iterable.",
                     "return": {
@@ -1314,8 +1998,7 @@
                 {
                     "name": "fromArray",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "desc": "Returns a Map built from the keys and values from the specified array.",
                     "return": {
@@ -1327,130 +2010,28 @@
                             "type": "Variant"
                         }
                     ]
-                },
-                {
-                    "name": "fromIterable",
-                    "flags": [
-                        "IsStatic",
-                        "HasDocComment"
-                    ],
-                    "desc": "Returns a Map built from the keys and values produced by the specified KeyedIterable.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "mp",
-                            "type": "Variant"
-                        }
-                    ]
                 }
             ],
             "consts": [
             ]
         },
         {
-            "name": "MapIterator",
+            "name": "HH\\ImmMap",
             "ifaces": [
-                "KeyedIterator"
+                "ConstMap"
             ],
-            "desc": "An iterator implementation for iterating over a Map.",
+            "desc": "An immutable ordered dictionary-style collection.",
             "flags": [
                 "IsFinal",
-                "HasDocComment"
-            ],
-            "funcs": [
-                {
-                    "name": "__construct",
-                    "return": {
-                        "type": null
-                    },
-                    "flags": [
-                    ],
-                    "args": [
-                    ]
-                },
-                {
-                    "name": "current",
-                    "desc": "Returns the current value that the iterator points to.",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "return": {
-                        "type": "Variant"
-                    },
-                    "args": [
-                    ]
-                },
-                {
-                    "name": "key",
-                    "desc": "Returns the current key that the iterator points to.",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "return": {
-                        "type": "Variant"
-                    },
-                    "args": [
-                    ]
-                },
-                {
-                    "name": "valid",
-                    "desc": "Returns true if the iterator points to a valid value, returns false otherwise.",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "return": {
-                        "type": "Boolean"
-                    },
-                    "args": [
-                    ]
-                },
-                {
-                    "name": "next",
-                    "desc": "Advance this iterator forward one position.",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                },
-                {
-                    "name": "rewind",
-                    "desc": "Move this iterator back to the first position.",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                }
-            ],
-            "consts": [
-            ]
-        },
-        {
-            "name": "StableMap",
-            "ifaces": [
-                "MutableMap"
-            ],
-            "desc": "An ordered dictionary-style collection.",
-            "flags": [
-                "IsFinal",
-                "HasDocComment"
+                "IsCppSerializable",
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a StableMap built from the keys and values produced by the specified KeyedIterable.",
+                    "desc": "Returns a ImmMap built from the keys and values produced by the specified KeyedIterable.",
                     "return": {
                         "type": null
                     },
@@ -1465,9 +2046,8 @@
                 {
                     "name": "isEmpty",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns true if the StableMap is empty, false otherwise.",
+                    "desc": "Returns true if the ImmMap is empty, false otherwise.",
                     "return": {
                         "type": "Boolean"
                     },
@@ -1477,9 +2057,8 @@
                 {
                     "name": "count",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns the number of key\/value pairs in the StableMap.",
+                    "desc": "Returns the number of key\/value pairs in the ImmMap.",
                     "return": {
                         "type": "Int64"
                     },
@@ -1489,9 +2068,8 @@
                 {
                     "name": "items",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an Iterable that produces the key\/value Pairs from this StableMap.",
+                    "desc": "Returns an Iterable that produces the key\/value Pairs from this ImmMap.",
                     "return": {
                         "type": "Object"
                     },
@@ -1501,9 +2079,8 @@
                 {
                     "name": "keys",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an Iterable that produces the keys from this StableMap.",
+                    "desc": "Returns a ImmVector built from the keys of this ImmMap.",
                     "return": {
                         "type": "Object"
                     },
@@ -1511,11 +2088,10 @@
                     ]
                 },
                 {
-                    "name": "view",
+                    "name": "lazy",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a lazy iterable view of this StableMap.",
+                    "desc": "Returns a lazy iterable view of this ImmMap.",
                     "return": {
                         "type": "Object"
                     },
@@ -1525,9 +2101,8 @@
                 {
                     "name": "kvzip",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an Iterable that produces the key\/value pairs from this StableMap.",
+                    "desc": "Returns an Iterable that produces the key\/value pairs from this ImmMap.",
                     "return": {
                         "type": "Object"
                     },
@@ -1537,7 +2112,6 @@
                 {
                     "name": "at",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the value at the specified key. If the key is not present, an exception is thrown.",
                     "return": {
@@ -1553,7 +2127,6 @@
                 {
                     "name": "get",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the value at the specified key. If the key is not present, null is returned.",
                     "return": {
@@ -1567,79 +2140,10 @@
                     ]
                 },
                 {
-                    "name": "set",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Stores a value into the StableMap with the specified key, overwriting any previous value that was associated with the key.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "key",
-                            "type": "Variant"
-                        },
-                        {
-                            "name": "value",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "setAll",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Stores each value produced by the specified KeyedIterable into the StableMap using its corresponding key, overwriting any previous value that was associated with that key.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "iterable",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "put",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Stores a value into the StableMap with the specified key, overwriting any previous value that was associated with the key.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "key",
-                            "type": "Variant"
-                        },
-                        {
-                            "name": "value",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "clear",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Removes all key\/value pairs from the StableMap.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                    ]
-                },
-                {
                     "name": "contains",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns true if the specified key is present in the StableMap, false otherwise.",
+                    "desc": "Returns true if the specified key is present in the ImmMap, false otherwise.",
                     "return": {
                         "type": "Boolean"
                     },
@@ -1653,9 +2157,8 @@
                 {
                     "name": "containsKey",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns true if the specified key is present in the StableMap, false otherwise.",
+                    "desc": "Returns true if the specified key is present in the ImmMap, false otherwise.",
                     "return": {
                         "type": "Boolean"
                     },
@@ -1667,91 +2170,10 @@
                     ]
                 },
                 {
-                    "name": "remove",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Removes the specified key from this StableMap.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "key",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "removeKey",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Removes the specified key from this StableMap.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "key",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "discard",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Removes the specified key from this StableMap.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "key",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "add",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Adds the specified key\/value Pair to this StableMap. If an element with the same key is already present, an exception is thrown.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "val",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "addAll",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Adds the key\/value Pairs produced by the specified Iterable to the end of this StableMap.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "iterable",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
                     "name": "toArray",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an array built from the keys and values from this StableMap.",
+                    "desc": "Returns an array built from the keys and values from this ImmMap.",
                     "return": {
                         "type": "VariantMap"
                     },
@@ -1759,25 +2181,78 @@
                     ]
                 },
                 {
-                    "name": "copyAsArray",
+                    "name": "toVector",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an array built from the keys and values from this StableMap.",
+                    "desc": "Returns a Vector built from the values of this ImmMap.",
                     "return": {
-                        "type": "VariantMap"
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+		            {
+                    "name": "toImmVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmVector built from the values of this ImmMap.",
+                    "return": {
+                        "type": "Object"
                     },
                     "args": [
                     ]
                 },
                 {
-                    "name": "toKeysArray",
+                    "name": "toMap",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an array built from the keys from this StableMap.",
+                    "desc": "Returns a Map built from the keys and values of this ImmMap.",
                     "return": {
-                        "type": "VariantMap"
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toImmMap",
+                    "flags": [
+                    ],
+                    "desc": "Returns an immutable version of this collection.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toSet",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Set built from the values of this ImmMap.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toImmSet",
+                    "flags": [
+                    ],
+                     "desc": "Returns a ImmSet built from the values of this ImmMap.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "immutable",
+                    "flags": [
+                    ],
+                    "desc": "Returns an immutable version of this collection.",
+                    "return": {
+                        "type": "Object"
                     },
                     "args": [
                     ]
@@ -1785,9 +2260,8 @@
                 {
                     "name": "values",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a Vector built from the values from this StableMap.",
+                    "desc": "Returns a ImmVector built from the values of this ImmMap.",
                     "return": {
                         "type": "Object"
                     },
@@ -1795,11 +2269,10 @@
                     ]
                 },
                 {
-                    "name": "toValuesArray",
+                    "name": "toKeysArray",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an array built from the values from this StableMap.",
+                    "desc": "Returns an array built from the keys from this ImmMap.",
                     "return": {
                         "type": "VariantMap"
                     },
@@ -1807,41 +2280,19 @@
                     ]
                 },
                 {
-                    "name": "updateFromArray",
+                    "name": "toValuesArray",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Inserts the key\/value pairs from the specified array into this StableMap.",
+                    "desc": "Returns an array built from the values from this ImmMap.",
                     "return": {
-                        "type": "Object"
+                        "type": "VariantMap"
                     },
                     "args": [
-                        {
-                            "name": "arr",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "updateFromIterable",
-                    "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Inserts the keys and values produced by the specified KeyedIterable.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "it",
-                            "type": "Variant"
-                        }
                     ]
                 },
                 {
                     "name": "differenceByKey",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Object"
@@ -1856,9 +2307,8 @@
                 {
                     "name": "getIterator",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an iterator that points to beginning of this StableMap.",
+                    "desc": "Returns an iterator that points to beginning of this ImmMap.",
                     "return": {
                         "type": "Object"
                     },
@@ -1868,9 +2318,23 @@
                 {
                     "name": "map",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a KeyedIterable of the values produced by applying the specified callback on the values of this StableMap.",
+                    "desc": "Returns a ImmMap of the keys/values produced by applying the specified callback on each value from this ImmMap.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "mapWithKey",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmMap of the keys/values produced by applying the specified callback on each key and value from this ImmMap.",
                     "return": {
                         "type": "Object"
                     },
@@ -1884,9 +2348,23 @@
                 {
                     "name": "filter",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a KeyedIterable of all the values from this StableMap for which the specified callback returns true.",
+                    "desc": "Returns a ImmMap of all the keys/values from this ImmMap for which the specified callback returns true.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "filterWithKey",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmMap of all the keys/values from this ImmMap for which the specified callback returns true.",
                     "return": {
                         "type": "Object"
                     },
@@ -1900,7 +2378,6 @@
                 {
                     "name": "zip",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns a KeyedIterable produced by combined the specified Iterables pair-wise.",
                     "return": {
@@ -1914,9 +2391,78 @@
                     ]
                 },
                 {
+                    "name": "take",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmMap containing the first n key/value pairs of this ImmMap.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "takeWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmMap containing the key/value pairs of this ImmMap up to but not including the first value that produces false when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skip",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmMap containing all key/value pairs except the first n of this ImmMap.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skipWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmMap containing the key/value pairs of this ImmMap excluding the first values that produces true when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "fn",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "__toString",
+                    "return": {
+                        "type": "String"
+                    },
+                    "flags": [
+                    ],
+                    "args": [
+                    ]
+                },
+                {
                     "name": "__get",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -1931,7 +2477,6 @@
                 {
                     "name": "__set",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -1950,7 +2495,6 @@
                 {
                     "name": "__isset",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean"
@@ -1965,7 +2509,6 @@
                 {
                     "name": "__unset",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -1980,10 +2523,9 @@
                 {
                     "name": "fromItems",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
-                    "desc": "Returns a StableMap built from the key\/value Pairs produced by the specified Iterable.",
+                    "desc": "Returns a ImmMap built from the key\/value Pairs produced by the specified Iterable.",
                     "return": {
                         "type": "Object"
                     },
@@ -1993,64 +2535,20 @@
                             "type": "Variant"
                         }
                     ]
-                },
-                {
-                    "name": "__toString",
-                    "return": {
-                        "type": "String"
-                    },
-                    "flags": [
-                    ],
-                    "args": [
-                    ]
-                },
-                {
-                    "name": "fromArray",
-                    "flags": [
-                        "IsStatic",
-                        "HasDocComment"
-                    ],
-                    "desc": "Returns a StableMap built from the keys and values from the specified array.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "mp",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "fromIterable",
-                    "flags": [
-                        "IsStatic",
-                        "HasDocComment"
-                    ],
-                    "desc": "Returns a StableMap built from the keys and values produced by the specified KeyedIterable.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "mp",
-                            "type": "Variant"
-                        }
-                    ]
                 }
             ],
             "consts": [
             ]
         },
         {
-            "name": "StableMapIterator",
+            "name": "MapIterator",
             "ifaces": [
-                "KeyedIterator"
+                "HH\\KeyedIterator"
             ],
-            "desc": "An iterator implementation for iterating over a StableMap.",
+            "desc": "An iterator implementation for iterating over a Map.",
             "flags": [
                 "IsFinal",
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
@@ -2067,7 +2565,6 @@
                     "name": "current",
                     "desc": "Returns the current value that the iterator points to.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -2079,7 +2576,6 @@
                     "name": "key",
                     "desc": "Returns the current key that the iterator points to.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -2091,7 +2587,6 @@
                     "name": "valid",
                     "desc": "Returns true if the iterator points to a valid value, returns false otherwise.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean"
@@ -2103,7 +2598,6 @@
                     "name": "next",
                     "desc": "Advance this iterator forward one position.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -2115,7 +2609,6 @@
                     "name": "rewind",
                     "desc": "Move this iterator back to the first position.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -2128,20 +2621,20 @@
             ]
         },
         {
-            "name": "Set",
+            "name": "HH\\Set",
             "ifaces": [
                 "MutableSet"
             ],
-            "desc": "An unordered set-style collection.",
+            "desc": "An ordered set-style collection.",
             "flags": [
                 "IsFinal",
-                "HasDocComment"
+                "IsCppSerializable",
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns a Set built from the values produced by the specified Iterable.",
                     "return": {
@@ -2158,7 +2651,6 @@
                 {
                     "name": "isEmpty",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if the Set is empty, false otherwise.",
                     "return": {
@@ -2170,7 +2662,6 @@
                 {
                     "name": "count",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the number of values in the Set.",
                     "return": {
@@ -2182,7 +2673,6 @@
                 {
                     "name": "items",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an Iterable that produces the values from this Set.",
                     "return": {
@@ -2192,9 +2682,19 @@
                     ]
                 },
                 {
-                    "name": "view",
+                    "name": "values",
                     "flags": [
-                        "HasDocComment"
+                    ],
+                    "desc": "Returns a Vector built from the values of this Set.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "lazy",
+                    "flags": [
                     ],
                     "desc": "Returns a lazy iterable view of this Set.",
                     "return": {
@@ -2206,7 +2706,6 @@
                 {
                     "name": "clear",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Removes all values from the Set.",
                     "return": {
@@ -2218,7 +2717,6 @@
                 {
                     "name": "contains",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if the specified value is present in the Set, returns false otherwise.",
                     "return": {
@@ -2234,23 +2732,6 @@
                 {
                     "name": "remove",
                     "flags": [
-                        "HasDocComment"
-                    ],
-                    "desc": "Removes the specified value from this Set.",
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "val",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "discard",
-                    "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Removes the specified value from this Set.",
                     "return": {
@@ -2266,7 +2747,6 @@
                 {
                     "name": "add",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Adds the specified value to this Set.",
                     "return": {
@@ -2282,7 +2762,6 @@
                 {
                     "name": "addAll",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Adds the values produced by the specified Iterable to this Set.",
                     "return": {
@@ -2298,7 +2777,83 @@
                 {
                     "name": "toArray",
                     "flags": [
-                        "HasDocComment"
+                    ],
+                    "desc": "Returns an array built from the values from this Set, array(val1 => val1, val2 => val2, ...). This maintains set-like semantics in array() land: O(1) membership test with `array_has_key($a['key'])` and iteration with `foreach($a as $member)`. Int-like strings end up with numerical array keys.",
+                    "return": {
+                        "type": "VariantMap"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector built from the values of this Set.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+		            {
+                    "name": "toImmVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmVector built from the values of this Set.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toSet",
+                    "flags": [
+                    ],
+                    "desc": "Returns a copy of this Set.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toImmSet",
+                    "flags": [
+                    ],
+                     "desc": "Returns a ImmSet built from the values of this Set.",
+                     "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "immutable",
+                    "flags": [
+                    ],
+                    "desc": "Returns an immutable version of this collection.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toKeysArray",
+                    "flags": [
+                    ],
+                    "desc": "Returns an array built from the values from this Set.",
+                    "return": {
+                        "type": "VariantMap"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toValuesArray",
+                    "flags": [
                     ],
                     "desc": "Returns an array built from the values from this Set.",
                     "return": {
@@ -2310,7 +2865,6 @@
                 {
                     "name": "getIterator",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an iterator that points to beginning of this Set.",
                     "return": {
@@ -2322,9 +2876,8 @@
                 {
                     "name": "map",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an Iterable of the values produced by applying the specified callback on the values of this Set.",
+                    "desc": "Returns a Set of the values produced by applying the specified callback on each value from this Set.",
                     "return": {
                         "type": "Object"
                     },
@@ -2338,9 +2891,8 @@
                 {
                     "name": "filter",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a Iterable of all the values from this Set for which the specified callback returns true.",
+                    "desc": "Returns a Set of all the values from this Set for which the specified callback returns true.",
                     "return": {
                         "type": "Object"
                     },
@@ -2354,7 +2906,6 @@
                 {
                     "name": "zip",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns a Iterable produced by combined the specified Iterables pair-wise.",
                     "return": {
@@ -2368,9 +2919,68 @@
                     ]
                 },
                 {
-                    "name": "difference",
+                    "name": "take",
                     "flags": [
-                        "HasDocComment"
+                    ],
+                    "desc": "Returns a Set containing the first n values of this Set.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "takeWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Set containing the values of this Set up to but not including the first value that produces false when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skip",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Set containing all values except the first n of this Set.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skipWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Set containing all the values of this Set excluding the first values that produces true when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "fn",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "removeAll",
+                    "flags": [
                     ],
                     "return": {
                         "type": "Object"
@@ -2383,24 +2993,8 @@
                     ]
                 },
                 {
-                    "name": "updateFromArrayValues",
+                    "name": "difference",
                     "flags": [
-                        "HasDocComment"
-                    ],
-                    "return": {
-                        "type": "Object"
-                    },
-                    "args": [
-                        {
-                            "name": "arr",
-                            "type": "Variant"
-                        }
-                    ]
-                },
-                {
-                    "name": "updateFromIterableValues",
-                    "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Object"
@@ -2425,7 +3019,6 @@
                 {
                     "name": "__get",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -2440,7 +3033,6 @@
                 {
                     "name": "__set",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -2459,7 +3051,6 @@
                 {
                     "name": "__isset",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean"
@@ -2474,7 +3065,6 @@
                 {
                     "name": "__unset",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -2489,8 +3079,7 @@
                 {
                     "name": "fromItems",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "desc": "Returns a Set built from the values produced by the specified Iterable.",
                     "return": {
@@ -2506,8 +3095,7 @@
                 {
                     "name": "fromArray",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "desc": "Returns a Set built from the values from the specified array.",
                     "return": {
@@ -2524,8 +3112,7 @@
                     "name": "fromArrays",
                     "flags": [
                         "IsStatic",
-                        "VariableArguments",
-                        "HasDocComment"
+                        "VariableArguments"
                     ],
                     "desc": "Returns a Set built from the values from the specified arrays.",
                     "return": {
@@ -2533,13 +3120,243 @@
                     },
                     "args": [
                     ]
+                }
+            ],
+            "consts": [
+            ]
+        },
+        {
+            "name": "HH\\ImmSet",
+            "ifaces": [
+                "ConstSet"
+            ],
+            "desc": "An immutable ordered set-style collection.",
+            "flags": [
+                "IsFinal",
+                "IsCppSerializable",
+                "NoDefaultSweep"
+            ],
+            "funcs": [
+                {
+                    "name": "__construct",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmSet built from the values produced by the specified Iterable.",
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "iterable",
+                            "type": "Variant",
+                            "value": "null"
+                        }
+                    ]
                 },
                 {
-                    "name": "fromIterableValues",
+                    "name": "isEmpty",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
                     ],
+                    "desc": "Returns true if the ImmSet is empty, false otherwise.",
+                    "return": {
+                        "type": "Boolean"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "count",
+                    "flags": [
+                    ],
+                    "desc": "Returns the number of values in the ImmSet.",
+                    "return": {
+                        "type": "Int64"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "items",
+                    "flags": [
+                    ],
+                    "desc": "Returns an Iterable that produces the values from this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "values",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmVector built from the values of this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "lazy",
+                    "flags": [
+                    ],
+                    "desc": "Returns a lazy iterable view of this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "contains",
+                    "flags": [
+                    ],
+                    "desc": "Returns true if the specified value is present in the ImmSet, returns false otherwise.",
+                    "return": {
+                        "type": "Boolean"
+                    },
+                    "args": [
+                        {
+                            "name": "val",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "toArray",
+                    "flags": [
+                    ],
+                    "desc": "Returns an array built from the values from this ImmSet, array(val1 => val1, val2 => val2, ...). This maintains set-like semantics in array() land: O(1) membership test with `array_has_key($a['key'])` and iteration with `foreach($a as $member)`. Int-like strings end up with numerical array keys.",
+                    "return": {
+                        "type": "VariantMap"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector built from the values of this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+		            {
+                    "name": "toImmVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmVector built from the values of this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toSet",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Set built from the values of this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toImmSet",
+                    "flags": [
+                    ],
+                    "desc": "Returns an immutable version of this collection.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "immutable",
+                    "flags": [
+                    ],
+                    "desc": "Returns an immutable version of this collection.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toKeysArray",
+                    "flags": [
+                    ],
+                    "desc": "Returns an array built from the values from this ImmSet.",
+                    "return": {
+                        "type": "VariantMap"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toValuesArray",
+                    "flags": [
+                    ],
+                    "desc": "Returns an array built from the values from this ImmSet.",
+                    "return": {
+                        "type": "VariantMap"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "getIterator",
+                    "flags": [
+                    ],
+                    "desc": "Returns an iterator that points to beginning of this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "map",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmSet of the values produced by applying the specified callback on each value from this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "filter",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmSet of all the values from this ImmSet for which the specified callback returns true.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "zip",
+                    "flags": [
+                    ],
+                    "desc": "Returns an Iterable produced by combining the specified Iterables pair-wise.",
                     "return": {
                         "type": "Object"
                     },
@@ -2549,6 +3366,165 @@
                             "type": "Variant"
                         }
                     ]
+                },
+                {
+                    "name": "take",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmSet containing the first n values of this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "takeWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmSet containing the values of this ImmSet up to but not including the first value that produces false when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skip",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmSet containing all values except the first n of this ImmSet.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skipWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmSet containing all the values of this ImmSet excluding the first values that produces true when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "fn",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "__toString",
+                    "return": {
+                        "type": "String"
+                    },
+                    "flags": [
+                    ],
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "__get",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": "Variant"
+                    },
+                    "args": [
+                        {
+                            "name": "name",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "__set",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": "Variant"
+                    },
+                    "args": [
+                        {
+                            "name": "name",
+                            "type": "Variant"
+                        },
+                        {
+                            "name": "value",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "__isset",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": "Boolean"
+                    },
+                    "args": [
+                        {
+                            "name": "name",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "__unset",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": "Variant"
+                    },
+                    "args": [
+                        {
+                            "name": "name",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "fromItems",
+                    "flags": [
+                        "IsStatic"
+                    ],
+                    "desc": "Returns a ImmSet built from the values produced by the specified Iterable.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "iterable",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "fromArrays",
+                    "flags": [
+                        "IsStatic",
+                        "VariableArguments"
+                    ],
+                    "desc": "Returns a ImmSet built from the values from the specified arrays.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
                 }
             ],
             "consts": [
@@ -2557,12 +3533,12 @@
         {
             "name": "SetIterator",
             "ifaces": [
-                "Iterator"
+                "HH\\Iterator"
             ],
             "desc": "An iterator implementation for iterating over a Set.",
             "flags": [
                 "IsFinal",
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
@@ -2579,7 +3555,6 @@
                     "name": "current",
                     "desc": "Returns the current value that the iterator points to.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -2601,7 +3576,6 @@
                     "name": "valid",
                     "desc": "Returns true if the iterator points to a valid value, returns false otherwise.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean"
@@ -2613,7 +3587,6 @@
                     "name": "next",
                     "desc": "Advance this iterator forward one position.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -2625,7 +3598,6 @@
                     "name": "rewind",
                     "desc": "Move this iterator back to the first position.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -2638,14 +3610,15 @@
             ]
         },
         {
-            "name": "Pair",
+            "name": "HH\\Pair",
             "ifaces": [
                 "ConstVector"
             ],
-            "desc": "An ordered fixed-sized container.",
+            "desc": "An immutable ordered fixed-sized container.",
             "flags": [
                 "IsFinal",
-                "HasDocComment"
+                "IsCppSerializable",
+                "NoDefaultSweep"
             ],
             "footer": "\n private:\n  int size;\n  int capacity;",
             "funcs": [
@@ -2662,7 +3635,6 @@
                 {
                     "name": "isEmpty",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if this Pair is empty, false otherwise.",
                     "return": {
@@ -2674,7 +3646,6 @@
                 {
                     "name": "count",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the number of values in the Pair.",
                     "return": {
@@ -2686,7 +3657,6 @@
                 {
                     "name": "items",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an Iterable that produces the values from this Pair.",
                     "return": {
@@ -2698,9 +3668,8 @@
                 {
                     "name": "keys",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns an Iterable that produces the keys from this Pair.",
+                    "desc": "Returns a Vector built from the keys of this Pair.",
                     "return": {
                         "type": "Object"
                     },
@@ -2708,9 +3677,19 @@
                     ]
                 },
                 {
-                    "name": "view",
+                    "name": "values",
                     "flags": [
-                        "HasDocComment"
+                    ],
+                    "desc": "Returns a Vector built from the values of this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "lazy",
+                    "flags": [
                     ],
                     "desc": "Returns a lazy iterable view of this Pair.",
                     "return": {
@@ -2722,7 +3701,6 @@
                 {
                     "name": "kvzip",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an Iterable that produces the key\/value pairs from this Pair.",
                     "return": {
@@ -2734,7 +3712,105 @@
                 {
                     "name": "toArray",
                     "flags": [
-                        "HasDocComment"
+                    ],
+                    "desc": "Returns an array built from the values from this Pair.",
+                    "return": {
+                        "type": "VariantMap"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector build from the values from this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+		            {
+                    "name": "toImmVector",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmVector built from the values of this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toMap",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Map built from the keys and values of this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toImmMap",
+                    "flags": [
+                    ],
+                    "desc": "Returns a ImmMap built from the keys and values of this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toSet",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Set built from the values of this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                   "name": "toImmSet",
+                   "flags": [
+                   ],
+                    "desc": "Returns a ImmSet built from the values of this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "immutable",
+                    "flags": [
+                    ],
+                    "desc": "Returns an immutable version of this collection.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toKeysArray",
+                    "flags": [
+                    ],
+                    "desc": "Returns an array built from the keys from this Pair.",
+                    "return": {
+                        "type": "VariantMap"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "toValuesArray",
+                    "flags": [
                     ],
                     "desc": "Returns an array built from the values from this Pair.",
                     "return": {
@@ -2746,7 +3822,6 @@
                 {
                     "name": "getIterator",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns an iterator that points to beginning of this Pair.",
                     "return": {
@@ -2758,9 +3833,23 @@
                 {
                     "name": "map",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a KeyedIterable of the values produced by applying the specified callback on the values of this Pair.",
+                    "desc": "Returns a Vector of the values produced by applying the specified callback on each value from this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "mapWithKey",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector of the values produced by applying the specified callback on each key and value from this Pair.",
                     "return": {
                         "type": "Object"
                     },
@@ -2774,9 +3863,23 @@
                 {
                     "name": "filter",
                     "flags": [
-                        "HasDocComment"
                     ],
-                    "desc": "Returns a KeyedIterable of all the values from this Pair for which the specified callback returns true.",
+                    "desc": "Returns a Vector of all the values from this Pair for which the specified callback returns true.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "filterWithKey",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector of all the values from this Pair for which the specified callback returns true.",
                     "return": {
                         "type": "Object"
                     },
@@ -2790,7 +3893,6 @@
                 {
                     "name": "zip",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns a KeyedIterable produced by combined the specified Iterables pair-wise.",
                     "return": {
@@ -2804,9 +3906,68 @@
                     ]
                 },
                 {
+                    "name": "take",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector containing the first n values of this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "takeWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector containing the values of this Pair up to but not including the first value that produces false when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skip",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector containing all values except the first n of this Pair.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "n",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "skipWhile",
+                    "flags": [
+                    ],
+                    "desc": "Returns a Vector containing all the values of this Pair excluding the first values that produces true when passed to the specified callback.",
+                    "return": {
+                        "type": "Object"
+                    },
+                    "args": [
+                        {
+                            "name": "fn",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
                     "name": "at",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the value at the specified key. If the key is not present, an exception is thrown.",
                     "return": {
@@ -2822,7 +3983,6 @@
                 {
                     "name": "get",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns the value at the specified key. If the key is not present, null is returned.",
                     "return": {
@@ -2838,7 +3998,6 @@
                 {
                     "name": "containsKey",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "desc": "Returns true if the specified key is present in the Pair, returns false otherwise.",
                     "return": {
@@ -2850,6 +4009,76 @@
                             "type": "Variant"
                         }
                     ]
+                },
+                {
+                    "name": "__toString",
+                    "return": {
+                        "type": "String"
+                    },
+                    "flags": [
+                    ],
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "__get",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": "Variant"
+                    },
+                    "args": [
+                        {
+                            "name": "name",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "__set",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": "Variant"
+                    },
+                    "args": [
+                        {
+                            "name": "name",
+                            "type": "Variant"
+                        },
+                        {
+                            "name": "value",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "__isset",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": "Boolean"
+                    },
+                    "args": [
+                        {
+                            "name": "name",
+                            "type": "Variant"
+                        }
+                    ]
+                },
+                {
+                    "name": "__unset",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": "Variant"
+                    },
+                    "args": [
+                        {
+                            "name": "name",
+                            "type": "Variant"
+                        }
+                    ]
                 }
             ],
             "consts": [
@@ -2858,12 +4087,12 @@
         {
             "name": "PairIterator",
             "ifaces": [
-                "KeyedIterator"
+                "HH\\KeyedIterator"
             ],
             "desc": "An iterator implementation for iterating over a Pair.",
             "flags": [
                 "IsFinal",
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
@@ -2880,7 +4109,6 @@
                     "name": "current",
                     "desc": "Returns the current value that the iterator points to.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -2892,7 +4120,6 @@
                     "name": "key",
                     "desc": "Returns the current key that the iterator points to.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant"
@@ -2904,7 +4131,6 @@
                     "name": "valid",
                     "desc": "Returns true if the iterator points to a valid value, returns false otherwise.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean"
@@ -2916,7 +4142,6 @@
                     "name": "next",
                     "desc": "Advance this iterator forward one position.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -2928,7 +4153,6 @@
                     "name": "rewind",
                     "desc": "Move this iterator back to the first position.",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null

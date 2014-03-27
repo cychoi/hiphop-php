@@ -1,4 +1,5 @@
 auto_sources(IDL_SRCS "*.idl.json" "RECURSE" "${HPHP_HOME}/hphp/system/idl")
+ZEND_COMPAT_STRIP_IDLS(IDL_SRCS ${ZEND_COMPAT_EXCLUDE_IDLS})
 
 add_custom_command(OUTPUT "class_map.cpp" "constants.h"
                    DEPENDS ${IDL_SRCS} gen-class-map
@@ -30,9 +31,9 @@ endforeach()
 
 add_custom_target(systemlib
                   DEPENDS "php.txt" ${SYSTEMLIB_SRCS}
-                  COMMAND "INSTALL_DIR=${HPHP_HOME}/bin"
+                  COMMAND "INSTALL_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
                           "FBCODE_DIR=${HPHP_HOME}"
                           "${HPHP_HOME}/hphp/runtime/ext_hhvm/make_systemlib.sh"
-                          "--install_dir=${HPHP_HOME}/bin" "--fbcode_dir=${HPHP_HOME}"
+                          "--install_dir=${CMAKE_CURRENT_SOURCE_DIR}" "--fbcode_dir=${HPHP_HOME}"
                           "${SYSTEMLIB_SRCS_STR}"
                   COMMENT "Generating systemlib.php")

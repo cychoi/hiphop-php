@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,8 @@
 #include "hphp/compiler/expression/array_pair_expression.h"
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/unary_op_expression.h"
-#include "hphp/util/parser/hphp.tab.hpp"
+#include "hphp/compiler/code_model_enums.h"
+#include "hphp/parser/hphp.tab.hpp"
 
 using namespace HPHP;
 
@@ -94,10 +95,10 @@ int ArrayPairExpression::getKidCount() const {
 void ArrayPairExpression::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_name = boost::dynamic_pointer_cast<Expression>(cp);
+      m_name = dynamic_pointer_cast<Expression>(cp);
       break;
     case 1:
-      m_value = boost::dynamic_pointer_cast<Expression>(cp);
+      m_value = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       assert(false);
@@ -122,6 +123,25 @@ bool ArrayPairExpression::canonCompare(ExpressionPtr e) const {
   return m_ref == a->m_ref;
 }
 
+///////////////////////////////////////////////////////////////////////////////
+
+void ArrayPairExpression::outputCodeModel(CodeGenerator &cg) {
+  if (m_name) {
+    cg.printObjectHeader("BinaryOpExpression", 4);
+    cg.printPropertyHeader("expression1");
+    m_name->outputCodeModel(cg);
+    cg.printPropertyHeader("expression2");
+    cg.printExpression(m_value, m_ref);
+    cg.printPropertyHeader("operation");
+    cg.printValue(PHP_ARRAY_PAIR);
+    cg.printPropertyHeader("sourceLocation");
+    cg.printLocation(this->getLocation());
+    cg.printObjectFooter();
+  } else {
+    cg.printExpression(m_value, m_ref);
+  }
+  return;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // code generation functions

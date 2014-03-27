@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,15 +13,15 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/util/logger.h"
-#include "hphp/util/base.h"
-#include "hphp/util/stack_trace.h"
+
+#include <syslog.h>
+
+#include "hphp/util/stack-trace.h"
 #include "hphp/util/process.h"
 #include "hphp/util/exception.h"
-#include "util.h"
-#include "hphp/util/text_color.h"
-#include <syslog.h>
+#include "hphp/util/text-color.h"
+#include "hphp/util/string-vsnprintf.h"
 
 #define IMPLEMENT_LOGLEVEL(LOGLEVEL)                                    \
   void Logger::LOGLEVEL(const char *fmt, ...) {                         \
@@ -48,14 +48,13 @@ IMPLEMENT_LOGLEVEL(Verbose);
 
 bool Logger::UseSyslog = false;
 bool Logger::UseLogFile = true;
-bool Logger::UseCronolog = true;
+bool Logger::UseRequestLog = false;
+bool Logger::UseCronolog = false;
 bool Logger::IsPipeOutput = false;
-int Logger::DropCacheChunkSize = (1 << 20);
 FILE *Logger::Output = nullptr;
 Cronolog Logger::cronOutput;
 Logger::LogLevelType Logger::LogLevel = LogInfo;
-std::atomic<int> Logger::bytesWritten(0);
-int Logger::prevBytesWritten = 0;
+LogFileFlusher Logger::flusher;
 bool Logger::LogHeader = false;
 bool Logger::LogNativeStackTrace = true;
 std::string Logger::ExtraHeader;
@@ -68,16 +67,16 @@ Logger *Logger::s_logger = new Logger();
 void Logger::Log(LogLevelType level, const char *fmt, va_list ap) {
   if (!IsEnabled()) return;
 
-  string msg;
-  Util::string_vsnprintf(msg, fmt, ap);
+  std::string msg;
+  string_vsnprintf(msg, fmt, ap);
   Log(level, msg, nullptr);
 }
 
 void Logger::LogEscapeMore(LogLevelType level, const char *fmt, va_list ap) {
   if (!IsEnabled()) return;
 
-  string msg;
-  Util::string_vsnprintf(msg, fmt, ap);
+  std::string msg;
+  string_vsnprintf(msg, fmt, ap);
   Log(level, msg, nullptr, true, true);
 }
 
@@ -119,7 +118,11 @@ void Logger::Log(LogLevelType level, const std::string &msg,
 }
 
 FILE *Logger::GetStandardOut(LogLevelType level) {
-  return level <= LogWarning ? stderr : stdout;
+  return s_logger->m_standardOut;
+}
+
+void Logger::SetStandardOut(FILE* file) {
+  s_logger->m_standardOut = file;
 }
 
 int Logger::GetSyslogLevel(LogLevelType level) {
@@ -147,17 +150,17 @@ void Logger::log(LogLevelType level, const std::string &msg,
     return;
   }
 
-  boost::shared_ptr<StackTrace> deleter;
+  std::unique_ptr<StackTrace> deleter;
   if (LogNativeStackTrace && stackTrace == nullptr) {
-    deleter = boost::shared_ptr<StackTrace>(new StackTrace());
+    deleter.reset(new StackTrace());
     stackTrace = deleter.get();
   }
 
   if (UseSyslog) {
     syslog(GetSyslogLevel(level), "%s", msg.c_str());
   }
-  FILE *stdf = GetStandardOut(level);
   if (UseLogFile) {
+    FILE *stdf = GetStandardOut(level);
     FILE *f;
     if (UseCronolog) {
       f = cronOutput.getOutputFile();
@@ -165,7 +168,7 @@ void Logger::log(LogLevelType level, const std::string &msg,
     } else {
       f = Output ? Output : stdf;
     }
-    string header, sheader;
+    std::string header, sheader;
     if (LogHeader) {
       header = GetHeader();
       if (LogNativeStackTrace) {
@@ -185,16 +188,13 @@ void Logger::log(LogLevelType level, const std::string &msg,
     } else {
       bytes = fprintf(f, "%s%s%s", sheader.c_str(), escaped, ending);
     }
-    bytesWritten.fetch_add(bytes, std::memory_order_relaxed);
+
     FILE *tf = threadData->log;
     if (tf) {
-      threadData->bytesWritten +=
+      int threadBytes =
         fprintf(tf, "%s%s%s", header.c_str(), escaped, ending);
       fflush(tf);
-      threadData->prevBytesWritten =
-        checkDropCache(threadData->bytesWritten,
-                       threadData->prevBytesWritten,
-                       tf);
+      threadData->flusher.recordWriteAndMaybeDropCaches(tf, threadBytes);
     }
     if (threadData->hook) {
       threadData->hook(header.c_str(), msg.c_str(), ending,
@@ -206,9 +206,7 @@ void Logger::log(LogLevelType level, const std::string &msg,
 
     fflush(f);
     if (UseCronolog || (Output && !Logger::IsPipeOutput)) {
-      prevBytesWritten =
-        checkDropCache(bytesWritten.load(std::memory_order_relaxed),
-                       prevBytesWritten, f);
+      flusher.recordWriteAndMaybeDropCaches(f, bytes);
     }
   }
 }
@@ -261,15 +259,6 @@ char *Logger::EscapeString(const std::string &msg) {
   }
   *target = 0;
   return new_str;
-}
-
-int Logger::checkDropCache(int bytesWritten, int prevBytesWritten,
-                           FILE *f) {
-  if (bytesWritten - prevBytesWritten > Logger::DropCacheChunkSize) {
-    Util::drop_cache(f);
-    return bytesWritten;
-  }
-  return prevBytesWritten;
 }
 
 bool Logger::SetThreadLog(const char *file) {

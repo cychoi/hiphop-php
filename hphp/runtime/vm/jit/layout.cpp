@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,39 +17,15 @@
 
 #include <chrono>
 #include <random>
+#include <algorithm>
 
 #include "hphp/util/trace.h"
 #include "hphp/runtime/vm/jit/cfg.h"
-#include "hphp/runtime/vm/jit/state_vector.h"
+#include "hphp/runtime/vm/jit/state-vector.h"
 
 namespace HPHP { namespace JIT {
 
 TRACE_SET_MOD(hhir);
-
-//////////////////////////////////////////////////////////////////////
-
-namespace {
-
-void postorderWalk(smart::vector<Block*>& out,
-                   StateVector<Block,bool>& visited,
-                   Block* block) {
-  if (visited[block]) return;
-  visited[block] = true;
-  if (auto t = block->taken()) postorderWalk(out, visited, t);
-  if (auto n = block->next())  postorderWalk(out, visited, n);
-  out.push_back(block);
-}
-
-smart::vector<Block*> rpoForCodegen(const IRFactory& factory, Block* head) {
-  StateVector<Block,bool> visited(&factory, false);
-  smart::vector<Block*> ret;
-  ret.reserve(factory.numBlocks());
-  postorderWalk(ret, visited, head);
-  std::reverse(ret.begin(), ret.end());
-  return ret;
-}
-
-}
 
 //////////////////////////////////////////////////////////////////////
 
@@ -58,9 +34,9 @@ smart::vector<Block*> rpoForCodegen(const IRFactory& factory, Block* head) {
  * so this just selects an appropriate reverse post order on the
  * blocks, and partitions the unlikely ones to astubs.
  */
-LayoutInfo layoutBlocks(IRTrace* trace, const IRFactory& irFactory) {
+LayoutInfo layoutBlocks(const IRUnit& unit) {
   LayoutInfo ret;
-  ret.blocks = rpoForCodegen(irFactory, trace->blocks().front());
+  ret.blocks = rpoSortCfg(unit);
 
   // Optionally stress test by randomizing the positions.
   if (RuntimeOption::EvalHHIRStressCodegenBlocks) {
@@ -73,17 +49,15 @@ LayoutInfo layoutBlocks(IRTrace* trace, const IRFactory& irFactory) {
   // Partition into a and astubs, without changing relative order.
   ret.astubsIt = std::stable_partition(
     ret.blocks.begin(), ret.blocks.end(),
-    [&] (Block* b) {
-      return b->isMain() && b->hint() != Block::Unlikely;
-    }
+    [&] (Block* b) { return b->hint() != Block::Hint::Unlikely; }
   );
 
   if (HPHP::Trace::moduleEnabled(HPHP::Trace::hhir, 5)) {
-    std::string str = "CG Layout:";
+    std::string str = "Layout:";
 
     auto printRegion = [&] (const char* what,
-                            smart::vector<Block*>::iterator& it,
-                            smart::vector<Block*>::iterator stop) {
+                            BlockList::iterator& it,
+                            BlockList::iterator stop) {
       folly::toAppend(what, &str);
       for (; it != stop; ++it) {
         folly::toAppend((*it)->id(), &str);
@@ -108,7 +82,6 @@ LayoutInfo layoutBlocks(IRTrace* trace, const IRFactory& irFactory) {
    */
   if (!RuntimeOption::EvalHHIRStressCodegenBlocks) {
     always_assert(ret.blocks.front()->isEntry());
-    always_assert((*boost::prior(ret.astubsIt))->isMainExit());
   }
 
   return ret;

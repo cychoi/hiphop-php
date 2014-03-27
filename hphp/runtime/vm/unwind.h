@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,6 +38,13 @@ enum class UnwindAction {
    * prepared for entry to it.
    */
   ResumeVM,
+
+  /**
+   * An exception thrown from an eagerly executed async function was
+   * wrapped into a StaticExceptionWaitHandle. The async function was
+   * running in the top frame, so we need to return from the VM instance.
+   */
+  Return,
 };
 
 /*
@@ -69,6 +76,14 @@ struct VMPrepareUnwind : std::exception {
  */
 struct VMSwitchMode : std::exception {
   const char* what() const throw() { return "VMSwitchMode"; }
+};
+
+/*
+ * Thrown for stack overflow thrown from a prolog while
+ * re-entering
+ */
+struct VMReenterStackOverflow : std::exception {
+  const char* what() const throw() { return "VMReenterStackOverflow"; }
 };
 
 /*

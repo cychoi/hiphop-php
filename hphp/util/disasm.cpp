@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,108 +17,33 @@
 
 #include <iomanip>
 #include <stdlib.h>
-#include <execinfo.h>
-#include <cxxabi.h>
+
+#include "boost/algorithm/string.hpp"
 
 #include "folly/Format.h"
-#include "folly/ScopeGuard.h"
 
-#include "hphp/util/base.h"
-#include "hphp/util/text_color.h"
+#include "hphp/util/abi-cxx.h"
+#include "hphp/util/text-color.h"
 
 namespace HPHP {
 
 #ifdef HAVE_LIBXED
-// Parse the function name out of backtrace_symbols output, which
-// looks like:
-//     filename(function+offset) [addr]
-//
-// It's possible that we just have "[addr]", if there's no symbol
-// associated, so return NULL in that case.
-//
-// Following the (bad?) example of backtrace_symbols and
-// __cxa_demangle, this function allocates memory with malloc if
-// successful, and doesn't allocate otherwise.
-static char *getFunctionName(char *backtraceName) {
-  char *fnStart = strchr(backtraceName, '(');
-  char *fnEnd = strrchr(backtraceName, '+');
-  if (!fnStart || !fnEnd || fnStart > fnEnd) {
-    return NULL;
-  }
-  fnStart++;
-  int length = fnEnd - fnStart;
-  char *functionName = (char *)malloc(length + 1);
-  strncpy(functionName, fnStart, length);
-  functionName[length] = '\0';
-  return functionName;
-}
-
-// Parse the method name out of a demangled name, which looks like:
-//     namespace::class::method(type::args...)
-// Allocates with malloc when successful, and doesn't if it isn't.
-static char *getMethodName(char *demangledName) {
-  char *p = demangledName + strlen(demangledName);
-  char *lparen = NULL;
-  char *colon = NULL;
-  while (*p != '(') {
-    p--;
-    if (p < demangledName) {
-      return NULL;
-    }
-  }
-  lparen = p;
-  while (*p != ':') {
-    p--;
-    if (p < demangledName) {
-      return NULL;
-    }
-  }
-  colon = p;
-  int length = lparen - (colon + 1);
-  char *methodName = (char *)malloc(length + 1);
-  strncpy(methodName, colon + 1, length);
-  methodName[length] = '\0';
-  return methodName;
-}
-
 // XED callback function to get a symbol from an address
-static int addressToSymbol(xed_uint64_t address,
-                           char *symbol_buffer,
-                           xed_uint32_t buffer_length,
-                           xed_uint64_t *offset,
-                           void *context) {
-  char **symbolTable = backtrace_symbols((void **)&address, 1);
-  if (!symbolTable) {
+static int addressToSymbol(xed_uint64_t  address,
+                           char*         symbolBuffer,
+                           xed_uint32_t  bufferLength,
+                           xed_uint64_t* offset,
+                           void*         context) {
+  auto name = boost::trim_copy(getNativeFunctionName((void*)address));
+  if (boost::starts_with(name, "0x")) {
     return 0;
   }
-  char *backtraceName = symbolTable[0];
-  char *mangledName = getFunctionName(backtraceName);
-  free(symbolTable);
-  if (!mangledName) {
-    return 0;
-  }
-
-  int status;
-  char *demangledName = abi::__cxa_demangle(mangledName, NULL, NULL, &status);
-  char *methodName = NULL;
-  if (status == 0) {
-    free(mangledName);
-    methodName = getMethodName(demangledName);
-    free(demangledName);
-  } else if (status == -2) {
-    methodName = mangledName;
-  } else {
-    free(mangledName);
-  }
-
-  if (methodName) {
-    strncpy(symbol_buffer, methodName, buffer_length);
-    symbol_buffer[buffer_length] = '\0';
-    free(methodName);
-  } else {
-    return 0;
-  }
-
+  auto pos = name.find_first_of('(');
+  auto copyLength = pos != std::string::npos
+    ? std::min(pos, size_t(bufferLength - 1))
+    : bufferLength - 1;
+  strncpy(symbolBuffer, name.c_str(), copyLength);
+  symbolBuffer[copyLength] = '\0';
   *offset = 0;
   return 1;
 }
@@ -167,7 +92,9 @@ void Disasm::disasm(std::ostream& out, uint8_t* codeStartAddr,
     if (xed_error != XED_ERROR_NONE) error("disasm error: xed_decode failed");
 
     // Get disassembled instruction in codeStr
-    if (!xed_format_context(s_xed_syntax, &xedd, codeStr,
+    auto const syntax = m_opts.m_forceAttSyntax ? XED_SYNTAX_ATT
+                                                : s_xed_syntax;
+    if (!xed_format_context(syntax, &xedd, codeStr,
                             MAX_INSTR_ASM_LEN, ip, nullptr)) {
       error("disasm error: xed_format_context failed");
     }
@@ -193,8 +120,10 @@ void Disasm::disasm(std::ostream& out, uint8_t* codeStartAddr,
       out << ' ';
     }
     out << m_opts.m_color;
-    const char* fmt = m_opts.m_relativeOffset ? "{:3x}: " : "{:#10x}: ";
-    out << folly::format(fmt, ip - (m_opts.m_relativeOffset ? codeBase : 0));
+    if (m_opts.m_addresses) {
+      const char* fmt = m_opts.m_relativeOffset ? "{:3x}: " : "{:#10x}: ";
+      out << folly::format(fmt, ip - (m_opts.m_relativeOffset ? codeBase : 0));
+    }
     if (m_opts.m_printEncoding) {
       // print encoding, like in objdump
       unsigned posi = 0;

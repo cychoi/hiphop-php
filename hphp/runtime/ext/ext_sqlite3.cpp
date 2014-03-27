@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,18 +16,21 @@
 */
 
 #include "hphp/runtime/ext/ext_sqlite3.h"
-#include "hphp/runtime/ext/ext_stream.h"
+#include "hphp/runtime/ext/stream/ext_stream.h"
 #include "hphp/runtime/ext/ext_function.h"
-#include "hphp/runtime/base/util/exceptions.h"
+#include "hphp/runtime/base/exceptions.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
 
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
-IMPLEMENT_DEFAULT_EXTENSION(sqlite3);
+
+IMPLEMENT_DEFAULT_EXTENSION_VERSION(sqlite3, 0.7-dev);
+
 ///////////////////////////////////////////////////////////////////////////////
 
-#define PHP_SQLITE3_ASSOC  1<<0
-#define PHP_SQLITE3_NUM    1<<1
+#define PHP_SQLITE3_ASSOC  (1<<0)
+#define PHP_SQLITE3_NUM    (1<<1)
 #define PHP_SQLITE3_BOTH   (PHP_SQLITE3_ASSOC|PHP_SQLITE3_NUM)
 
 const int64_t k_SQLITE3_ASSOC = PHP_SQLITE3_ASSOC;
@@ -94,7 +97,7 @@ static Variant get_value(sqlite3_value *argv) {
   return value;
 }
 
-static void sqlite3_do_callback(sqlite3_context *context, CVarRef callback,
+static void sqlite3_do_callback(sqlite3_context *context, const Variant& callback,
                                 int argc, sqlite3_value **argv, bool is_agg) {
   Array params = Array::Create();
   php_sqlite3_agg_context *agg_context = NULL;
@@ -129,8 +132,8 @@ static void sqlite3_do_callback(sqlite3_context *context, CVarRef callback,
   }
 }
 
-static void php_sqlite3_callback_func(sqlite3_context *context, int argc,
-                                      sqlite3_value **argv) {
+void php_sqlite3_callback_func(sqlite3_context *context, int argc,
+                               sqlite3_value **argv) {
   c_SQLite3::UserDefinedFunc *udf =
     (c_SQLite3::UserDefinedFunc*)sqlite3_user_data(context);
   sqlite3_do_callback(context, udf->func, argc, argv, false);
@@ -172,10 +175,10 @@ c_SQLite3::~c_SQLite3() {
   }
 }
 
-void c_SQLite3::t___construct(CStrRef filename,
+void c_SQLite3::t___construct(const String& filename,
                        int64_t flags /* = k_SQLITE3_OPEN_READWRITE |
                                       k_SQLITE3_OPEN_CREATE */,
-                       CStrRef encryption_key /* = null_string */) {
+                       const String& encryption_key /* = null_string */) {
   t_open(filename, flags, encryption_key);
 }
 
@@ -185,10 +188,10 @@ void c_SQLite3::validate() const {
   }
 }
 
-void c_SQLite3::t_open(CStrRef filename,
+void c_SQLite3::t_open(const String& filename,
                        int64_t flags /* = k_SQLITE3_OPEN_READWRITE |
                                       k_SQLITE3_OPEN_CREATE */,
-                       CStrRef encryption_key /* = null_string */) {
+                       const String& encryption_key /* = null_string */) {
   if (m_raw_db) {
     throw Exception("Already initialized DB Object");
   }
@@ -237,7 +240,8 @@ bool c_SQLite3::t_close() {
   return true;
 }
 
-bool c_SQLite3::t_exec(CStrRef sql) {
+bool c_SQLite3::t_exec(const String& sql) {
+  SYNC_VM_REGS_SCOPED();
   validate();
 
   char *errtext = NULL;
@@ -249,10 +253,11 @@ bool c_SQLite3::t_exec(CStrRef sql) {
   return true;
 }
 
-static const StaticString s_versionString("versionString");
-static const StaticString s_versionNumber("versionNumber");
+const StaticString
+  s_versionString("versionString"),
+  s_versionNumber("versionNumber");
 
-Array c_SQLite3::t_version() {
+Array c_SQLite3::ti_version() {
   ArrayInit ret(2);
   ret.set(s_versionString, String((char*)sqlite3_libversion(), CopyString));
   ret.set(s_versionNumber, (int64_t)sqlite3_libversion_number());
@@ -274,7 +279,7 @@ String c_SQLite3::t_lasterrormsg() {
   return String((char*)sqlite3_errmsg(m_raw_db), CopyString);
 }
 
-bool c_SQLite3::t_loadextension(CStrRef extension) {
+bool c_SQLite3::t_loadextension(const String& extension) {
   validate();
 
   String translated = File::TranslatePath(extension);
@@ -301,7 +306,7 @@ int64_t c_SQLite3::t_changes() {
   return sqlite3_changes(m_raw_db);
 }
 
-String c_SQLite3::t_escapestring(CStrRef sql) {
+String c_SQLite3::ti_escapestring(const String& sql) {
   if (!sql.empty()) {
     char *ret = sqlite3_mprintf("%q", sql.data());
     if (ret) {
@@ -313,7 +318,7 @@ String c_SQLite3::t_escapestring(CStrRef sql) {
   return "";
 }
 
-Variant c_SQLite3::t_prepare(CStrRef sql) {
+Variant c_SQLite3::t_prepare(const String& sql) {
   validate();
   if (!sql.empty()) {
     c_SQLite3Stmt *stmt = NEWOBJ(c_SQLite3Stmt)();
@@ -326,7 +331,8 @@ Variant c_SQLite3::t_prepare(CStrRef sql) {
   return false;
 }
 
-Variant c_SQLite3::t_query(CStrRef sql) {
+Variant c_SQLite3::t_query(const String& sql) {
+  SYNC_VM_REGS_SCOPED();
   validate();
   if (!sql.empty()) {
     Variant stmt = t_prepare(sql);
@@ -337,7 +343,8 @@ Variant c_SQLite3::t_query(CStrRef sql) {
   return false;
 }
 
-Variant c_SQLite3::t_querysingle(CStrRef sql, bool entire_row /* = false */) {
+Variant c_SQLite3::t_querysingle(const String& sql, bool entire_row /* = false */) {
+  SYNC_VM_REGS_SCOPED();
   validate();
   if (!sql.empty()) {
     Variant stmt = t_prepare(sql);
@@ -370,7 +377,7 @@ Variant c_SQLite3::t_querysingle(CStrRef sql, bool entire_row /* = false */) {
   return false;
 }
 
-bool c_SQLite3::t_createfunction(CStrRef name, CVarRef callback,
+bool c_SQLite3::t_createfunction(const String& name, const Variant& callback,
                                  int64_t argcount /* = -1 */) {
   validate();
   if (name.empty()) {
@@ -382,7 +389,7 @@ bool c_SQLite3::t_createfunction(CStrRef name, CVarRef callback,
     return false;
   }
 
-  UserDefinedFuncPtr udf(new UserDefinedFunc());
+  auto udf = std::make_shared<UserDefinedFunc>();
   if (sqlite3_create_function(m_raw_db, name.data(), argcount, SQLITE_UTF8,
                               udf.get(), php_sqlite3_callback_func,
                               NULL, NULL) == SQLITE_OK) {
@@ -394,7 +401,7 @@ bool c_SQLite3::t_createfunction(CStrRef name, CVarRef callback,
   return false;
 }
 
-bool c_SQLite3::t_createaggregate(CStrRef name, CVarRef step, CVarRef final,
+bool c_SQLite3::t_createaggregate(const String& name, const Variant& step, const Variant& final,
                                   int64_t argcount /* = -1 */) {
   validate();
   if (name.empty()) {
@@ -411,7 +418,7 @@ bool c_SQLite3::t_createaggregate(CStrRef name, CVarRef step, CVarRef final,
     return false;
   }
 
-  UserDefinedFuncPtr udf(new UserDefinedFunc());
+  auto udf = std::make_shared<UserDefinedFunc>();
   if (sqlite3_create_function(m_raw_db, name.data(), argcount, SQLITE_UTF8,
                               udf.get(), NULL,
                               php_sqlite3_callback_step,
@@ -425,8 +432,8 @@ bool c_SQLite3::t_createaggregate(CStrRef name, CVarRef step, CVarRef final,
   return false;
 }
 
-bool c_SQLite3::t_openblob(CStrRef table, CStrRef column, int64_t rowid,
-                           CStrRef dbname /* = null_string */) {
+bool c_SQLite3::t_openblob(const String& table, const String& column, int64_t rowid,
+                           const String& dbname /* = null_string */) {
   throw NotSupportedException(__func__, "sqlite3 stream");
 }
 
@@ -442,7 +449,7 @@ c_SQLite3Stmt::~c_SQLite3Stmt() {
   }
 }
 
-void c_SQLite3Stmt::t___construct(CObjRef dbobject, CStrRef statement) {
+void c_SQLite3Stmt::t___construct(const Object& dbobject, const String& statement) {
   if (!statement.empty()) {
     c_SQLite3 *db = dbobject.getTyped<c_SQLite3>();
     db->validate();
@@ -497,9 +504,9 @@ bool c_SQLite3Stmt::t_clear() {
   return true;
 }
 
-bool c_SQLite3Stmt::t_bindparam(CVarRef name, VRefParam parameter,
+bool c_SQLite3Stmt::t_bindparam(const Variant& name, VRefParam parameter,
                                 int64_t type /* = k_SQLITE3_TEXT */) {
-  BoundParamPtr param(new BoundParam());
+  auto param = std::make_shared<BoundParam>();
   param->type = type;
   param->value.assignRef(parameter);
 
@@ -521,13 +528,14 @@ bool c_SQLite3Stmt::t_bindparam(CVarRef name, VRefParam parameter,
   return true;
 }
 
-bool c_SQLite3Stmt::t_bindvalue(CVarRef name, CVarRef parameter,
+bool c_SQLite3Stmt::t_bindvalue(const Variant& name, const Variant& parameter,
                                 int64_t type /* = k_SQLITE3_TEXT */) {
   Variant v = parameter;
   return t_bindparam(name, v, type);
 }
 
 Variant c_SQLite3Stmt::t_execute() {
+  SYNC_VM_REGS_SCOPED();
   validate();
 
   for (unsigned int i = 0; i < m_bound_params.size(); i++) {
@@ -548,7 +556,7 @@ Variant c_SQLite3Stmt::t_execute() {
       {
         String sblob;
         if (p.value.isResource()) {
-          Variant blob = f_stream_get_contents(p.value);
+          Variant blob = f_stream_get_contents(p.value.toResource());
           if (same(blob, false)) {
             raise_warning("Unable to read stream for parameter %d",
                           p.index);
@@ -634,6 +642,7 @@ int64_t c_SQLite3Result::t_columntype(int64_t column) {
 }
 
 Variant c_SQLite3Result::t_fetcharray(int64_t mode /* = k_SQLITE3_BOTH */) {
+  SYNC_VM_REGS_SCOPED();
   validate();
 
   switch (sqlite3_step(m_stmt->m_raw_stmt)) {

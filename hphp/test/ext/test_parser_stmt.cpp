@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -660,33 +660,18 @@ bool TestParserStmt::TestYieldStatement() {
   WithOpt w1(Option::EnableHipHopSyntax);
 
   V("<?php function foo() { yield break;}",
-    "function ($" CONTINUATION_OBJECT_NAME ") {\n"
-    "hphp_unpack_continuation();\n"
-    "return;\n"
-    "}\n"
     "function foo() {\n"
-    "return hphp_create_continuation"
-    "('', 'foo$continuation', __FUNCTION__);\n"
+    "return;\n"
     "}\n");
 
   V("<?php function foo() { yield 123;}",
-    "function ($" CONTINUATION_OBJECT_NAME ") {\n"
-    "hphp_unpack_continuation();\n"
-    "yield 123;\n"
-    "}\n"
     "function foo() {\n"
-    "return hphp_create_continuation"
-    "('', 'foo$continuation', __FUNCTION__);\n"
+    "yield 123;\n"
     "}\n");
 
   V("<?php class bar { function foo() { yield 123; yield 456;} }",
     "class bar {\n"
     "public function foo() {\n"
-    "return hphp_create_continuation"
-    "(__CLASS__, 'foo$continuation', __METHOD__);\n"
-    "}\n"
-    "public function ($" CONTINUATION_OBJECT_NAME ") {\n"
-    "hphp_unpack_continuation();\n"
     "yield 123;\n"
     "yield 456;\n"
     "}\n"

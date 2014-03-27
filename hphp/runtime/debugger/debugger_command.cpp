@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,8 +13,10 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/debugger/debugger_command.h"
+
+#include <poll.h>
+
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/cmd/all.h"
 #include "hphp/util/logger.h"
@@ -29,7 +31,7 @@ TRACE_SET_MOD(debugger);
 // flushes the buffer.
 // Returns false if an exception occurs during these steps.
 bool DebuggerCommand::send(DebuggerThriftBuffer &thrift) {
-  TRACE(5, "DebuggerCommand::send\n");
+  TRACE(5, "DebuggerCommand::send cmd of type %d\n", m_type);
   try {
     thrift.reset(false);
     sendImpl(thrift);
@@ -87,14 +89,16 @@ bool DebuggerCommand::Receive(DebuggerThriftBuffer &thrift,
     TRACE_RB(1, "DebuggerCommand::Receive: error %d\n", errorNumber);
     return errorNumber != EINTR; // Treat signals as timeouts
   }
-  // Any error bits set indicate that we have nothing to read, so fail.
-  if (fds[0].revents != POLLIN) {
+  // If we don't have any data to read (POLLIN) then we're done. If we
+  // do have data we'll attempt to read and decode it below, even if
+  // there are other error bits set.
+  if (!(fds[0].revents & POLLIN)) {
     TRACE_RB(1, "DebuggerCommand::Receive: revents %d\n", fds[0].revents);
     return true;
   }
 
   int32_t type;
-  string clsname;
+  std::string clsname;
   try {
     thrift.reset(true);
     thrift.read(type);
@@ -103,7 +107,7 @@ bool DebuggerCommand::Receive(DebuggerThriftBuffer &thrift,
     // Note: this error case is difficult to test. But, it's exactly the same
     // as the error noted below. Make sure to keep handling of both of these
     // errors in sync.
-    Logger::Error("%s: socket error receiving command", caller);
+    TRACE_RB(1, "%s: socket error receiving command", caller);
     return true;
   }
 
@@ -130,8 +134,11 @@ bool DebuggerCommand::Receive(DebuggerThriftBuffer &thrift,
     case KindOfThread   :  cmd = DebuggerCommandPtr(new CmdThread   ()); break;
     case KindOfUp       :  cmd = DebuggerCommandPtr(new CmdUp       ()); break;
     case KindOfVariable :  cmd = DebuggerCommandPtr(new CmdVariable ()); break;
+    case KindOfVariableAsync :
+      cmd = DebuggerCommandPtr(new CmdVariable (KindOfVariableAsync)); break;
     case KindOfWhere    :  cmd = DebuggerCommandPtr(new CmdWhere    ()); break;
-    case KindOfUser     :  cmd = DebuggerCommandPtr(new CmdUser     ()); break;
+    case KindOfWhereAsync:
+      cmd = DebuggerCommandPtr(new CmdWhere(KindOfWhereAsync)); break;
     case KindOfEval     :  cmd = DebuggerCommandPtr(new CmdEval     ()); break;
     case KindOfInterrupt:  cmd = DebuggerCommandPtr(new CmdInterrupt()); break;
     case KindOfSignal   :  cmd = DebuggerCommandPtr(new CmdSignal   ()); break;
@@ -147,7 +154,7 @@ bool DebuggerCommand::Receive(DebuggerThriftBuffer &thrift,
     }
 
     default:
-      Logger::Error("%s: received bad cmd type: %d", caller, type);
+      TRACE_RB(1, "%s: received bad cmd type: %d", caller, type);
       cmd.reset();
       return true;
   }
@@ -155,7 +162,7 @@ bool DebuggerCommand::Receive(DebuggerThriftBuffer &thrift,
     // Note: this error case is easily tested, and we have a test for it. But
     // the error case noted above is quite difficult to test. Keep these two
     // in sync.
-    Logger::Error("%s: socket error receiving command", caller);
+    TRACE_RB(1, "%s: socket error receiving command", caller);
     cmd.reset();
   }
   return true;
@@ -188,27 +195,6 @@ bool DebuggerCommand::displayedHelp(DebuggerClient &client) {
     return true;
   }
   return false;
-}
-
-// Carries out the command, possibly by sending it to the server.
-// If the client is controlled via the API, the setClientOuput method
-// is invoked to update the client with the command output for access
-// via the API.
-void DebuggerCommand::onClient(DebuggerClient &client) {
-  TRACE(2, "DebuggerCommand::onClient\n");
-  onClientImpl(client);
-  if (client.isApiMode() && !m_incomplete) {
-    setClientOutput(client);
-  }
-}
-
-// Updates the client with information about the execution of this command.
-// This information is not used by the command line client, but can
-// be accessed via the debugger client API exposed to PHP programs.
-void DebuggerCommand::setClientOutput(DebuggerClient &client) {
-  TRACE(2, "DebuggerCommand::setClientOutput\n");
-  // Just default to text
-  client.setOutputType(DebuggerClient::OTText);
 }
 
 // Server-side work for a command. Returning false indicates a failure to

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -82,6 +82,17 @@ void ClassVariable::onParseRecur(AnalysisResultConstPtr ar,
   if (m_modifiers->isFinal()) {
     parseTimeFatal(Compiler::InvalidAttribute,
                    "Properties cannot be declared final");
+  }
+
+  if ((m_modifiers->isExplicitlyPublic() +
+       m_modifiers->isProtected() +
+       m_modifiers->isPrivate()) > 1) {
+    m_modifiers->parseTimeFatal(
+      Compiler::InvalidAttribute,
+      "%s: properties of %s",
+      Strings::PICK_ACCESS_MODIFIER,
+      scope->getOriginalName().c_str()
+    );
   }
 
   for (int i = 0; i < m_declaration->getCount(); i++) {
@@ -214,10 +225,10 @@ int ClassVariable::getKidCount() const {
 void ClassVariable::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_modifiers = boost::dynamic_pointer_cast<ModifierExpression>(cp);
+      m_modifiers = dynamic_pointer_cast<ModifierExpression>(cp);
       break;
     case 1:
-      m_declaration = boost::dynamic_pointer_cast<ExpressionList>(cp);
+      m_declaration = dynamic_pointer_cast<ExpressionList>(cp);
       break;
     default:
       assert(false);
@@ -269,11 +280,28 @@ void ClassVariable::inferTypes(AnalysisResultPtr ar) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
+void ClassVariable::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = m_typeConstraint.empty() ? 3 : 4;
+  cg.printObjectHeader("ClassVariableStatement", numProps);
+  cg.printPropertyHeader("modifiers");
+  m_modifiers->outputCodeModel(cg);
+  if (!m_typeConstraint.empty()) {
+    cg.printPropertyHeader("typeAnnotation");
+    cg.printTypeExpression(m_typeConstraint);
+  }
+  cg.printPropertyHeader("expressions");
+  cg.printExpressionVector(m_declaration);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 
 void ClassVariable::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
   m_modifiers->outputPHP(cg, ar);
-  cg_printf(" ");
   m_declaration->outputPHP(cg, ar);
   cg_printf(";\n");
 }

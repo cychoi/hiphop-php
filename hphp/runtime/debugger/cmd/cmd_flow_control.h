@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -54,17 +54,15 @@ namespace HPHP { namespace Eval {
 // and remember enough state to determine if they should really transition their
 // state or not.
 
-DECLARE_BOOST_TYPES(CmdFlowControl);
 class CmdFlowControl : public DebuggerCommand {
 public:
   explicit CmdFlowControl(Type type)
     : DebuggerCommand(type), m_complete(false), m_needsVMInterrupt(false),
-      m_stackDepth(0), m_vmDepth(0), m_stepOutUnit(nullptr),
-      m_stepOutOffset1(InvalidAbsoluteOffset),
-      m_stepOutOffset2(InvalidAbsoluteOffset), m_count(1) { }
+      m_stackDepth(0), m_vmDepth(0), m_count(1) { }
   virtual ~CmdFlowControl();
 
   virtual bool onServer(DebuggerProxy &proxy);
+  virtual void onClient(DebuggerClient &client);
 
   // Work done to setup a new flow command, after receiving it from the client.
   virtual void onSetup(DebuggerProxy &proxy, CmdInterrupt &interrupt) = 0;
@@ -80,7 +78,6 @@ public:
   bool needsVMInterrupt() { return m_needsVMInterrupt; }
 
 protected:
-  virtual void onClientImpl(DebuggerClient &client);
   virtual void sendImpl(DebuggerThriftBuffer &thrift);
   virtual void recvImpl(DebuggerThriftBuffer &thrift);
 
@@ -101,11 +98,32 @@ protected:
   int m_vmDepth;
   std::string m_loc; // last break's source location
 
-  HPHP::Unit *m_stepOutUnit;
-  Offset m_stepOutOffset1;
-  Offset m_stepOutOffset2;
+  // Represents the destination of an internal stepping operation by
+  // unit and offset. Implictly maintains the breakpoint filter.
+  class StepDestination {
+  public:
+    StepDestination();
+    StepDestination(const HPHP::Unit* unit, Offset offset);
+    StepDestination(const StepDestination& other) = delete;
+    StepDestination& operator=(const StepDestination& other) = delete;
+    StepDestination(StepDestination&& other);
+    StepDestination& operator=(StepDestination&& other);
+    ~StepDestination();
+
+    bool valid() const { return m_unit != nullptr; }
+    bool at(const Unit* unit, Offset o) const {
+      return (m_unit == unit) && (m_offset == o);
+    }
+
+  private:
+    const HPHP::Unit* m_unit;
+    Offset m_offset;
+    bool m_ownsInternalBreakpoint;
+  };
 
 private:
+  StepDestination m_stepOut1;
+  StepDestination m_stepOut2;
   int16_t m_count;
   bool m_smallStep;
 };

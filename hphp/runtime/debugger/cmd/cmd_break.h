@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,14 +18,16 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_BREAK_H_
 
 #include "hphp/runtime/debugger/debugger_command.h"
+#include <vector>
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdBreak);
 class CmdBreak : public DebuggerCommand {
 public:
-  CmdBreak() : DebuggerCommand(KindOfBreak), m_breakpoints(nullptr) {}
+  CmdBreak() : DebuggerCommand(KindOfBreak), m_breakpoints(nullptr) {
+    m_version = 1;
+  }
 
   // Informs the client of all strings that may follow a break command.
   // Used for auto completion. The client uses the prefix of the argument
@@ -35,11 +37,6 @@ public:
   // The text to display when the debugger client processes "help break".
   virtual void help(DebuggerClient &client);
 
-  // Updates the client with information about the execution of this command.
-  // This information is not used by the command line client, but can
-  // be accessed via the debugger client API exposed to PHP programs.
-  virtual void setClientOutput(DebuggerClient &client);
-
   // Updates the breakpoint list in the proxy with the new list
   // received from the client. Then sends the command back to the
   // client as confirmation. Returns false if the confirmation message
@@ -48,14 +45,14 @@ public:
 
   // Creates a new CmdBreak instance, sets its breakpoints to the client's
   // list, sends the command to the server and waits for a response.
-  static bool SendClientBreakpointListToServer(DebuggerClient &client);
+  static void SendClientBreakpointListToServer(DebuggerClient &client);
 
-protected:
   // Carries out the Break command. This always involves an action on the
   // client and usually, but not always, involves the server by sending
   // this command to the server and waiting for its response.
-  virtual void onClientImpl(DebuggerClient &client);
+  virtual void onClient(DebuggerClient &client);
 
+protected:
   // Serializes this command into the given Thrift buffer.
   virtual void sendImpl(DebuggerThriftBuffer &thrift);
 
@@ -75,16 +72,16 @@ private:
   // memory. In the latter case the destructor for CmdBreak frees
   // the memory. (The base class destructor is only invoked for instances
   // that point to the collection in the client.)
-  BreakPointInfoPtrVec *m_breakpoints;
+  std::vector<BreakPointInfoPtr> *m_breakpoints;
 
   // Holds the breakpoint collection of a CmdBreak received via Thrift.
-  BreakPointInfoPtrVec m_bps;
+  std::vector<BreakPointInfoPtr> m_bps;
 
   // Uses the client to send this command to the server, which
   // will update its breakpoint list with the one in this command.
   // The client will block until the server echoes
   // this command back to it. The echoed command is discarded.
-  bool updateServer(DebuggerClient &client);
+  void updateServer(DebuggerClient &client);
 
   // Carries out the "break list" command.
   void processList(DebuggerClient &client);

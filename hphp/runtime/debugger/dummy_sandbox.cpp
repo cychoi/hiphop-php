@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,10 +20,11 @@
 
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/cmd/cmd_signal.h"
-#include "hphp/runtime/base/program_functions.h"
-#include "hphp/runtime/base/server/source_root_info.h"
+#include "hphp/runtime/base/program-functions.h"
+#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/server/source-root-info.h"
 #include "hphp/runtime/base/externals.h"
-#include "hphp/runtime/base/hphp_system.h"
+#include "hphp/runtime/base/hphp-system.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
 
@@ -35,40 +36,21 @@ DummySandbox::DummySandbox(DebuggerProxy *proxy,
                            const std::string &defaultPath,
                            const std::string &startupFile)
     : m_proxy(proxy), m_defaultPath(defaultPath), m_startupFile(startupFile),
-      m_stopped(false),
-      m_signum(CmdSignal::SignalNone) {
-  TRACE(2, "DummySandbox::DummySandbox\n");
-  m_thread = new AsyncFunc<DummySandbox>(this, &DummySandbox::run);
-}
-
-bool DummySandbox::waitForEnd(int seconds) {
-  TRACE(2, "DummySandbox::waitForEnd\n");
-  bool ret = m_thread->waitForEnd(seconds);
-  if (ret) {
-    delete m_thread;
-  }
-  return ret;
-}
+      m_thread(this, &DummySandbox::run), m_stopped(false),
+      m_signum(CmdSignal::SignalNone) { }
 
 void DummySandbox::start() {
   TRACE(2, "DummySandbox::start\n");
-  m_thread->start();
+  m_thread.start();
 }
 
-void DummySandbox::stop() {
+// Stop the sandbox thread, and wait for it to end. Timeout is in
+// seconds. This can be called multiple times.
+bool DummySandbox::stop(int timeout) {
   TRACE(2, "DummySandbox::stop\n");
   m_stopped = true;
-  ThreadInfo *ti = ThreadInfo::s_threadInfo.getNoCheck();
-  if (ti->m_reqInjectionData.getDummySandbox()) {
-    // called from dummy sandbox thread itself, schedule retirement
-    Debugger::RetireDummySandboxThread(this);
-  } else {
-    // called from worker thread, we wait for the dummySandbox to end
-    m_thread->waitForEnd();
-    // we are sure it's always created by new and this is the last thing
-    // on this object
-    delete this;
-  }
+  notify(); // Wakeup the sandbox thread so it will notice the stopped flag
+  return m_thread.waitForEnd(timeout);
 }
 
 namespace {
@@ -77,7 +59,7 @@ struct CLISession : private boost::noncopyable {
   CLISession() {
     TRACE(2, "CLISession::CLISession\n");
     char *argv[] = {"", nullptr};
-    execute_command_line_begin(1, argv, 0);
+    execute_command_line_begin(1, argv, 0, {});
   }
   ~CLISession() {
     TRACE(2, "CLISession::~CLISession\n");
@@ -85,25 +67,22 @@ struct CLISession : private boost::noncopyable {
     ThreadInfo::s_threadInfo.getNoCheck()->
       m_reqInjectionData.setDebugger(false);
     execute_command_line_end(0, false, nullptr);
-    Eval::DebuggerClient::Shutdown();
   }
 };
 
 }
 
-static const StaticString s__SERVER("_SERVER");
+const StaticString s__SERVER("_SERVER");
 
 void DummySandbox::run() {
   TRACE(2, "DummySandbox::run\n");
   ThreadInfo *ti = ThreadInfo::s_threadInfo.getNoCheck();
-  Debugger::RegisterThread();
-  ti->m_reqInjectionData.setDummySandbox(true);
   while (!m_stopped) {
     try {
       CLISession hphpSession;
 
       DSandboxInfo sandbox = m_proxy->getSandbox();
-      string msg;
+      std::string msg;
       if (sandbox.valid()) {
         GlobalVariables *g = get_global_variables();
         SourceRootInfo sri(sandbox.m_user, sandbox.m_name);
@@ -114,27 +93,31 @@ void DummySandbox::run() {
           msg = "Invalid sandbox was specified. "
             "PHP files may not be loaded properly.\n";
         } else {
-          sri.setServerVariables(g->getRef(s__SERVER));
+          auto& server = g->getRef(s__SERVER);
+          forceToArray(server);
+          sri.setServerVariables(server.toArrRef());
         }
         Debugger::RegisterSandbox(sandbox);
         g_context->setSandboxId(sandbox.id());
 
-        char cwd[PATH_MAX];
-        getcwd(cwd, sizeof(cwd));
         std::string doc = getStartupDoc(sandbox);
-        Logger::Info("Start loading startup doc '%s', pwd = '%s'",
-                     doc.c_str(), cwd);
-        bool error; string errorMsg;
-        bool ret = hphp_invoke(g_context.getNoCheck(), doc, false, null_array,
-                               uninit_null(), "", "", error, errorMsg, true, false,
-                               true);
-        if (!ret || error) {
-          msg += "Unable to pre-load " + doc;
-          if (!errorMsg.empty()) {
-            msg += ": " + errorMsg;
+        if (!doc.empty()) {
+          char cwd[PATH_MAX];
+          getcwd(cwd, sizeof(cwd));
+          Logger::Info("Start loading startup doc '%s', pwd = '%s'",
+                       doc.c_str(), cwd);
+          bool error; std::string errorMsg;
+          bool ret = hphp_invoke(g_context.getNoCheck(), doc, false, null_array,
+                                 uninit_null(), "", "", error, errorMsg, true,
+                                 false, true);
+          if (!ret || error) {
+            msg += "Unable to pre-load " + doc;
+            if (!errorMsg.empty()) {
+              msg += ": " + errorMsg;
+            }
           }
+          Logger::Info("Startup doc " + doc + " loaded");
         }
-        Logger::Info("Startup doc " + doc + " loaded");
       } else {
         g_context->setSandboxId(m_proxy->getDummyInfo().id());
       }
@@ -178,7 +161,7 @@ void DummySandbox::notifySignal(int signum) {
 
 std::string DummySandbox::getStartupDoc(const DSandboxInfo &sandbox) {
   TRACE(2, "DummySandbox::getStartupDoc\n");
-  string path;
+  std::string path;
   if (!m_startupFile.empty()) {
     // if relative path, prepend directory
     if (m_startupFile[0] != '/' && m_startupFile[0] != '~') {
@@ -194,9 +177,9 @@ std::string DummySandbox::getStartupDoc(const DSandboxInfo &sandbox) {
 
     // resolving home directory
     if (path[0] == '~') {
-      string user, home;
+      std::string user, home;
       size_t pos = path.find('/');
-      if (pos == string::npos) pos = path.size();
+      if (pos == std::string::npos) pos = path.size();
       if (pos > 1) {
         user = path.substr(1, pos - 1);
       }

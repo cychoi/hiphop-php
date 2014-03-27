@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,9 +23,10 @@
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/option.h"
+#include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/util/hash.h"
-#include "hphp/util/parser/hphp.tab.hpp"
+#include "hphp/parser/hphp.tab.hpp"
 
 using namespace HPHP;
 
@@ -173,10 +174,10 @@ int ObjectPropertyExpression::getKidCount() const {
 void ObjectPropertyExpression::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_object = boost::dynamic_pointer_cast<Expression>(cp);
+      m_object = dynamic_pointer_cast<Expression>(cp);
       break;
     case 1:
-      m_property = boost::dynamic_pointer_cast<Expression>(cp);
+      m_property = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       assert(false);
@@ -277,7 +278,7 @@ TypePtr ObjectPropertyExpression::inferTypes(AnalysisResultPtr ar,
   }
 
   TypePtr ret;
-  if (m_propSymValid && (!cls->derivesFromRedeclaring() ||
+  if (m_propSymValid && (cls->derivesFromRedeclaring() == Derivation::Normal ||
                          m_propSym->isPrivate())) {
     always_assert(m_symOwner);
     TypePtr t(m_propSym->getType());
@@ -330,6 +331,23 @@ ObjectPropertyExpression::postOptimize(AnalysisResultConstPtr ar) {
   return changed ?
     dynamic_pointer_cast<Expression>(shared_from_this()) :
     ExpressionPtr();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void ObjectPropertyExpression::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("ObjectPropertyExpression", 3);
+  cg.printPropertyHeader("object");
+  m_object->outputCodeModel(cg);
+  if (m_property->is(Expression::KindOfScalarExpression)) {
+    cg.printPropertyHeader("propertyName");
+  } else {
+    cg.printPropertyHeader("propertyExpression");
+  }
+  m_property->outputCodeModel(cg);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

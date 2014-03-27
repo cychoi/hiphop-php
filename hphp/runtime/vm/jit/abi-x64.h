@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,7 +19,7 @@
  * tracelets.
  *
  * Most changes here will likely require corresponding changes in
- * __enterTCHelper and other parts of translator-x64.cpp and the IR
+ * __enterTCHelper and other parts of mc-generator.cpp and the IR
  * translator.
  */
 
@@ -27,9 +27,10 @@
 #define incl_HPHP_VM_RUNTIME_TRANSLATOR_ABI_X64_H_
 
 #include "hphp/util/asm-x64.h"
-#include "hphp/runtime/vm/jit/physreg.h"
+#include "hphp/runtime/vm/jit/phys-reg.h"
+#include "hphp/runtime/vm/jit/reserved-stack.h"
 
-namespace HPHP { namespace Transl {
+namespace HPHP { namespace JIT { namespace X64 {
 
 //////////////////////////////////////////////////////////////////////
 /*
@@ -52,10 +53,15 @@ constexpr PhysReg rVmFp      = reg::rbp;
 constexpr PhysReg rVmSp      = reg::rbx;
 
 /*
- * Target cache pointer.  Always points to the base of the target
- * cache block for the current request.
+ * RDS base pointer.  Always points to the base of the RDS block for
+ * the current request.
  */
 constexpr PhysReg rVmTl      = reg::r12;
+
+/*
+ * scratch register
+ */
+constexpr Reg64 rAsm         = reg::r10;
 
 //////////////////////////////////////////////////////////////////////
 /*
@@ -77,8 +83,7 @@ const RegSet kCallerSaved = RegSet()
                           | RegSet(reg::rdi)
                           | RegSet(reg::r8)
                           | RegSet(reg::r9)
-                          // r10 is reserved for the assembler (rAsm), and for
-                          //     various extremely-specific scratch uses
+                          // r10 is for extremely-specific scratch uses (rAsm)
                           // r11 is reserved for CodeGenerator (rCgGP)
                           //
                           // -------------
@@ -185,7 +190,6 @@ const int kNumRegisterArgs = sizeof(argNumToRegName) / sizeof(PhysReg);
  * JIT'd code "reverse calls" the enterTC routine by returning to it,
  * with a service request number and arguments.
  */
-
 const PhysReg serviceReqArgRegs[] = {
   // rdi: contains request number
   reg::rsi, reg::rdx, reg::rcx, reg::r8, reg::r9
@@ -193,128 +197,7 @@ const PhysReg serviceReqArgRegs[] = {
 const int kNumServiceReqArgRegs =
   sizeof(serviceReqArgRegs) / sizeof(PhysReg);
 
-#define SERVICE_REQUESTS \
-  /*
-   * Return from this nested VM invocation to the previous invocation.
-   * (Ending the program if there is no previous invocation.)
-   */ \
-  REQ(EXIT) \
-  \
-  /*
-   * BIND_* all are requests for the first time a call, jump, or
-   * whatever is needed.  This generally involves translating new code
-   * and then patching an address supplied as a service request
-   * argument.
-   */ \
-  REQ(BIND_CALL)         \
-  REQ(BIND_JMP)          \
-  REQ(BIND_JCC)          \
-  REQ(BIND_ADDR)         \
-  REQ(BIND_SIDE_EXIT)    \
-  REQ(BIND_JMPCC_FIRST)  \
-  REQ(BIND_JMPCC_SECOND) \
-  \
-  /*
-   * BIND_JMP_NO_IR is similar to BIND_JMP except that, if a new translation
-   * needs to be generated, it'll force that HHIR is not used.
-   * This is only used when HHIR is turned on.
-   */ \
-  REQ(BIND_JMP_NO_IR)  \
-  \
-  /*
-   * When all translations don't support the incoming types, a
-   * retranslate request is made.
-   */ \
-  REQ(RETRANSLATE) \
-  \
-  /*
-   * If the max translations is reached for a SrcKey, the last
-   * translation in the chain will jump to an interpret request stub.
-   * This instructs enterTC to punt to the interpreter.
-   */ \
-  REQ(INTERPRET) \
-  \
-  /*
-   * When the interpreter pushes an ActRec, the return address for
-   * this ActRec will be set to a stub that raises POST_INTERP_RET,
-   * since it doesn't have a TCA to return to.
-   *
-   * This request is raised in the case that translated machine code
-   * executes the RetC for a frame that was pushed by the interpreter.
-   */ \
-  REQ(POST_INTERP_RET) \
-  \
-  /*
-   * Raised when the execution stack overflowed.
-   */ \
-  REQ(STACK_OVERFLOW) \
-  \
-  /*
-   * This requests a retranslation that does not use HHIR, meaning it
-   * will be an INTERPRET service request.
-   */ \
-  REQ(RETRANSLATE_NO_IR) \
-  \
-  /*
-   * Resume restarts execution at the current PC.  This is used after
-   * an interpOne of an instruction that changes the PC, and in some
-   * cases with FCall.
-   */ \
-  REQ(RESUME)
-
-enum ServiceRequest {
-#define REQ(nm) REQ_##nm,
-  SERVICE_REQUESTS
-#undef REQ
-};
-
-/*
- * Various flags that are passed to emitServiceReq.  May be or'd
- * together.
- */
-enum class SRFlags {
-  None = 0,
-
-  /*
-   * Indicates the service request should be aligned.
-   */
-  Align = 1,
-
-  /*
-   * Indicates the service request is not a one-time use stub, so it's
-   * ineligable for service request reclamation.
-   *
-   * The service request also will not reuse an existing service
-   * request---i.e. it will be emitted at the current astubs frontier.
-   */
-  Persistent = 2,
-
-  /*
-   * For some service requests (returning from interpreted frames),
-   * using a ret instruction to get back to enterTCHelper will
-   * unbalance the return stack buffer---in these cases use a jmp.
-   */
-  JmpInsteadOfRet = 4,
-
-  /*
-   * The service request should be emitted on a instead of astubs.
-   *
-   * Overrides whatever the bits for Align and Persistent are and
-   * implies !Align and !Persistent.
-   */
-  EmitInA = 8,
-};
-
-inline bool operator&(SRFlags a, SRFlags b) {
-  return int(a) & int(b);
-}
-
-inline SRFlags operator|(SRFlags a, SRFlags b) {
-  return SRFlags(int(a) | int(b));
-}
-
 //////////////////////////////////////////////////////////////////////
-
 // Set of all the x64 registers.
 const RegSet kAllX64Regs = RegSet(kAllRegs).add(reg::r10)
                          | kSpecialCrossTraceRegs;
@@ -323,28 +206,12 @@ const RegSet kAllX64Regs = RegSet(kAllRegs).add(reg::r10)
  * Some data structures are accessed often enough from translated code
  * that we have shortcuts for getting offsets into them.
  */
-#define TVOFF(nm) offsetof(TypedValue, nm)
-#define AROFF(nm) offsetof(ActRec, nm)
-#define CONTOFF(nm) offsetof(c_Continuation, nm)
-#define MISOFF(nm) offsetof(Transl::MInstrState, nm)
-
-/* In hhir-translated tracelets, the MInstrState is stored right above
- * the reserved spill space so we add an extra offset.  */
-#define HHIR_MISOFF(nm) (offsetof(Transl::MInstrState, nm) + kReservedRSPSpillSpace)
+#define TVOFF(nm) int(offsetof(TypedValue, nm))
+#define AROFF(nm) int(offsetof(ActRec, nm))
+#define CONTOFF(nm) int(offsetof(c_Continuation, nm))
 
 //////////////////////////////////////////////////////////////////////
 
-/*
- * This much space (in bytes) at 8(%rsp) is allocated on entry to the
- * TC and made available for scratch purposes (right above the return
- * address).  It is used as spill locations by HHIR (see LinearScan),
- * and for MInstrState in both HHIR and translator-x64-vector.cpp.
- */
-const size_t kReservedRSPScratchSpace = 0x280;
-const size_t kReservedRSPSpillSpace   = 0x200;
-
-//////////////////////////////////////////////////////////////////////
-
-}}
+}}}
 
 #endif

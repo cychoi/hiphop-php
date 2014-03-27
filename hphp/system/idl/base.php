@@ -51,7 +51,7 @@ $TYPENAMES = array
                         'idlname' => 'VariantMap', 'phpname' => 'map'),
    Object      => array('name' => 'Object',        'enum' => 'Object',
                         'idlname' => 'Object',     'phpname' => 'object'),
-   Resource    => array('name' => 'Object',        'enum' => 'Object',
+   Resource    => array('name' => 'Resource',      'enum' => 'Resource',
                         'idlname' => 'Resource',   'phpname' => 'resource'),
    Variant     => array('name' => 'Variant',       'enum' => 'Variant',
                         'idlname' => 'Variant',    'phpname' => 'mixed'),
@@ -70,6 +70,7 @@ $TYPENAMES = array
 $REFNAMES = array('String'      => 'CStrRef',
                   'Array'       => 'CArrRef',
                   'Object'      => 'CObjRef',
+                  'Resource'    => 'CResRef',
                   'Variant'     => 'CVarRef',
                   'Numeric'     => 'CVarRef',
                   'Primitive'   => 'CVarRef',
@@ -82,7 +83,8 @@ $MAGIC_METHODS = array('__get' => 'ObjectData::UseGet',
                        '__isset' => 'ObjectData::UseIsset',
                        '__unset' => 'ObjectData::UseUnset',
                        '__call' => 'ObjectData::HasCall',
-                       '__callStatic' => 'ObjectData::HasCallStatic');
+                       '__clone' => 'ObjectData::HasClone',
+                      );
 
 function get_idl_name($type, $null = '') {
   global $TYPENAMES;
@@ -116,6 +118,7 @@ function get_php_name($type, $null = 'mixed') {
 // flags
 
 // ClassInfo attributes, and these numbers need to be consistent with them!
+define('ZendParamModeNull',              1 <<  0);
 define('IsAbstract',                     1 <<  4);
 define('IsFinal',                        1 <<  5);
 define('IsPublic',                       1 <<  6);
@@ -123,12 +126,11 @@ define('IsProtected',                    1 <<  7);
 define('IsPrivate',                      1 <<  8);
 define('AllowOverride',                  1 <<  8);
 define('IsStatic',                       1 <<  9);
-// FIXME (#2163116): IsInherited = (1 << 10) in base_class.h
 define('IsCppAbstract',                  1 << 10);
 define('IsReference',                    1 << 11);
-define('IsConstructor',                  1 << 12);
 define('IsNothing',                      1 << 13);
-define('HasDocComment',                  1 << 14);
+define('ZendCompat',                     1 << 14);
+define('IsCppSerializable',              1 << 15);
 define('HipHopSpecific',                 1 << 16);
 define('VariableArguments',              1 << 17);
 define('RefVariableArguments',           1 << 18);
@@ -143,7 +145,8 @@ define('ContextSensitive',               1 << 26);
 define('NoDefaultSweep',                 1 << 27);
 define('IsSystem',                       1 << 28);
 define('IsTrait',                        1 << 29);
-define('NeedsActRec',                    1 << 31);
+define('ZendParamModeFalse',             1 << 30);
+define('NoFCallBulitin',                 1 << 31);
 
 // Mask for checking the flags related to variable arguments
 define('VarArgsMask', (VariableArguments | RefVariableArguments |
@@ -167,7 +170,6 @@ function get_flag_names($arr, $name, $global_func) {
     if ($flag & IsPrivate           ) $ret .= ' | IsPrivate'             ;
   }
   if ($flag & IsStatic              ) $ret .= ' | IsStatic'              ;
-  if ($flag & HasDocComment         ) $ret .= ' | HasDocComment'         ;
   if ($flag & HipHopSpecific        ) $ret .= ' | HipHopSpecific'        ;
   if ($flag & VariableArguments     ) $ret .= ' | VariableArguments'     ;
   if ($flag & RefVariableArguments  ) $ret .= ' | RefVariableArguments'  ;
@@ -181,7 +183,7 @@ function get_flag_names($arr, $name, $global_func) {
   if ($flag & ContextSensitive      ) $ret .= ' | ContextSensitive'      ;
   if ($flag & NoDefaultSweep        ) $ret .= ' | NoDefaultSweep'        ;
   if ($flag & IsTrait               ) $ret .= ' | IsTrait'               ;
-  if ($flag & NeedsActRec           ) $ret .= ' | NeedsActRec'           ;
+  if ($flag & NoFCallBuiltin        ) $ret .= ' | NoFCallBuiltin'        ;
 
   if ($ret == '') {
     throw new Exception("invalid flag $flag");
@@ -228,10 +230,8 @@ function BeginClass($class) {
   $class['flags'] = read_array_of_constant_names($class['flags']);
   $doc = get_class_doc_comments($class);
   if (!empty($doc)) {
-    $class['flags'] |= HasDocComment;
     $class['doc'] = $doc;
   } else {
-    $class['flags'] &= ~HasDocComment;
     $class['doc'] = null;
   }
 
@@ -350,10 +350,8 @@ function DefineFunction($func) {
 
   $doc = get_function_doc_comments($func, $current_class);
   if (!empty($doc)) {
-    $func['flags'] |= HasDocComment;
     $func['doc'] = $doc;
   } else {
-    $func['flags'] &= ~HasDocComment;
     $func['doc'] = null;
   }
 
@@ -491,7 +489,7 @@ function get_serialized_default($s) {
     return serialize(eval("return $s;"));
   }
   if ($s == "empty_array") return serialize(array());
-  if (preg_match('/^null_(string|array|object|variant)$/', $s)) {
+  if (preg_match('/^null_(string|array|object|resource|variant)$/', $s)) {
     return serialize(null);
   }
   if (preg_match('/^k_\w+( ?\| ?k_\w+)*$/', $s, $m)) {
@@ -776,7 +774,7 @@ EOT
     fprintf($f, "  // constructor must call setAttributes(%s)\n",
             implode('|', $flags));
   }
-  fprintf($f, "  public: c_%s(Class* cls = c_%s::s_cls);\n",
+  fprintf($f, "  public: c_%s(Class* cls = c_%s::classof());\n",
           $class['name'], $class['name']);
   fprintf($f, "  public: ~c_%s();\n", $class['name']);
   foreach ($class['methods'] as $m) {
@@ -1047,7 +1045,7 @@ function idx($arr, $idx, $default=null) {
 }
 
 function format_doc_desc($arr, $clsname) {
-  if ($arr['flags'] & HipHopSpecific) {
+  if (isset($arr['flags']) && $arr['flags'] & HipHopSpecific) {
     $desc = "( HipHop specific )\n";
   } else {
     $clsname = preg_replace('#_#', '-', strtolower($clsname));
@@ -1137,12 +1135,13 @@ function phpnet_clean($text) {
                        '<>', $text);
   $text = preg_replace('#<p class="para">#', '<>', $text);
   $text = preg_replace('#<strong class="note">Note</strong>:#', '', $text);
-  $text = preg_replace('#<.+?>#', '', $text);
+  $text = preg_replace('#<.+?'.'>#', '', $text);
   $text = preg_replace('#[ \t\n]+#s', ' ', $text);
   $text = preg_replace('# ?<> ?#', "\n\n", $text);
   $text = preg_replace('/&#039;/', "'", $text);
   $text = trim(html_entity_decode($text));
   $text = preg_replace('/[^\t\n -~]/', '', $text);
+  $text = preg_replace('/WarningThis/', 'Warning: This', $text);
   return $text;
 }
 
@@ -1167,7 +1166,7 @@ function phpnet_get_function_info($name, $clsname = 'function') {
   if (preg_match('#<div class="refsect1 parameters"[^>]*>(.*?)'.
                  '<div class="refsect1 #s', $doc, $m)) {
     $desc = $m[1];
-    if (preg_match_all('#<code class="parameter">(.*?)</code>#s', $desc, $m)) {
+    if (preg_match_all('#<span class="term">\s*<em><code class="parameter">(.*?)</code>#s', $desc, $m)) {
       foreach ($m[1] as $param) {
         $ret['param_names'][] = phpnet_clean($param);
       }
@@ -1195,6 +1194,44 @@ function phpnet_get_function_info($name, $clsname = 'function') {
   return $ret;
 }
 
+function phpnet_get_class_info($name) {
+  $name = preg_replace('#_#', '-', strtolower($name));
+  $doc = @file_get_contents("http://php.net/manual/en/class.$name.php");
+  if ($doc === false) {
+    return array();
+  }
+
+  $ret = array(
+    'desc' => '',
+    'props' => array(),
+    'funcs' => array()
+  );
+  if (preg_match('#<h2 class="title">Introduction</h2>(.*?)'.
+                              '<div class="section"#s', $doc, $m)) {
+    $ret['desc'] = phpnet_clean($m[1]);
+  }
+
+  if (preg_match('#"modifier">extends</span>.*?class="classname">(.*?)#s', $doc, $m)) {
+    $ret['parent'] = phpnet_clean($m[1]);
+  }
+
+  if (preg_match_all('#<var class="varname">(.*?)</var>#s', $doc, $m)) {
+    foreach ($m[1] as $prop) {
+      $ret['props'][]  = phpnet_clean($prop);
+    }
+  }
+
+  if (preg_match_all(
+      '#<a href="'.$name.'\..*?.php">'.$name.'::(.*?)</a>#si',
+      $doc, $m)) {
+    foreach ($m[1] as $prop) {
+      $ret['funcs'][]  = phpnet_clean($prop);
+    }
+  }
+
+  return $ret;
+}
+
 function phpnet_get_class_desc($name) {
   $name = preg_replace('#_#', '-', strtolower($name));
   $doc = @file_get_contents("http://php.net/manual/en/class.$name.php");
@@ -1209,10 +1246,30 @@ function phpnet_get_class_desc($name) {
 function phpnet_get_extension_functions($name) {
   $doc = @file_get_contents("http://www.php.net/manual/en/ref.$name.php");
   if ($doc === false) {
-    return false;
+    return array();
   }
 
   preg_match_all('#<li><a href="function\..*?\.php">(.*?)</a>.*?</li>#',
                  $doc, $m);
+  return $m[1];
+}
+
+function phpnet_get_extension_constants($name) {
+  $doc = @file_get_contents("http://www.php.net/manual/en/$name.constants.php");
+  if ($doc === false) {
+    return array();
+  }
+
+  preg_match_all('#<code>(.*?)</code>#', $doc, $m);
+  return $m[1];
+}
+
+function phpnet_get_extension_classes($name) {
+  $doc = @file_get_contents("http://www.php.net/manual/en/book.$name.php");
+  if ($doc === false) {
+    return array();
+  }
+
+  preg_match_all('#<a href="class.[^"]*.php">(.*?)</a>#', $doc, $m);
   return $m[1];
 }

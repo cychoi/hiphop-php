@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 $mapFn = function ($v) {
  return $v+1;
@@ -12,7 +12,7 @@ $st = Set {
 0, 3}
 ;
 var_dump($st->map($mapFn)->filter($filtFn));
-foreach ($st->view()->map($mapFn)->filter($filtFn) as $v) {
+foreach ($st->lazy()->map($mapFn)->filter($filtFn) as $v) {
   var_dump($v);
 }
 $st = new Set(Vector {

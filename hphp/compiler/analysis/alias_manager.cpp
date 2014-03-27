@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,9 @@
 */
 
 #include "hphp/compiler/analysis/alias_manager.h"
+#include <map>
+#include <utility>
+#include <vector>
 
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/analysis/function_scope.h"
@@ -28,14 +31,14 @@
 #include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/simple_function_call.h"
-#include "hphp/compiler/expression/array_element_expression.h"
 #include "hphp/compiler/expression/object_property_expression.h"
 #include "hphp/compiler/expression/object_method_expression.h"
 #include "hphp/compiler/expression/parameter_expression.h"
 #include "hphp/compiler/expression/expression_list.h"
-#include "hphp/compiler/expression/expression.h"
 #include "hphp/compiler/expression/include_expression.h"
 #include "hphp/compiler/expression/closure_expression.h"
+#include "hphp/compiler/expression/yield_expression.h"
+#include "hphp/compiler/expression/await_expression.h"
 #include "hphp/compiler/statement/statement.h"
 #include "hphp/compiler/statement/statement_list.h"
 #include "hphp/compiler/statement/catch_statement.h"
@@ -64,12 +67,14 @@
 #include "hphp/compiler/analysis/live_dict.h"
 #include "hphp/compiler/analysis/ref_dict.h"
 
-#include "hphp/util/parser/hphp.tab.hpp"
-#include "hphp/util/parser/location.h"
-#include "hphp/util/util.h"
+#include "hphp/runtime/vm/runtime.h"
 
-#define spc(T,p) boost::static_pointer_cast<T>(p)
-#define dpc(T,p) boost::dynamic_pointer_cast<T>(p)
+#include "hphp/parser/hphp.tab.hpp"
+#include "hphp/parser/location.h"
+#include "hphp/util/text-util.h"
+
+#define spc(T,p) static_pointer_cast<T>(p)
+#define dpc(T,p) dynamic_pointer_cast<T>(p)
 
 using namespace HPHP;
 using std::string;
@@ -744,15 +749,6 @@ void AliasManager::killLocals() {
         goto kill_it;
 
       case Expression::KindOfBinaryOpExpression:
-        if (!(effects & emask) &&
-            getOpForAssignmentOp(spc(BinaryOpExpression, e)->getOp())) {
-          if (okToKill(spc(BinaryOpExpression, e)->getExp1(), false)) {
-            e->setContext(Expression::DeadStore);
-            m_replaced++;
-            ++it;
-            continue;
-          }
-        }
         cleanInterf(spc(BinaryOpExpression, e)->getExp1(), ++it, end, depth);
         continue;
 
@@ -1524,8 +1520,7 @@ ExpressionPtr AliasManager::canonicalizeNode(
             e->is(Expression::KindOfSimpleVariable) &&
             !e->isThis()) {
           Symbol *s = spc(SimpleVariable, e)->getSymbol();
-          if (s && !s->isParameter() && !s->isGeneratorParameter() &&
-              !s->isClosureVar()) {
+          if (s && !s->isParameter() && !s->isClosureVar()) {
             rep = e->makeConstant(m_arp, "null");
             Compiler::Error(Compiler::UseUndeclaredVariable, e);
             if (m_variables->getAttribute(VariableTable::ContainsCompact)) {
@@ -1585,6 +1580,7 @@ ExpressionPtr AliasManager::canonicalizeNode(
               cur = next;
             }
             if (!m_inCall &&
+                !last->is(Expression::KindOfAwaitExpression) &&
                 !last->is(Expression::KindOfYieldExpression) &&
                 ae->isUnused() && m_accessList.isLast(ae) &&
                 !e->hasAnyContext(Expression::AccessContext |
@@ -1932,6 +1928,7 @@ StatementPtr AliasManager::canonicalizeRecur(StatementPtr s, int &ret) {
 
   switch (stype) {
   case Statement::KindOfUseTraitStatement:
+  case Statement::KindOfTraitRequireStatement:
   case Statement::KindOfTraitPrecStatement:
   case Statement::KindOfTraitAliasStatement:
     return StatementPtr();
@@ -1973,7 +1970,7 @@ StatementPtr AliasManager::canonicalizeRecur(StatementPtr s, int &ret) {
   }
 
   case Statement::KindOfIfBranchStatement:
-    always_assert(0);
+    always_assert(false);
     break;
 
   case Statement::KindOfForStatement: {
@@ -2365,9 +2362,6 @@ int AliasManager::collectAliasInfoRecur(ConstructPtr cs, bool unused) {
       case Expression::KindOfSimpleFunctionCall:
       {
         SimpleFunctionCallPtr sfc(spc(SimpleFunctionCall, e));
-        if (sfc->getName() == "hphp_create_continuation") {
-          m_inlineAsExpr = false;
-        }
         sfc->updateVtFlags();
       }
       case Expression::KindOfDynamicFunctionCall:
@@ -2538,8 +2532,10 @@ public:
   }
 private:
 
-  #define CONSTRUCT_PARAMS(from) \
+  #define CONSTRUCT_EXP(from) \
       (from)->getScope(), (from)->getLocation()
+  #define CONSTRUCT_STMT(from) \
+      (from)->getScope(), (from)->getLabelScope(), (from)->getLocation()
 
   AnalysisResultConstPtr m_ar;
   bool m_changed;
@@ -2612,7 +2608,7 @@ private:
 
     ExpressionListPtr el(
         new ExpressionList(
-          CONSTRUCT_PARAMS(target),
+          CONSTRUCT_EXP(target),
           ExpressionList::ListKindComma));
     if (target->isUnused()) {
       el->setUnused(true);
@@ -2638,7 +2634,14 @@ private:
     if (sv && se) {
       const string &s = se->getLiteralString();
       if (s.empty()) return ExpressionPtr();
-      TypePtr o(Type::CreateObjectType(Util::toLower(s)));
+      if (interface_supports_array(s) ||
+          interface_supports_string(s) ||
+          interface_supports_int(s) ||
+          interface_supports_double(s))  {
+        // This could be a primitive type, so don't assert anything
+        return ExpressionPtr();
+      }
+      TypePtr o(Type::CreateObjectType(toLower(s)));
 
       // don't do specific type assertions for unknown classes
       ClassScopePtr cscope(o->getClass(m_ar, sv->getScope()));
@@ -2949,7 +2952,7 @@ private:
         slistPtr->insertElement(
           ExpStatementPtr(
             new ExpStatement(
-              CONSTRUCT_PARAMS(slistPtr), assertion)),
+              CONSTRUCT_STMT(slistPtr), assertion)),
           idx);
       }
       break;
@@ -3030,12 +3033,12 @@ private:
                   } else {
                     ExpStatementPtr newExpStmt(
                       new ExpStatement(
-                        CONSTRUCT_PARAMS(branch),
+                        CONSTRUCT_STMT(branch),
                         after));
 
                     IfBranchStatementPtr newBranch(
                       new IfBranchStatement(
-                        CONSTRUCT_PARAMS(branch),
+                        CONSTRUCT_STMT(branch),
                         ExpressionPtr(), newExpStmt));
 
                     branches->addElement(newBranch);
@@ -3302,6 +3305,12 @@ private:
 static bool isNewResult(ExpressionPtr e) {
   if (!e) return false;
   if (e->is(Expression::KindOfNewObjectExpression)) return true;
+  if (e->is(Expression::KindOfBinaryOpExpression)) {
+    auto b = spc(BinaryOpExpression, e);
+    if (b->getOp() == T_COLLECTION) {
+      return true;
+    }
+  }
   if (e->is(Expression::KindOfAssignmentExpression)) {
     return isNewResult(spc(AssignmentExpression, e)->getValue());
   }
@@ -3321,19 +3330,12 @@ public:
     DataFlowWalker::walk(*this);
     ControlBlock *b = m_graph.getDfBlock(1);
     std::map<std::string,int>::iterator it = m_gidMap.find("v:this");
-    if (m->getOrigGeneratorFunc()) {
-      BitOps::set(m_gidMap.size(), b->getRow(DataFlow::PRefIn),
-                  BitOps::Bits(-1));
-      BitOps::set(m_gidMap.size(), b->getRow(DataFlow::PInitIn),
-                  BitOps::Bits(-1));
-    } else {
-      if (it != m_gidMap.end() && it->second) {
-        b->setBit(DataFlow::PRefIn, it->second);
-        b->setBit(DataFlow::PInitIn, it->second);
-      }
-      updateParamInfo(m->getParams(), Option::HardTypeHints);
-      updateParamInfo(m->getFunctionScope()->getClosureVars(), false);
+    if (it != m_gidMap.end() && it->second) {
+      b->setBit(DataFlow::PRefIn, it->second);
+      b->setBit(DataFlow::PInitIn, it->second);
     }
+    updateParamInfo(m->getParams(), Option::HardTypeHints);
+    updateParamInfo(m->getFunctionScope()->getClosureVars(), false);
   }
 
   void updateParamInfo(ExpressionListPtr el, bool useDefaults) {
@@ -3345,6 +3347,9 @@ public:
       std::map<std::string,int>::iterator it =
         m_gidMap.find("v:" + p->getName());
       if (it != m_gidMap.end() && it->second) {
+        // NB: this is unsound if the user error handler swallows a
+        // parameter typehint failure.  It's opt-in via compiler
+        // options, though.
         if (useDefaults && p->hasTypeHint() && !p->defaultValue()) {
           b->setBit(DataFlow::AvailIn, it->second);
         }
@@ -3570,25 +3575,6 @@ public:
       }
     }
 
-    if (auto rs = dynamic_pointer_cast<ReturnStatement>(cp)) {
-      std::vector<std::string> lnames;
-      VariableTableConstPtr vars = cp->getFunctionScope()->getVariables();
-      vars->getLocalVariableNames(lnames);
-      for (auto& l : lnames) {
-        int id = m_gidMap["v:" + l];
-        if (id && !m_block->getBit(DataFlow::PInitOut, id)) {
-          rs->addNonRefcounted(l);
-        } else {
-          auto sym = vars->getSymbol(l);
-          auto dt = vars->getFinalType(l)->getDataType();
-          if (!sym->isStatic()
-              && !IS_REFCOUNTED_TYPE(dt) && dt != KindOfUnknown) {
-            rs->addNonRefcounted(l);
-          }
-        }
-      }
-    }
-
     return DataFlowWalker::after(cp);
   }
 private:
@@ -3604,7 +3590,7 @@ public:
 
   bool walk() { ControlFlowGraphWalker::walk(*this); return m_changed; }
   int afterEach(ConstructRawPtr p, int i, ConstructPtr kid) {
-    if (ExpressionRawPtr e = boost::dynamic_pointer_cast<Expression>(kid)) {
+    if (ExpressionRawPtr e = dynamic_pointer_cast<Expression>(kid)) {
       if (e->isTypeAssertion()) return WalkContinue; // nothing to do
 
       bool safeForProp =

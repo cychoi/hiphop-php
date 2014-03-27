@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,7 +19,7 @@
 
 #include <string>
 
-#include "hphp/runtime/vm/core_types.h"
+#include "hphp/runtime/base/complex-types.h"
 
 namespace HPHP {
 
@@ -71,7 +71,7 @@ void printGml(const Unit*);
  * The Func* may be nullptr.
  */
 void verify_error(const Unit*, const Func*, const char* fmt, ...)
-  __attribute__((format(printf,3,4)));
+  ATTRIBUTE_PRINTF(3,4);
 
 }}
 

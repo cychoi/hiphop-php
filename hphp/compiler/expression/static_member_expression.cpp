@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,9 +22,9 @@
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/analysis/function_scope.h"
-#include "hphp/util/util.h"
+#include "hphp/util/text-util.h"
 #include "hphp/util/hash.h"
-#include "hphp/util/parser/hphp.tab.hpp"
+#include "hphp/parser/hphp.tab.hpp"
 #include "hphp/compiler/option.h"
 
 using namespace HPHP;
@@ -77,7 +77,7 @@ bool StaticMemberExpression::findMember(AnalysisResultPtr ar, string &name,
   m_resolvedClass = resolveClass();
   if (!m_resolvedClass) return isRedeclared();
 
-  if (m_resolvedClass->derivesFromRedeclaring()) {
+  if (m_resolvedClass->derivesFromRedeclaring() == Derivation::Redeclaring) {
     m_dynamicClass = true;
   }
 
@@ -137,10 +137,10 @@ int StaticMemberExpression::getKidCount() const {
 void StaticMemberExpression::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_class = boost::dynamic_pointer_cast<Expression>(cp);
+      m_class = dynamic_pointer_cast<Expression>(cp);
       break;
     case 1:
-      m_exp = boost::dynamic_pointer_cast<Expression>(cp);
+      m_exp = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       assert(false);
@@ -326,7 +326,7 @@ TypePtr StaticMemberExpression::inferTypes(AnalysisResultPtr ar,
 
 unsigned StaticMemberExpression::getCanonHash() const {
   int64_t val = Expression::getCanonHash() +
-    hash_string(Util::toLower(m_className).c_str(), m_className.size());
+    hash_string(toLower(m_className).c_str(), m_className.size());
   return ~unsigned(val) ^ unsigned(val >> 32);
 }
 
@@ -337,6 +337,23 @@ bool StaticMemberExpression::canonCompare(ExpressionPtr e) const {
   return m_className == s->m_className;
 }
 
+///////////////////////////////////////////////////////////////////////////////
+
+void StaticMemberExpression::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("ClassPropertyExpression", 3);
+  StaticClassName::outputCodeModel(cg);
+  if (m_exp->is(Expression::KindOfScalarExpression)) {
+    cg.printPropertyHeader("propertyName");
+    ScalarExpressionPtr var = dynamic_pointer_cast<ScalarExpression>(m_exp);
+    cg.printValue(var->getString());
+  } else {
+    cg.printPropertyHeader("propertyExpression");
+    m_exp->outputCodeModel(cg);
+  }
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // code generation functions

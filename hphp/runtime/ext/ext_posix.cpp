@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -14,21 +14,62 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/ext/ext_posix.h"
-#include "hphp/runtime/base/file/file.h"
-#include <sys/times.h>
-#include <sys/utsname.h>
-#include <sys/types.h>
-#include <sys/time.h>
-#include <pwd.h>
+
 #include <memory>
 
+#include <sys/times.h>
+#include <sys/time.h>
+#include <sys/utsname.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/resource.h>
+#ifdef __FreeBSD__
+#include <sys/param.h>
+#endif
+#include <sys/time.h>
+#include <unistd.h>
+#include <pwd.h>
+
+#include "folly/String.h"
+
+#include "hphp/runtime/base/file.h"
+
 namespace HPHP {
-IMPLEMENT_DEFAULT_EXTENSION(posix);
+
+IMPLEMENT_DEFAULT_EXTENSION_VERSION(posix, NO_EXTENSION_VERSION_YET);
+
 ///////////////////////////////////////////////////////////////////////////////
 
-bool f_posix_access(CStrRef file, int mode /* = 0 */) {
+const int64_t k_POSIX_S_IFMT = S_IFMT;
+const int64_t k_POSIX_S_IFSOCK = S_IFSOCK;
+const int64_t k_POSIX_S_IFLNK = S_IFLNK;
+const int64_t k_POSIX_S_IFREG = S_IFREG;
+const int64_t k_POSIX_S_IFBLK = S_IFBLK;
+const int64_t k_POSIX_S_IFDIR = S_IFDIR;
+const int64_t k_POSIX_S_IFCHR = S_IFCHR;
+const int64_t k_POSIX_S_IFIFO = S_IFIFO;
+const int64_t k_POSIX_S_ISUID = S_ISUID;
+const int64_t k_POSIX_S_ISGID = S_ISGID;
+const int64_t k_POSIX_S_ISVTX = S_ISVTX;
+const int64_t k_POSIX_S_IRWXU = S_IRWXU;
+const int64_t k_POSIX_S_IRUSR = S_IRUSR;
+const int64_t k_POSIX_S_IWUSR = S_IWUSR;
+const int64_t k_POSIX_S_IXUSR = S_IXUSR;
+const int64_t k_POSIX_S_IRWXG = S_IRWXG;
+const int64_t k_POSIX_S_IRGRP = S_IRGRP;
+const int64_t k_POSIX_S_IWGRP = S_IWGRP;
+const int64_t k_POSIX_S_IXGRP = S_IXGRP;
+const int64_t k_POSIX_S_IRWXO = S_IRWXO;
+const int64_t k_POSIX_S_IROTH = S_IROTH;
+const int64_t k_POSIX_S_IWOTH = S_IWOTH;
+const int64_t k_POSIX_S_IXOTH = S_IXOTH;
+const int64_t k_POSIX_F_OK = F_OK;
+const int64_t k_POSIX_X_OK = X_OK;
+const int64_t k_POSIX_W_OK = W_OK;
+const int64_t k_POSIX_R_OK = R_OK;
+
+bool f_posix_access(const String& file, int mode /* = 0 */) {
   String path = File::TranslatePath(file);
   if (path.empty()) {
     return false;
@@ -38,7 +79,7 @@ bool f_posix_access(CStrRef file, int mode /* = 0 */) {
 
 String f_posix_ctermid() {
   String s = String(L_ctermid, ReserveString);
-  char *buffer = s.mutableSlice().ptr;
+  char *buffer = s.bufferSlice().ptr;
   ctermid(buffer);
   return s.setSize(strlen(buffer));
 }
@@ -49,7 +90,7 @@ int64_t f_posix_get_last_error() {
 
 String f_posix_getcwd() {
   String s = String(PATH_MAX, ReserveString);
-  char *buffer = s.mutableSlice().ptr;
+  char *buffer = s.bufferSlice().ptr;
   if (getcwd(buffer, PATH_MAX) == NULL) {
     return "/";
   }
@@ -68,17 +109,18 @@ int64_t f_posix_getgid() {
   return getgid();
 }
 
-static const StaticString s_name("name");
-static const StaticString s_passwd("passwd");
-static const StaticString s_members("members");
-static const StaticString s_uid("uid");
-static const StaticString s_gid("gid");
-static const StaticString s_gecos("gecos");
-static const StaticString s_dir("dir");
-static const StaticString s_shell("shell");
+const StaticString
+  s_name("name"),
+  s_passwd("passwd"),
+  s_members("members"),
+  s_uid("uid"),
+  s_gid("gid"),
+  s_gecos("gecos"),
+  s_dir("dir"),
+  s_shell("shell");
 
 static Variant php_posix_group_to_array(int gid,
-                   CStrRef gname = null_variant) {
+                   const String& gname = null_variant.toString()) {
   // Don't pass a gid *and* a gname to this.
   assert((gid <  0) || gname.size() == 0);
 
@@ -124,7 +166,7 @@ Variant f_posix_getgrgid(int gid) {
   return php_posix_group_to_array(gid);
 }
 
-Variant f_posix_getgrnam(CStrRef name) {
+Variant f_posix_getgrnam(const String& name) {
   return php_posix_group_to_array(-1, name.data());
 }
 
@@ -143,7 +185,11 @@ Variant f_posix_getgroups() {
 }
 
 Variant f_posix_getlogin() {
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
   char buf[L_cuserid];
+#else
+  char buf[MAXLOGNAME];
+#endif
   if (!getlogin_r(buf, sizeof(buf) - 1)) {
     return String(buf, CopyString);
   }
@@ -169,7 +215,7 @@ int64_t f_posix_getppid() {
 }
 
 static Variant php_posix_passwd_to_array(int uid,
-                   CStrRef name = null_variant) {
+                   const String& name = null_variant.toString()) {
   // Don't pass a uid *and* a name to this.
   assert((uid <  0) || name.size() == 0);
 
@@ -198,6 +244,8 @@ static Variant php_posix_passwd_to_array(int uid,
     return false;
   }
 
+  if (!retpwptr) return false;
+
   ArrayInit ret(7);
   ret.set(s_name,   String(pw.pw_name,   CopyString));
   ret.set(s_passwd, String(pw.pw_passwd, CopyString));
@@ -209,7 +257,7 @@ static Variant php_posix_passwd_to_array(int uid,
   return ret.create();
 }
 
-Variant f_posix_getpwnam(CStrRef username) {
+Variant f_posix_getpwnam(const String& username) {
   return php_posix_passwd_to_array(-1, username);
 }
 
@@ -283,15 +331,15 @@ int64_t f_posix_getuid() {
   return getuid();
 }
 
-bool f_posix_initgroups(CStrRef name, int base_group_id) {
+bool f_posix_initgroups(const String& name, int base_group_id) {
   if (name.empty()) return false;
   return !initgroups(name.data(), base_group_id);
 }
 
-static int php_posix_get_fd(CVarRef fd) {
+static int php_posix_get_fd(const Variant& fd) {
   int nfd;
   if (fd.isResource()) {
-    File *f = fd.toObject().getTyped<File>();
+    File *f = fd.toResource().getTyped<File>();
     if (!f) {
       return false;
     }
@@ -302,7 +350,7 @@ static int php_posix_get_fd(CVarRef fd) {
   return nfd;
 }
 
-bool f_posix_isatty(CVarRef fd) {
+bool f_posix_isatty(const Variant& fd) {
   return isatty(php_posix_get_fd(fd));
 }
 
@@ -310,11 +358,11 @@ bool f_posix_kill(int pid, int sig) {
   return kill(pid, sig) >= 0;
 }
 
-bool f_posix_mkfifo(CStrRef pathname, int mode) {
+bool f_posix_mkfifo(const String& pathname, int mode) {
   return mkfifo(pathname.data(), mode) >= 0;
 }
 
-bool f_posix_mknod(CStrRef pathname, int mode, int major /* = 0 */,
+bool f_posix_mknod(const String& pathname, int mode, int major /* = 0 */,
                    int minor /* = 0 */) {
   dev_t php_dev = 0;
   if ((mode & S_IFCHR) || (mode & S_IFBLK)) {
@@ -359,14 +407,15 @@ bool f_posix_setuid(int uid) {
 }
 
 String f_posix_strerror(int errnum) {
-  return String(Util::safe_strerror(errnum));
+  return String(folly::errnoStr(errnum).toStdString());
 }
 
-static const StaticString s_ticks("ticks");
-static const StaticString s_utime("utime");
-static const StaticString s_stime("stime");
-static const StaticString s_cutime("cutime");
-static const StaticString s_cstime("cstime");
+const StaticString
+  s_ticks("ticks"),
+  s_utime("utime"),
+  s_stime("stime"),
+  s_cutime("cutime"),
+  s_cstime("cstime");
 
 Variant f_posix_times() {
   struct tms t;
@@ -384,26 +433,27 @@ Variant f_posix_times() {
   return ret.create();
 }
 
-Variant f_posix_ttyname(CVarRef fd) {
+Variant f_posix_ttyname(const Variant& fd) {
   int ttyname_maxlen = sysconf(_SC_TTY_NAME_MAX);
   if (ttyname_maxlen <= 0) {
     return false;
   }
 
   String ttyname(ttyname_maxlen, ReserveString);
-  char *p = ttyname.mutableSlice().ptr;
+  char *p = ttyname.bufferSlice().ptr;
   if (ttyname_r(php_posix_get_fd(fd), p, ttyname_maxlen)) {
     return false;
   }
   return ttyname.setSize(strlen(p));
 }
 
-static const StaticString s_sysname("sysname");
-static const StaticString s_nodename("nodename");
-static const StaticString s_release("release");
-static const StaticString s_version("version");
-static const StaticString s_machine("machine");
-static const StaticString s_domainname("domainname");
+const StaticString
+  s_sysname("sysname"),
+  s_nodename("nodename"),
+  s_release("release"),
+  s_version("version"),
+  s_machine("machine"),
+  s_domainname("domainname");
 
 Variant f_posix_uname() {
   struct utsname u;
@@ -417,7 +467,7 @@ Variant f_posix_uname() {
   ret.set(s_release,    String(u.release,    CopyString));
   ret.set(s_version,    String(u.version,    CopyString));
   ret.set(s_machine,    String(u.machine,    CopyString));
-#if defined(_GNU_SOURCE) && !defined(__APPLE__) && !defined(__FreeBSD__)
+#if defined(_GNU_SOURCE)
   ret.set(s_domainname, String(u.domainname, CopyString));
 #endif
   return ret;

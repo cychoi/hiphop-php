@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,19 +24,25 @@
 #include "hphp/compiler/analysis/symbol_table.h"
 #include "hphp/compiler/analysis/function_container.h"
 #include "hphp/compiler/package.h"
+#include "hphp/compiler/hphp.h"
 
-#include "hphp/util/string_bag.h"
-#include "hphp/util/thread_local.h"
+#include "hphp/util/string-bag.h"
+#include "hphp/util/thread-local.h"
 
 #include <boost/graph/adjacency_list.hpp>
-#include "tbb/concurrent_hash_map.h"
+#include <tbb/concurrent_hash_map.h>
+#include <atomic>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 
 DECLARE_BOOST_TYPES(ClassScope);
-DECLARE_BOOST_TYPES(FileScope);
+DECLARE_EXTENDED_BOOST_TYPES(FileScope);
 DECLARE_BOOST_TYPES(FunctionScope);
 DECLARE_BOOST_TYPES(Location);
 DECLARE_BOOST_TYPES(AnalysisResult);
@@ -150,7 +156,8 @@ public:
 
   void addNSFallbackFunc(ConstructPtr c, FileScopePtr fs);
 
-  void loadBuiltins();
+  void addSystemFunction(FunctionScopeRawPtr fs);
+  void addSystemClass(ClassScopeRawPtr cs);
   void analyzeProgram(bool system = false);
   void analyzeIncludes();
   void analyzeProgramFinal();
@@ -238,6 +245,14 @@ public:
   ClassScopePtr findClass(const std::string &className,
                           FindClassBy by);
 
+  /*
+   * Returns: whether the given name is the name of any type aliases
+   * in the whole program.
+   */
+  bool isTypeAliasName(const std::string& name) const {
+    return m_typeAliasNames.count(name);
+  }
+
   /**
    * Find all the redeclared classes by the name, excluding system classes.
    * Note that system classes cannot be redeclared.
@@ -324,6 +339,9 @@ private:
   // Only in WholeProgram mode.  See markRedeclaringClasses.
   std::multimap<std::string,std::string> m_classAliases;
 
+  // Names of type aliases.
+  std::set<std::string> m_typeAliasNames;
+
   bool m_classForcedVariants[2];
 
   StatementPtrVec m_stmts;
@@ -332,12 +350,12 @@ private:
   std::string m_outputPath;
 public:
   AnalysisResultPtr shared_from_this() {
-    return boost::static_pointer_cast<AnalysisResult>
+    return static_pointer_cast<AnalysisResult>
       (BlockScope::shared_from_this());
   }
 
   AnalysisResultConstPtr shared_from_this() const {
-    return boost::static_pointer_cast<const AnalysisResult>
+    return static_pointer_cast<const AnalysisResult>
       (BlockScope::shared_from_this());
   }
 
@@ -393,12 +411,12 @@ public:
                               s_changedScopesMapThreadLocal);
 
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
-  static int                                  s_NumDoJobCalls;
+  static std::atomic<int>                     s_NumDoJobCalls;
   static ConcurrentBlockScopeRawPtrIntHashMap s_DoJobUniqueScopes;
-  static int                                  s_NumForceRerunGlobal;
-  static int                                  s_NumReactivateGlobal;
-  static int                                  s_NumForceRerunUseKinds;
-  static int                                  s_NumReactivateUseKinds;
+  static std::atomic<int>                     s_NumForceRerunGlobal;
+  static std::atomic<int>                     s_NumReactivateGlobal;
+  static std::atomic<int>                     s_NumForceRerunUseKinds;
+  static std::atomic<int>                     s_NumReactivateUseKinds;
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
 
 private:
@@ -426,9 +444,9 @@ public:
     Exception(), m_scope(scope) {}
   BlockScopeRawPtr &getScope() { return m_scope; }
 #ifdef HPHP_INSTRUMENT_TYPE_INF
-  static int s_NumReschedules;
-  static int s_NumForceRerunSelfCaller;
-  static int s_NumRetTypesChanged;
+  static std::atomic<int> s_NumReschedules;
+  static std::atomic<int> s_NumForceRerunSelfCaller;
+  static std::atomic<int> s_NumRetTypesChanged;
 #endif /* HPHP_INSTRUMENT_TYPE_INF */
 private:
   BlockScopeRawPtr m_scope;

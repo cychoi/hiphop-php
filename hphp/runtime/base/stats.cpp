@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,15 +13,20 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#include "hphp/util/base.h"
-#include "hphp/runtime/vm/jit/x64-util.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+
 #include "hphp/runtime/base/stats.h"
+#include <algorithm>
+#include <atomic>
+#include <utility>
+#include <vector>
+
+#include "hphp/util/data-block.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 
 namespace HPHP {
 namespace Stats {
 
-using namespace HPHP::Transl;
+using namespace HPHP::JIT;
 
 TRACE_SET_MOD(stats);
 
@@ -38,41 +43,7 @@ __thread uint64_t tl_helper_counters[kMaxNumTrampolines];
 typedef hphp_const_char_map<hphp_const_char_map<uint64_t>> StatGroupMap;
 __thread StatGroupMap* tl_stat_groups = nullptr;
 
-// Only the thread holding the write lease will set the entries in the
-// helperNames array but other threads may concurrently read these
-// entries, so each entry is volatile (or an atomic type per the new
-// C++11 standard).
-const char* volatile helperNames[kMaxNumTrampolines];
-
-void
-emitInc(X64Assembler& a, uint64_t* tl_table, uint index, int n,
-        ConditionCode cc, bool force) {
-  if (!force && !enabled()) return;
-  bool havecc = cc != CC_None;
-  uintptr_t virtualAddress = uintptr_t(&tl_table[index]) - tlsBase();
-
-  TCA jcc = nullptr;
-  if (havecc) {
-    jcc = a.code.frontier;
-    a.  jcc8  (ccNegate(cc), jcc);
-  }
-  a.    pushf ();
-  a.    push  (reg::rAsm);
-  a.    movq  (virtualAddress, reg::rAsm);
-  a.    fs();
-  a.    addq  (n, *reg::rAsm);
-  a.    pop   (reg::rAsm);
-  a.    popf  ();
-  if (havecc) {
-    a.  patchJcc8(jcc, a.code.frontier);
-  }
-}
-
-void emitIncTranslOp(X64Assembler& a, Opcode opc, bool force) {
-  if (!force && !enableInstrCount()) return;
-  emitInc(a, &tl_counters[0], opcodeToTranslStatCounter(opc), 1,
-          CC_None, force);
-}
+std::atomic<const char*> helperNames[kMaxNumTrampolines];
 
 void init() {
   if (!enabledAny()) return;
@@ -83,8 +54,9 @@ void init() {
 static __thread int64_t epoch;
 void dump() {
   if (!enabledAny()) return;
+
   auto url = g_context->getRequestUrl(50);
-  TRACE(0, "STATS %ld %s\n", epoch, url.c_str());
+  TRACE(0, "STATS %" PRId64 " %s\n", epoch, url.c_str());
 #include "hphp/runtime/vm/stats-opcodeDef.h"
 #define STAT(s) \
   if (!tl_counters[s]) {} else                                  \
@@ -92,46 +64,52 @@ void dump() {
   STATS
 #undef STAT
 #undef O
-  for (int i=0; helperNames[i]; i++) {
+
+  for (int i = 0;; i++) {
+    auto const name = helperNames[i].load(std::memory_order_acquire);
+    if (!name) break;
     if (tl_helper_counters[i]) {
-      TRACE(0, "STAT %-50s %15ld\n",
-            helperNames[i],
-            tl_helper_counters[i]);
+      TRACE(0, "STAT %-50s %15" PRIu64 "\n", name, tl_helper_counters[i]);
     }
   }
 
   typedef std::pair<const char*, uint64_t> StatPair;
   for (auto const& group : *tl_stat_groups) {
-    std::ostringstream stats;
+    std::string stats;
     auto const& map = group.second;
-    uint64_t total = 0, accum = 0;;
+    uint64_t total = 0, accum = 0;
+    size_t nameWidth = 0;
 
     std::vector<StatPair> rows(map.begin(), map.end());
-    std::for_each(rows.begin(), rows.end(),
-                  [&](const StatPair& p) { total += p.second; });
+    for (auto const& p : rows) {
+      nameWidth = std::max(nameWidth, strlen(p.first));
+      total += p.second;
+    }
     auto gt = [](const StatPair& a, const StatPair& b) {
       return a.second > b.second;
     };
     std::sort(rows.begin(), rows.end(), gt);
 
-    stats << folly::format("{:-^80}\n",
-                           folly::format(" group {} ",
-                                         group.first, url))
-          << folly::format("{:>45}   {:>9} {:>8} {:>8}\n",
-                           "name", "count", "% total", "accum %");
+    folly::format(&stats, "{:-^80}\n",
+                  folly::format(" group {} ",group.first, url));
+    folly::format(&stats,
+                  folly::format("{{:>{}}}   {{:>9}} {{:>8}} {{:>8}}\n",
+                                nameWidth + 2).str(),
+                  "name", "count", "% total", "accum %");
 
     static const auto maxGroupEnv = getenv("HHVM_STATS_GROUPMAX");
     static const auto maxGroup = maxGroupEnv ? atoi(maxGroupEnv) : INT_MAX;
 
     int counter = 0;
+    auto const fmt = folly::format("{{:>{}}} : {{:9}} {{:8.2%}} {{:8.2%}}\n",
+                                   nameWidth + 2).str();
     for (auto const& row : rows) {
       accum += row.second;
-      stats << folly::format("{:>70} {} {:9} {:8.2%} {:8.2%}\n",
-                             row.first, ':', row.second,
-                             (double)row.second / total, (double)accum / total);
+      folly::format(&stats, fmt, row.first, row.second,
+                    (double)row.second / total, (double)accum / total);
       if (++counter >= maxGroup) break;
     }
-    FTRACE(0, "{}\n", stats.str());
+    FTRACE(0, "{}\n", stats);
   }
 }
 

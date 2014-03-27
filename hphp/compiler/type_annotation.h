@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,10 @@
 #ifndef incl_HPHP_TYPEANNOTATION_H_
 #define incl_HPHP_TYPEANNOTATION_H_
 
-#include "hphp/util/base.h"
+#include "hphp/util/deprecated/base.h"
+#include <vector>
+#include "hphp/runtime/base/datatype.h"
+#include "hphp/compiler/code_generator.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -73,10 +76,91 @@ public:
   void setXHP() { m_xhp = true; }
   void setTypeVar() { m_typevar = true; }
 
-  const std::string simpleName() const;
-  const std::string fullName() const;
+  bool isNullable() const { return m_nullable; }
+  bool isSoft() const { return m_soft; }
+  bool isTuple() const { return m_tuple; }
+  bool isFunction() const { return m_function; }
+  bool isXHP() const { return m_xhp; }
+  bool isTypeVar() const { return m_typevar; }
 
+  /*
+   * Return a shallow copy of this TypeAnnotation, except with
+   * nullability stripped.
+   */
+  TypeAnnotation stripNullable() const {
+    auto ret = *this;
+    ret.m_nullable = false;
+    return ret;
+  }
+
+  /*
+   * Return a shallow copy of this TypeAnnotation, except with
+   * softness stripped.
+   */
+  TypeAnnotation stripSoft() const {
+    auto ret = *this;
+    ret.m_soft = false;
+    return ret;
+  }
+
+  bool isMixed() const { return !strcasecmp(m_name.c_str(), "HH\\mixed"); }
+
+  bool isVoid() const { return !strcasecmp(m_name.c_str(), "void"); }
+
+  bool isThis() const { return !strcasecmp(m_name.c_str(), "this"); }
+
+  /*
+   * Returns whether this TypeAnnotation is "simple"---as described
+   * above, this implies it has only one level of depth.  Both the
+   * type list and type args are null.
+   *
+   * It may however be soft or nullable, or a function type, etc.
+   */
+  bool isSimple() const { return !m_typeList && !m_typeArgs; }
+
+  /*
+   * Return a string for this annotation that is a type hint for
+   * normal "vanilla" php.  This means <?hh-specific annotations (such
+   * as ?Foo or @Foo) are going to be stripped, as well as the deep
+   * information about a type.  (E.g. for Vector<string> this will
+   * return "Vector".)
+   */
+  std::string vanillaName() const;
+
+  /*
+   * Returns a complete string name of this type-annotation, including
+   * <?hh-specific extensions, any type parameter list, etc.
+   */
+  std::string fullName() const;
+
+  /*
+   * Fill the vector in input with all the types used in this annotation
+   * as simple names.
+   * Vector<Map<string, int>> would return
+   * [Vector, Map, string, int]
+   */
+  void getAllSimpleNames(std::vector<std::string>& names) const;
+
+  /*
+   * Add a new element to this type list for this TypeAnnotation.
+   */
   void appendToTypeList(TypeAnnotationPtr typeList);
+
+  /*
+   * Root datatype, ignores inner types for generics
+   *
+   * For nullable or soft types, KindOfUnknown will be returned
+   * since the annotation could represent more than one type.
+   *
+   * To get the expected type even with nullable/soft annotations
+   * pass TRUE for the optional argument.
+   */
+  DataType dataType(bool expectedType = false) const;
+
+  /*
+   *  Serializes the type annotation using the given CodeGenerator.
+   */
+  void outputCodeModel(CodeGenerator& cg);
 
 private:
   void functionTypeName(std::string &name) const;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -34,18 +34,23 @@
 #include "hphp/compiler/statement/function_statement.h"
 #include "hphp/compiler/statement/method_statement.h"
 #include "hphp/compiler/statement/statement_list.h"
-#include "hphp/runtime/base/builtin_functions.h"
-#include "hphp/runtime/base/class_info.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/class-info.h"
 #include "hphp/compiler/statement/class_variable.h"
 #include "hphp/compiler/statement/class_constant.h"
 #include "hphp/compiler/statement/use_trait_statement.h"
+#include "hphp/compiler/statement/trait_require_statement.h"
 #include "hphp/compiler/statement/trait_prec_statement.h"
 #include "hphp/compiler/statement/trait_alias_statement.h"
-#include "hphp/runtime/base/zend/zend_string.h"
-#include "hphp/util/util.h"
+#include "hphp/runtime/base/zend-string.h"
+#include "hphp/util/text-util.h"
 
 #include <boost/foreach.hpp>
 #include <boost/tuple/tuple.hpp>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
 
 using namespace HPHP;
 using std::map;
@@ -59,10 +64,10 @@ ClassScope::ClassScope(KindOf kindOf, const std::string &name,
                        const std::vector<UserAttributePtr> &attrs)
   : BlockScope(name, docComment, stmt, BlockScope::ClassScope),
     m_parent(parent), m_bases(bases), m_attribute(0), m_redeclaring(-1),
-    m_kindOf(kindOf), m_derivesFromRedeclaring(FromNormal),
+    m_kindOf(kindOf), m_derivesFromRedeclaring(Derivation::Normal),
     m_traitStatus(NOT_FLATTENED), m_volatile(false),
     m_persistent(false), m_derivedByDynamic(false),
-    m_sep(false), m_needsCppCtor(false), m_needsInit(true), m_knownBases(0) {
+    m_needsCppCtor(false), m_needsInit(true), m_knownBases(0) {
 
   m_dynamic = Option::IsDynamicClass(m_name);
 
@@ -89,10 +94,10 @@ ClassScope::ClassScope(AnalysisResultPtr ar,
   : BlockScope(name, "", StatementPtr(), BlockScope::ClassScope),
     m_parent(parent), m_bases(bases),
     m_attribute(0), m_redeclaring(-1),
-    m_kindOf(KindOfObjectClass), m_derivesFromRedeclaring(FromNormal),
+    m_kindOf(KindOfObjectClass), m_derivesFromRedeclaring(Derivation::Normal),
     m_traitStatus(NOT_FLATTENED), m_dynamic(false),
     m_volatile(false), m_persistent(false),
-    m_derivedByDynamic(false), m_sep(false), m_needsCppCtor(false),
+    m_derivedByDynamic(false), m_needsCppCtor(false),
     m_needsInit(true), m_knownBases(0) {
   BOOST_FOREACH(FunctionScopePtr f, methods) {
     if (f->getName() == "__construct") setAttribute(HasConstructor);
@@ -121,18 +126,8 @@ const std::string &ClassScope::getOriginalName() const {
   return m_originalName;
 }
 
-// like getId(), but without the label formatting
 std::string ClassScope::getDocName() const {
   string name = getOriginalName();
-  if (m_redeclaring < 0) {
-    return name;
-  }
-  return name + Option::IdPrefix +
-    boost::lexical_cast<std::string>(m_redeclaring);
-}
-
-std::string ClassScope::getId() const {
-  string name = CodeGenerator::FormatLabel(getOriginalName());
   if (m_redeclaring < 0) {
     return name;
   }
@@ -271,7 +266,7 @@ void ClassScope::checkDerivation(AnalysisResultPtr ar, hphp_string_iset &seen) {
     }
     bases.insert(base);
 
-    ClassScopePtrVec parents = ar->findClasses(Util::toLower(base));
+    ClassScopePtrVec parents = ar->findClasses(toLower(base));
     for (unsigned int j = 0; j < parents.size(); j++) {
       parents[j]->checkDerivation(ar, seen);
     }
@@ -282,8 +277,7 @@ void ClassScope::checkDerivation(AnalysisResultPtr ar, hphp_string_iset &seen) {
 
 void ClassScope::collectMethods(AnalysisResultPtr ar,
                                 StringToFunctionScopePtrMap &funcs,
-                                bool collectPrivate /* = true */,
-                                bool forInvoke /* = false */) {
+                                bool collectPrivate) {
   // add all functions this class has
   for (FunctionScopePtrVec::const_iterator iter =
          m_functionsVec.begin(); iter != m_functionsVec.end(); ++iter) {
@@ -309,48 +303,39 @@ void ClassScope::collectMethods(AnalysisResultPtr ar,
     }
   }
 
-  int n = forInvoke ? m_parent.empty() ? 0 : 1 : m_bases.size();
-  // walk up
+  int n = m_bases.size();
   for (int i = 0; i < n; i++) {
     const string &base = m_bases[i];
     ClassScopePtr super = ar->findClass(base);
     if (super) {
       if (super->isRedeclaring()) {
-        if (forInvoke) continue;
-
         const ClassScopePtrVec &classes = ar->findRedeclaredClasses(base);
         StringToFunctionScopePtrMap pristine(funcs);
-        BOOST_FOREACH(ClassScopePtr cls, classes) {
+
+        for (auto& cls : classes) {
           cls->m_derivedByDynamic = true;
           StringToFunctionScopePtrMap cur(pristine);
           derivedMagicMethods(cls);
-          cls->collectMethods(ar, cur, false, forInvoke);
+          cls->collectMethods(ar, cur, false);
           inheritedMagicMethods(cls);
           funcs.insert(cur.begin(), cur.end());
           cls->getVariables()->
             forceVariants(ar, VariableTable::AnyNonPrivateVars);
         }
 
-        if (base == m_parent) {
-          m_derivesFromRedeclaring = DirectFromRedeclared;
-          getVariables()->forceVariants(ar, VariableTable::AnyNonPrivateVars,
-                                        false);
-          getVariables()->setAttribute(VariableTable::NeedGlobalPointer);
-        } else if (isInterface()) {
-          m_derivesFromRedeclaring = DirectFromRedeclared;
-        }
+        m_derivesFromRedeclaring = Derivation::Redeclaring;
+        getVariables()->forceVariants(ar, VariableTable::AnyNonPrivateVars,
+                                      false);
+        getVariables()->setAttribute(VariableTable::NeedGlobalPointer);
+
         setVolatile();
       } else {
         derivedMagicMethods(super);
-        super->collectMethods(ar, funcs, false, forInvoke);
+        super->collectMethods(ar, funcs, false);
         inheritedMagicMethods(super);
-        if (super->derivesFromRedeclaring()) {
-          if (base == m_parent) {
-            m_derivesFromRedeclaring = IndirectFromRedeclared;
-            getVariables()->forceVariants(ar, VariableTable::AnyNonPrivateVars);
-          } else if (isInterface()) {
-            m_derivesFromRedeclaring = IndirectFromRedeclared;
-          }
+        if (super->derivesFromRedeclaring() == Derivation::Redeclaring) {
+          m_derivesFromRedeclaring = Derivation::Redeclaring;
+          getVariables()->forceVariants(ar, VariableTable::AnyNonPrivateVars);
           setVolatile();
         } else if (super->isVolatile()) {
           setVolatile();
@@ -360,13 +345,17 @@ void ClassScope::collectMethods(AnalysisResultPtr ar,
       Compiler::Error(Compiler::UnknownBaseClass, m_stmt, base);
       if (base == m_parent) {
         ar->declareUnknownClass(m_parent);
-        m_derivesFromRedeclaring = DirectFromRedeclared;
+        m_derivesFromRedeclaring = Derivation::Redeclaring;
         getVariables()->setAttribute(VariableTable::NeedGlobalPointer);
         getVariables()->forceVariants(ar, VariableTable::AnyNonPrivateVars);
         setVolatile();
       } else {
+        /*
+         * TODO(#3685260): this should not be removing interfaces from
+         * the base list.
+         */
         if (isInterface()) {
-          m_derivesFromRedeclaring = DirectFromRedeclared;
+          m_derivesFromRedeclaring = Derivation::Redeclaring;
         }
         m_bases.erase(m_bases.begin() + i);
         n--;
@@ -403,22 +392,11 @@ MethodStatementPtr
 ClassScope::importTraitMethod(const TraitMethod&  traitMethod,
                               AnalysisResultPtr   ar,
                               string              methName,
-                              GeneratorRenameMap& genRenameMap,
                               const std::map<string, MethodStatementPtr>&
                               importedTraitMethods) {
   MethodStatementPtr meth = traitMethod.m_method;
   string origMethName = traitMethod.m_originalName;
   ModifierExpressionPtr modifiers = traitMethod.m_modifiers;
-
-  if (meth->getOrigGeneratorFunc()) {
-    const string &name = meth->getOrigGeneratorFunc()->getName();
-    if (!importedTraitMethods.count(name)) {
-      // Dont import the generator, if the origGenerator wasnt imported
-      // this happens when a generator in the trait is hidden by a non-generator
-      // method in the importing class.
-      return MethodStatementPtr();
-    }
-  }
 
   MethodStatementPtr cloneMeth = dynamic_pointer_cast<MethodStatement>(
     dynamic_pointer_cast<ClassStatement>(m_stmt)->addClone(meth));
@@ -434,17 +412,9 @@ ClassScope::importTraitMethod(const TraitMethod&  traitMethod,
   ClassScopePtr cScope = dynamic_pointer_cast<ClassScope>(shared_from_this());
   cloneMeth->fixupSelfAndParentTypehints( cScope );
 
-  // Generator methods need to be renamed, otherwise code gen produces multiple
-  // continuation classes with the same name
-  if (funcScope->isGenerator()) {
-    const string& newName = getNewGeneratorName(funcScope, genRenameMap);
-    methName = origMethName = newName;
-    cloneMeth->setName(newName);
-    cloneMeth->setOriginalName(newName);
-  }
   FunctionScopePtr cloneFuncScope
     (new HPHP::FunctionScope(funcScope, ar, methName, origMethName, cloneMeth,
-                             cloneMeth->getModifiers()));
+                             cloneMeth->getModifiers(), cScope->isUserClass()));
   cloneMeth->resetScope(cloneFuncScope, true);
   cloneFuncScope->setOuterScope(shared_from_this());
   informClosuresAboutScopeClone(cloneMeth, cloneFuncScope, ar);
@@ -490,6 +460,17 @@ void ClassScope::informClosuresAboutScopeClone(
 void ClassScope::addImportTraitMethod(const TraitMethod &traitMethod,
                                       const string &methName) {
   m_importMethToTraitMap[methName].push_back(traitMethod);
+}
+
+void ClassScope::addTraitRequirement(const string &requiredName,
+                                     bool isExtends) {
+  assert(isTrait());
+
+  if (isExtends) {
+    m_traitRequiredExtends.insert(requiredName);
+  } else {
+    m_traitRequiredImplements.insert(requiredName);
+  }
 }
 
 void
@@ -552,6 +533,7 @@ ClassScope::findTraitMethod(AnalysisResultPtr ar,
 
 void ClassScope::findTraitMethodsToImport(AnalysisResultPtr ar,
                                           ClassScopePtr trait) {
+  assert(Option::WholeProgram);
   ClassStatementPtr tStmt =
     dynamic_pointer_cast<ClassStatement>(trait->getStmt());
   StatementListPtr tStmts = tStmt->getStmts();
@@ -568,9 +550,47 @@ void ClassScope::findTraitMethodsToImport(AnalysisResultPtr ar,
   }
 }
 
+void ClassScope::importTraitRequirements(AnalysisResultPtr ar,
+                                         ClassScopePtr trait) {
+  if (isTrait()) {
+    for (auto const& req : trait->getTraitRequiredExtends()) {
+      addTraitRequirement(req, true);
+    }
+    for (auto const& req : trait->getTraitRequiredImplements()) {
+      addTraitRequirement(req, false);
+    }
+  } else {
+    for (auto const& req : trait->getTraitRequiredExtends()) {
+      if (!derivesFrom(ar, req, true, false)) {
+        getStmt()->analysisTimeFatal(
+          Compiler::InvalidDerivation,
+          Strings::TRAIT_REQ_EXTENDS,
+          m_originalName.c_str(),
+          req.c_str(),
+          trait->getOriginalName().c_str(),
+          "use"
+        );
+      }
+    }
+    for (auto const& req : trait->getTraitRequiredImplements()) {
+      if (!derivesFrom(ar, req, true, false)) {
+        getStmt()->analysisTimeFatal(
+          Compiler::InvalidDerivation,
+          Strings::TRAIT_REQ_IMPLEMENTS,
+          m_originalName.c_str(),
+          req.c_str(),
+          trait->getOriginalName().c_str(),
+          "use"
+        );
+      }
+    }
+  }
+}
+
 void ClassScope::applyTraitPrecRule(TraitPrecStatementPtr stmt) {
-  const string methodName = Util::toLower(stmt->getMethodName());
-  const string selectedTraitName = Util::toLower(stmt->getTraitName());
+  assert(Option::WholeProgram);
+  const string methodName = toLower(stmt->getMethodName());
+  const string selectedTraitName = toLower(stmt->getTraitName());
   std::set<string> otherTraitNames;
   stmt->getOtherTraitNames(otherTraitNames);
 
@@ -599,12 +619,20 @@ void ClassScope::applyTraitPrecRule(TraitPrecStatementPtr stmt) {
 
   // Report error if didn't find the selected trait
   if (!foundSelectedTrait) {
-    Compiler::Error(Compiler::UnknownTrait, stmt);
+    stmt->analysisTimeFatal(
+      Compiler::UnknownTrait,
+      Strings::TRAITS_UNKNOWN_TRAIT,
+      selectedTraitName.c_str()
+    );
   }
 
   // Sanity checking: otherTraitNames should be empty now
   if (otherTraitNames.size()) {
-    Compiler::Error(Compiler::UnknownTrait, stmt);
+    stmt->analysisTimeFatal(
+      Compiler::UnknownTrait,
+      Strings::TRAITS_UNKNOWN_TRAIT,
+      selectedTraitName.c_str()
+    );
   }
 }
 
@@ -615,6 +643,7 @@ bool ClassScope::hasMethod(const string &methodName) const {
 ClassScopePtr
 ClassScope::findSingleTraitWithMethod(AnalysisResultPtr ar,
                                       const string &methodName) const {
+  assert(Option::WholeProgram);
   ClassScopePtr trait = ClassScopePtr();
 
   for (unsigned i = 0; i < m_usedTraitNames.size(); i++) {
@@ -632,6 +661,7 @@ ClassScope::findSingleTraitWithMethod(AnalysisResultPtr ar,
 }
 
 void ClassScope::addTraitAlias(TraitAliasStatementPtr aliasStmt) {
+  assert(Option::WholeProgram);
   const string &traitName = aliasStmt->getTraitName();
   const string &origMethName = aliasStmt->getMethodName();
   const string &newMethName = aliasStmt->getNewMethodName();
@@ -642,9 +672,10 @@ void ClassScope::addTraitAlias(TraitAliasStatementPtr aliasStmt) {
 
 void ClassScope::applyTraitAliasRule(AnalysisResultPtr ar,
                                      TraitAliasStatementPtr stmt) {
-  const string traitName = Util::toLower(stmt->getTraitName());
-  const string origMethName = Util::toLower(stmt->getMethodName());
-  const string newMethName = Util::toLower(stmt->getNewMethodName());
+  assert(Option::WholeProgram);
+  const string traitName = toLower(stmt->getTraitName());
+  const string origMethName = toLower(stmt->getMethodName());
+  const string newMethName = toLower(stmt->getNewMethodName());
 
   // Get the trait's "class"
   ClassScopePtr traitCls;
@@ -654,8 +685,11 @@ void ClassScope::applyTraitAliasRule(AnalysisResultPtr ar,
     traitCls = ar->findClass(traitName);
   }
   if (!traitCls || !(traitCls->isTrait())) {
-    Compiler::Error(Compiler::UnknownTrait, stmt);
-    return;
+    stmt->analysisTimeFatal(
+      Compiler::UnknownTrait,
+      Strings::TRAITS_UNKNOWN_TRAIT,
+      traitName.empty() ? origMethName.c_str() : traitName.c_str()
+    );
   }
 
   // Keep record of alias rule
@@ -666,8 +700,10 @@ void ClassScope::applyTraitAliasRule(AnalysisResultPtr ar,
   MethodStatementPtr methStmt = findTraitMethod(ar, traitCls, origMethName,
                                                 visitedTraits);
   if (!methStmt) {
-    Compiler::Error(Compiler::UnknownTraitMethod, stmt);
-    return;
+    stmt->analysisTimeFatal(
+      Compiler::UnknownTraitMethod,
+      Strings::TRAITS_UNKNOWN_TRAIT_METHOD, origMethName.c_str()
+    );
   }
 
   if (origMethName == newMethName) {
@@ -682,6 +718,7 @@ void ClassScope::applyTraitAliasRule(AnalysisResultPtr ar,
 }
 
 void ClassScope::applyTraitRules(AnalysisResultPtr ar) {
+  assert(Option::WholeProgram);
   ClassStatementPtr classStmt = dynamic_pointer_cast<ClassStatement>(getStmt());
   assert(classStmt);
   StatementListPtr stmts = classStmt->getStmts();
@@ -714,6 +751,7 @@ void ClassScope::applyTraitRules(AnalysisResultPtr ar) {
 //   1) implemented by other traits
 //   2) duplicate
 void ClassScope::removeSpareTraitAbstractMethods(AnalysisResultPtr ar) {
+  assert(Option::WholeProgram);
   for (MethodToTraitListMap::iterator iter = m_importMethToTraitMap.begin();
        iter != m_importMethToTraitMap.end(); iter++) {
 
@@ -750,89 +788,18 @@ void ClassScope::removeSpareTraitAbstractMethods(AnalysisResultPtr ar) {
   }
 }
 
-const string& ClassScope::getNewGeneratorName(
-  FunctionScopePtr genFuncScope, GeneratorRenameMap &genRenameMap) {
-  assert(genFuncScope->isGenerator());
-  const string& oldName = genFuncScope->getName();
-  GeneratorRenameMap::iterator mapIt = genRenameMap.find(oldName);
-  if (mapIt != genRenameMap.end()) {
-    return mapIt->second;
-  }
-  string newName = ParserBase::newContinuationName(
-    oldName + "_" + lexical_cast<string>(genFuncScope->getNewID())
-  );
-  genRenameMap[oldName] = newName;
-  return genRenameMap[oldName];
-}
-
-void
-ClassScope::renameCreateContinuationCalls(AnalysisResultPtr ar,
-                                          ConstructPtr      c,
-                                          ImportedMethodMap &importedMethods) {
-  if (!c) return;
-  SimpleFunctionCallPtr funcCall = dynamic_pointer_cast<SimpleFunctionCall>(c);
-  if (funcCall && funcCall->getName() == "hphp_create_continuation") {
-
-    ExpressionListPtr params = funcCall->getParams();
-    assert(params->getCount() >= 2);
-    const string &oldClassName =
-      dynamic_pointer_cast<ScalarExpression>((*params)[0])->getString();
-    ClassScopePtr oldClassScope = ar->findClass(oldClassName);
-    if (!oldClassScope || !oldClassScope->isTrait()) return;
-
-    const string &oldGenName =
-      dynamic_pointer_cast<ScalarExpression>((*params)[1])->getString();
-
-    MethodStatementPtr origGenStmt = importedMethods[Util::toLower(oldGenName)];
-    assert(origGenStmt);
-
-    const string &newGenName = origGenStmt->getOriginalName();
-    ExpressionPtr newGenExpr = funcCall->makeScalarExpression(ar, newGenName);
-    ExpressionPtr newClsExpr = funcCall->makeScalarExpression(ar, getName());
-    (*params)[0] = newClsExpr;
-    (*params)[1] = newGenExpr;
-    funcCall->analyzeProgram(ar);
-    return;
-  }
-  for (int i=0; i < c->getKidCount(); i++) {
-    renameCreateContinuationCalls(ar, c->getNthKid(i), importedMethods);
-  }
-}
-
-void ClassScope::relinkGeneratorMethods(
-  AnalysisResultPtr ar,
-  ImportedMethodMap &importedMethods) {
-  for (ImportedMethodMap::const_iterator methIt =
-         importedMethods.begin(); methIt != importedMethods.end(); methIt++) {
-    MethodStatementPtr newMeth = methIt->second;
-
-    // Skip non-generator methods
-    if (!newMeth) continue;
-
-    if (newMeth->getOrigGeneratorFunc()) {
-      // Get corresponding original generator method in the current class
-      const string& origGenName = newMeth->getOrigGeneratorFunc()->getName();
-      MethodStatementPtr origGenStmt = importedMethods[origGenName];
-      assert(origGenStmt);
-      // It must be an orig gen func already, we're just updating to point
-      // to the corresponding method cloned from the trait
-      assert(origGenStmt->getGeneratorFunc());
-      newMeth->setOrigGeneratorFunc(origGenStmt);
-      origGenStmt->setGeneratorFunc(newMeth);
-    }
-
-    // OrigGenerator methods need to have their hphp_create_continuation calls
-    // patched to the new generator name.
-    if (newMeth->getGeneratorFunc()) {
-      renameCreateContinuationCalls(ar, newMeth, importedMethods);
-    }
-  }
-}
-
 void ClassScope::importUsedTraits(AnalysisResultPtr ar) {
+  // Trait flattening is supposed to happen only when we have awareness of
+  // the whole program.
+  assert(Option::WholeProgram);
+
   if (m_traitStatus == FLATTENED) return;
   if (m_traitStatus == BEING_FLATTENED) {
-    Compiler::Error(Compiler::CyclicDependentTraits, getStmt());
+    getStmt()->analysisTimeFatal(
+      Compiler::CyclicDependentTraits,
+      "Cyclic dependency between traits involving %s",
+      getOriginalName().c_str()
+    );
     return;
   }
   if (m_usedTraitNames.size() == 0) {
@@ -849,18 +816,53 @@ void ClassScope::importUsedTraits(AnalysisResultPtr ar) {
     }
   }
 
+  if (isTrait()) {
+    for (auto const& req : getTraitRequiredExtends()) {
+      ClassScopePtr rCls = ar->findClass(req);
+      if (!rCls || rCls->isFinal() || rCls->isInterface()) {
+        getStmt()->analysisTimeFatal(
+          Compiler::InvalidDerivation,
+          Strings::TRAIT_BAD_REQ_EXTENDS,
+          m_originalName.c_str(),
+          req.c_str(),
+          req.c_str()
+        );
+      }
+    }
+    for (auto const& req : getTraitRequiredImplements()) {
+      ClassScopePtr rCls = ar->findClass(req);
+      if (!rCls || !(rCls->isInterface())) {
+        getStmt()->analysisTimeFatal(
+          Compiler::InvalidDerivation,
+          Strings::TRAIT_BAD_REQ_IMPLEMENTS,
+          m_originalName.c_str(),
+          req.c_str(),
+          req.c_str()
+        );
+      }
+    }
+  }
+
   // Find trait methods to be imported
   for (unsigned i = 0; i < m_usedTraitNames.size(); i++) {
     ClassScopePtr tCls = ar->findClass(m_usedTraitNames[i]);
     if (!tCls || !(tCls->isTrait())) {
-      setAttribute(UsesUnknownTrait);
-      Compiler::Error(Compiler::UnknownTrait, getStmt());
-      continue;
+      setAttribute(UsesUnknownTrait); // XXX: is this useful ... for anything?
+      getStmt()->analysisTimeFatal(
+        Compiler::UnknownTrait,
+        Strings::TRAITS_UNKNOWN_TRAIT,
+        m_usedTraitNames[i].c_str()
+      );
     }
     // First, make sure the used trait is flattened
     tCls->importUsedTraits(ar);
 
     findTraitMethodsToImport(ar, tCls);
+
+    // Import any interfaces implemented
+    tCls->getInterfaces(ar, m_bases, false);
+
+    importTraitRequirements(ar, tCls);
   }
 
   // Apply rules
@@ -880,9 +882,7 @@ void ClassScope::importUsedTraits(AnalysisResultPtr ar) {
   }
 
   std::map<string, MethodStatementPtr> importedTraitMethods;
-  std::vector<std::pair<string,const TraitMethod*> > importedTraitsWithOrigName;
-
-  GeneratorRenameMap genRenameMap;
+  std::vector<std::pair<string,const TraitMethod*>> importedTraitsWithOrigName;
 
   // Actually import the methods
   for (MethodToTraitListMap::const_iterator
@@ -896,7 +896,11 @@ void ClassScope::importUsedTraits(AnalysisResultPtr ar) {
     }
     // Consistency checking: each name must only refer to one imported method
     if (iter->second.size() > 1) {
-      Compiler::Error(Compiler::MethodInMultipleTraits, getStmt());
+      getStmt()->analysisTimeFatal(
+        Compiler::MethodInMultipleTraits,
+        Strings::METHOD_IN_MULTIPLE_TRAITS,
+        iter->first.c_str()
+      );
     } else {
       TraitMethodList::const_iterator traitMethIter = iter->second.begin();
       if ((traitMethIter->m_modifiers ? traitMethIter->m_modifiers :
@@ -907,15 +911,8 @@ void ClassScope::importUsedTraits(AnalysisResultPtr ar) {
           continue;
         }
       }
-      if (traitMethIter->m_modifiers &&
-          traitMethIter->m_modifiers->isStatic()) {
-        Compiler::Error(Compiler::InvalidAccessModifier,
-                        traitMethIter->m_modifiers);
-        continue;
-      }
-
       string sourceName = traitMethIter->m_ruleStmt ?
-        Util::toLower(((TraitAliasStatement*)traitMethIter->m_ruleStmt.get())->
+        toLower(((TraitAliasStatement*)traitMethIter->m_ruleStmt.get())->
                       getMethodName()) : iter->first;
       importedTraitMethods[sourceName] = MethodStatementPtr();
       importedTraitsWithOrigName.push_back(
@@ -927,15 +924,12 @@ void ClassScope::importUsedTraits(AnalysisResultPtr ar) {
     const string &sourceName = importedTraitsWithOrigName[i].first;
     const TraitMethod *traitMethod = importedTraitsWithOrigName[i].second;
     MethodStatementPtr newMeth = importTraitMethod(
-      *traitMethod, ar, Util::toLower(traitMethod->m_originalName),
-      genRenameMap, importedTraitMethods);
+      *traitMethod, ar, toLower(traitMethod->m_originalName),
+      importedTraitMethods);
     if (newMeth) {
       importedTraitMethods[sourceName] = newMeth;
     }
   }
-
-  // Relink generator and origGenerator methods
-  relinkGeneratorMethods(ar, importedTraitMethods);
 
   // Import trait properties
   importTraitProperties(ar);
@@ -1041,7 +1035,7 @@ FunctionScopePtr ClassScope::findFunction(AnalysisResultConstPtr ar,
                                           const std::string &name,
                                           bool recursive,
                                           bool exclIntfBase /* = false */) {
-  assert(Util::toLower(name) == name);
+  assert(toLower(name) == name);
   StringToFunctionScopePtrMap::const_iterator iter;
   iter = m_functions.find(name);
   if (iter != m_functions.end()) {
@@ -1059,7 +1053,7 @@ FunctionScopePtr ClassScope::findFunction(AnalysisResultConstPtr ar,
       if (exclIntfBase && super->isInterface()) break;
       if (super->isRedeclaring()) {
         if (base == m_parent) {
-          m_derivesFromRedeclaring = DirectFromRedeclared;
+          m_derivesFromRedeclaring = Derivation::Redeclaring;
           break;
         }
         continue;
@@ -1070,7 +1064,7 @@ FunctionScopePtr ClassScope::findFunction(AnalysisResultConstPtr ar,
     }
   }
   if (!Option::AllDynamic &&
-      derivesFromRedeclaring() == DirectFromRedeclared) {
+      derivesFromRedeclaring() == Derivation::Redeclaring) {
     setDynamic(ar, name);
   }
 
@@ -1093,7 +1087,7 @@ FunctionScopePtr ClassScope::findConstructor(AnalysisResultConstPtr ar,
   }
 
   // walk up
-  if (recursive && derivesFromRedeclaring() != DirectFromRedeclared) {
+  if (recursive && derivesFromRedeclaring() != Derivation::Redeclaring) {
     ClassScopePtr super = ar->findClass(m_parent);
     if (super) {
       FunctionScopePtr func = super->findConstructor(ar, true);
@@ -1101,7 +1095,7 @@ FunctionScopePtr ClassScope::findConstructor(AnalysisResultConstPtr ar,
     }
   }
   if (!Option::AllDynamic &&
-      derivesFromRedeclaring() == DirectFromRedeclared) {
+      derivesFromRedeclaring() == Derivation::Redeclaring) {
     setDynamic(ar, name);
   }
 
@@ -1115,7 +1109,7 @@ void ClassScope::setStaticDynamic(AnalysisResultConstPtr ar) {
     if (fs->isStatic()) fs->setDynamic();
   }
   if (!m_parent.empty()) {
-    if (derivesFromRedeclaring() == DirectFromRedeclared) {
+    if (derivesFromRedeclaring() == Derivation::Redeclaring) {
       const ClassScopePtrVec &parents = ar->findRedeclaredClasses(m_parent);
       BOOST_FOREACH(ClassScopePtr cl, parents) {
         cl->setStaticDynamic(ar);
@@ -1137,7 +1131,7 @@ void ClassScope::setDynamic(AnalysisResultConstPtr ar,
     FunctionScopePtr fs = iter->second;
     fs->setDynamic();
   } else if (!m_parent.empty()) {
-    if (derivesFromRedeclaring() == DirectFromRedeclared) {
+    if (derivesFromRedeclaring() == Derivation::Redeclaring) {
       const ClassScopePtrVec &parents = ar->findRedeclaredClasses(m_parent);
       BOOST_FOREACH(ClassScopePtr cl, parents) {
         cl->setDynamic(ar, name);
@@ -1198,10 +1192,10 @@ void ClassScope::getAllParents(AnalysisResultConstPtr ar,
                                std::vector<std::string> &names) {
   if (m_stmt) {
     if (isInterface()) {
-      boost::dynamic_pointer_cast<InterfaceStatement>
+      dynamic_pointer_cast<InterfaceStatement>
         (m_stmt)->getAllParents(ar, names);
     } else {
-      boost::dynamic_pointer_cast<ClassStatement>
+      dynamic_pointer_cast<ClassStatement>
         (m_stmt)->getAllParents(ar, names);
     }
   } else {
@@ -1237,8 +1231,7 @@ void ClassScope::getInterfaces(AnalysisResultConstPtr ar,
       if (cls && cls->isRedeclaring()) {
         cls = self->findExactClass(cls);
       }
-      if (cls) names.push_back(cls->getDocName());
-      else     names.push_back(*it);
+      names.push_back(cls ? cls->getDocName() : *it);
       if (cls && recursive) {
         cls->getInterfaces(ar, names, true);
       }
@@ -1442,7 +1435,7 @@ bool ClassScope::canSkipCreateMethod(AnalysisResultConstPtr ar) const {
   // 2) no constructor defined (__construct or class name)
   // 3) no init() defined
 
-  if (derivesFromRedeclaring() ||
+  if (derivesFromRedeclaring() == Derivation::Redeclaring ||
       getAttribute(HasConstructor) ||
       getAttribute(ClassNameConstructor) ||
       needsInitMethod()) {

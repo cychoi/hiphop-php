@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,10 +17,14 @@
 #ifndef incl_HPHP_RUNTIME_TYPE_H_
 #define incl_HPHP_RUNTIME_TYPE_H_
 
+#include "hphp/util/safe-cast.h"
+#include <vector>
+
 #include "hphp/runtime/vm/bytecode.h"
+#include "hphp/runtime/vm/jit/region-selection.h"
 
 namespace HPHP {
-namespace Transl {
+namespace JIT {
 
 // Location --
 //   A user-program-visible, and bytecode ISA addressable place for a PHP
@@ -120,6 +124,18 @@ struct Location {
     return space == Iter;
   }
 
+  JIT::RegionDesc::Location toLocation(Offset spOffsetFromFp) const {
+    typedef JIT::RegionDesc::Location L;
+    switch (space) {
+      case Stack: {
+        auto offsetFromSp = safe_cast<uint32_t>(offset);
+        return L::Stack{offsetFromSp, spOffsetFromFp - offsetFromSp};
+      }
+      case Local: return L::Local{safe_cast<uint32_t>(offset)};
+      default:    not_reached();
+    }
+  }
+
 public:
   Space space;
   int64_t offset;
@@ -167,7 +183,7 @@ class InputInfos : public std::vector<InputInfo> {
     for (size_t i = 0; i < size(); i++) {
       retval += (*this)[i].pretty();
       if (i != size() - 1) {
-        retval += string(" ");
+        retval += std::string(" ");
       }
     }
     return retval;
@@ -190,7 +206,13 @@ class RuntimeType {
       DataType innerType;
       // Set when we want to transfer the type information to the
       // IR type system (Type object)
-      const Class* knownClass;
+      union {
+        const Class* knownClass;
+        struct {
+          bool arrayKindValid;
+          ArrayData::ArrayKind arrayKind;
+        };
+      };
       union {
         // We may have even more precise data about this set of values.
         const StringData* string; // KindOfString: The exact value.
@@ -213,14 +235,16 @@ class RuntimeType {
     assert(m_kind == VALUE || m_kind == ITER);
     if (m_kind == VALUE) {
       assert(m_value.innerType != KindOfRef);
-      assert(m_value.outerType == KindOfRef ||
-             m_value.innerType == KindOfInvalid);
+      assert((m_value.outerType == KindOfRef) ==
+             (m_value.innerType != KindOfNone));
       assert(m_value.outerType == KindOfString ||
              m_value.innerType == KindOfString ||
              m_value.outerType == KindOfClass ||
              m_value.innerType == KindOfClass ||
              m_value.outerType == KindOfObject ||
              m_value.innerType == KindOfObject ||
+             m_value.outerType == KindOfResource ||
+             m_value.innerType == KindOfResource ||
              m_value.outerType == KindOfArray ||
              m_value.innerType == KindOfArray ||
              m_value.outerType == KindOfBoolean ||
@@ -228,15 +252,23 @@ class RuntimeType {
              m_value.klass == nullptr);
       assert(m_value.innerType != KindOfStaticString &&
              m_value.outerType != KindOfStaticString);
-      assert(m_value.knownClass == nullptr ||
-             m_value.outerType == KindOfObject ||
-             (m_value.outerType == KindOfRef &&
-                 m_value.innerType == KindOfObject));
+      assert((m_value.knownClass == nullptr ||
+              m_value.outerType == KindOfObject ||
+              (m_value.outerType == KindOfRef &&
+               m_value.innerType == KindOfObject)) ||
+             (!m_value.arrayKindValid ||
+              m_value.outerType == KindOfArray ||
+              (m_value.outerType == KindOfRef &&
+               m_value.innerType == KindOfArray)));
     }
   }
 
+  void init(DataType outer,
+            DataType inner = KindOfNone,
+            const Class* klass = nullptr);
+
  public:
-  explicit RuntimeType(DataType outer, DataType inner = KindOfInvalid,
+  explicit RuntimeType(DataType outer, DataType inner = KindOfNone,
                        const Class* = nullptr);
   explicit RuntimeType(const StringData*);
   explicit RuntimeType(const ArrayData*);
@@ -255,6 +287,7 @@ class RuntimeType {
   RuntimeType unbox() const;
   RuntimeType setValueType(DataType vt) const;
   RuntimeType setKnownClass(const Class* klass) const;
+  RuntimeType setArrayKind(ArrayData::ArrayKind arrayKind) const;
 
   // Accessors
   DataType outerType() const;
@@ -268,6 +301,8 @@ class RuntimeType {
   int64_t valueInt() const;
   int64_t valueGeneric() const;
   const Class* knownClass() const;
+  bool hasArrayKind() const;
+  ArrayData::ArrayKind arrayKind() const;
 
   // Helpers for typechecking
   DataType typeCheckValue() const;
@@ -288,7 +323,7 @@ class RuntimeType {
   bool isString() const;
   bool isObject() const;
   bool isClass() const;
-  bool hasKnownType() const;
+  bool hasKnownClass() const;
   bool operator==(const RuntimeType& r) const;
   RuntimeType &operator=(const RuntimeType& r) = default;
   size_t operator()(const RuntimeType& r) const; // hash function

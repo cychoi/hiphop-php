@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,15 +25,16 @@
 #include "hphp/compiler/analysis/constant_table.h"
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/expression/unary_op_expression.h"
-#include "hphp/util/parser/hphp.tab.hpp"
+#include "hphp/parser/hphp.tab.hpp"
+#include "hphp/compiler/code_model_enums.h"
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/expression/simple_function_call.h"
-#include "hphp/runtime/base/complex_types.h"
-#include "hphp/runtime/base/builtin_functions.h"
+#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/builtin-functions.h"
 
 using namespace HPHP;
 
@@ -160,10 +161,10 @@ int AssignmentExpression::getKidCount() const {
 void AssignmentExpression::setNthKid(int n, ConstructPtr cp) {
   switch (m_rhsFirst ? 1 - n : n) {
     case 0:
-      m_variable = boost::dynamic_pointer_cast<Expression>(cp);
+      m_variable = dynamic_pointer_cast<Expression>(cp);
       break;
     case 1:
-      m_value = boost::dynamic_pointer_cast<Expression>(cp);
+      m_value = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       assert(false);
@@ -180,11 +181,11 @@ bool AssignmentExpression::isSimpleGlobalAssign(StringData **name,
   Variant v;
   if (!m_value->getScalarValue(v) || v.is(KindOfArray)) return false;
   if (name) {
-    *name = StringData::GetStaticString(ae->getGlobalName());
+    *name = makeStaticString(ae->getGlobalName());
   }
   if (tv) {
     if (v.isString()) {
-      v = StringData::GetStaticString(v.toCStrRef().get());
+      v = makeStaticString(v.toCStrRef().get());
     }
     *tv = *v.asTypedValue();
   }
@@ -255,17 +256,11 @@ ExpressionPtr AssignmentExpression::preOptimize(AnalysisResultConstPtr ar) {
               g_context->setThrowAllErrors(true);
               if (aoff) {
                 if (!aoff->getScalarValue(o)) break;
-                if (v.isString()) {
-                  if (!o.isInteger() ||
-                      o.toInt64Val() < 0 ||
-                      o.toInt64Val() >= v.toCStrRef().size()) {
-                    // warnings should be raised...
-                    break;
-                  }
-                }
-                v.set(o, r);
+                if (!v.isArray()) break;
+                v.toArrRef().set(o, r);
               } else {
-                v.append(r);
+                if (!v.isArray()) break;
+                v.toArrRef().append(r);
               }
               g_context->setThrowAllErrors(false);
             } catch (...) {
@@ -304,6 +299,21 @@ TypePtr AssignmentExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
                                          bool coerce) {
 
   return inferAssignmentTypes(ar, type, coerce, m_variable, m_value);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void AssignmentExpression::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("BinaryOpExpression", 4);
+  cg.printPropertyHeader("expression1");
+  m_variable->outputCodeModel(cg);
+  cg.printPropertyHeader("expression2");
+  cg.printExpression(m_value, m_ref);
+  cg.printPropertyHeader("operation");
+  cg.printValue(PHP_ASSIGNMENT);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,17 +18,9 @@
 #include "hphp/runtime/ext/pdo_driver.h"
 #include "hphp/runtime/ext/pdo_sqlite.h"
 #include "hphp/runtime/ext/pdo_mysql.h"
-#include "hphp/runtime/ext/ext_variable.h"
+#include "hphp/runtime/ext/std/ext_std_variable.h"
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
-// static strings
-
-StaticString PDOConnection::s_class_name("PDOConnection");
-StaticString PDOColumn::s_class_name("PDOColumn");
-StaticString PDOBoundParam::s_class_name("PDOBoundParam");
-StaticString PDOStatement::s_class_name("PDOStatement");
-
 ///////////////////////////////////////////////////////////////////////////////
 
 // This needs to get created first.
@@ -42,13 +34,13 @@ PDODriver::PDODriver(const char *name) : m_name(name) {
   s_drivers[name] = this;
 }
 
-PDOConnection *PDODriver::createConnection(CStrRef datasource,
-                                           CStrRef username,
-                                           CStrRef password, CArrRef options) {
+PDOConnection *PDODriver::createConnection(const String& datasource,
+                                           const String& username,
+                                           const String& password, const Array& options) {
   PDOConnection *conn = createConnectionObject();
-  conn->data_source = string(datasource.data(), datasource.size());
-  conn->username = string(username.data(), username.size());
-  conn->password = string(password.data(), password.size());
+  conn->data_source = std::string(datasource.data(), datasource.size());
+  conn->username = std::string(username.data(), username.size());
+  conn->password = std::string(password.data(), password.size());
 
   if (options.exists(PDO_ATTR_AUTOCOMMIT)) {
     conn->auto_commit = options[PDO_ATTR_AUTOCOMMIT].toInt64();
@@ -80,10 +72,17 @@ PDOConnection::PDOConnection()
 PDOConnection::~PDOConnection() {
 }
 
+void PDOConnection::sweep() {
+  assert(!is_persistent);
+  def_stmt_ctor_args.asTypedValue()->m_type = KindOfNull;
+  delete this;
+}
+
 void PDOConnection::persistentSave() {
-  String serialized = f_serialize(def_stmt_ctor_args);
-  serialized_def_stmt_ctor_args = string(serialized.data(), serialized.size());
-  def_stmt_ctor_args.reset();
+  String serialized = HHVM_FN(serialize)(def_stmt_ctor_args);
+  serialized_def_stmt_ctor_args = std::string(serialized.data(),
+    serialized.size());
+  def_stmt_ctor_args.releaseForSweep(); // we're called from requestShutdown
 }
 
 void PDOConnection::persistentRestore() {
@@ -101,18 +100,18 @@ bool PDOConnection::closer() {
   return false;
 }
 
-bool PDOConnection::preparer(CStrRef sql, sp_PDOStatement *stmt,
-                             CVarRef options) {
+bool PDOConnection::preparer(const String& sql, sp_PDOStatement *stmt,
+                             const Variant& options) {
   throw_pdo_exception(uninit_null(), uninit_null(), "This driver doesn't support %s", __func__);
   return false;
 }
 
-int64_t PDOConnection::doer(CStrRef sql) {
+int64_t PDOConnection::doer(const String& sql) {
   throw_pdo_exception(uninit_null(), uninit_null(), "This driver doesn't support %s", __func__);
   return 0;
 }
 
-bool PDOConnection::quoter(CStrRef input, String &quoted,
+bool PDOConnection::quoter(const String& input, String &quoted,
                            PDOParamType paramtype) {
   throw_pdo_exception(uninit_null(), uninit_null(), "This driver doesn't support %s", __func__);
   return false;
@@ -133,7 +132,7 @@ bool PDOConnection::rollback() {
   return false;
 }
 
-bool PDOConnection::setAttribute(int64_t attr, CVarRef value) {
+bool PDOConnection::setAttribute(int64_t attr, const Variant& value) {
   throw_pdo_exception(uninit_null(), uninit_null(), "This driver doesn't support %s", __func__);
   return false;
 }
@@ -181,6 +180,10 @@ PDOBoundParam::PDOBoundParam()
 }
 
 PDOBoundParam::~PDOBoundParam() {
+  sweep();
+}
+
+void PDOBoundParam::sweep() {
   /* tell the driver that it is going away */
   if (stmt && stmt->support(PDOStatement::MethodParamHook)) {
     stmt->paramHook(this, PDO_PARAM_EVT_FREE);
@@ -202,6 +205,10 @@ PDOStatement::~PDOStatement() {
   if (dbh.get() && dbh->query_stmt == this) {
     dbh->query_stmt = NULL;
   }
+}
+
+void PDOStatement::sweep() {
+  // nothing, but kids can overwrite
 }
 
 bool PDOStatement::support(SupportedMethod method) {
@@ -233,7 +240,7 @@ bool PDOStatement::paramHook(PDOBoundParam *param, PDOParamEvent event_type) {
   return false;
 }
 
-bool PDOStatement::setAttribute(int64_t attr, CVarRef value) {
+bool PDOStatement::setAttribute(int64_t attr, const Variant& value) {
   throw_pdo_exception(uninit_null(), uninit_null(), "This driver doesn't support %s", __func__);
   return false;
 }

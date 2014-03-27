@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,9 +18,14 @@
 #define incl_HPHP_SYMBOL_TABLE_H_
 
 #include "hphp/compiler/hphp.h"
-#include "hphp/util/json.h"
-#include "hphp/util/util.h"
+#include <map>
+#include <memory>
+#include <set>
+#include <vector>
+#include "hphp/compiler/json.h"
 #include "hphp/util/lock.h"
+#include "hphp/util/hash-map-typedefs.h"
+#include "folly/Bits.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -29,7 +34,7 @@ class BlockScope;
 class CodeGenerator;
 class Variant;
 DECLARE_BOOST_TYPES(Construct);
-DECLARE_BOOST_TYPES(Type);
+DECLARE_EXTENDED_BOOST_TYPES(Type);
 DECLARE_BOOST_TYPES(AnalysisResult);
 DECLARE_BOOST_TYPES(SymbolTable);
 DECLARE_BOOST_TYPES(FunctionScope);
@@ -74,9 +79,7 @@ public:
   void setReplaced() { m_flags.m_replaced = true; }
   bool valueSet() const { return m_flags.m_value_set; }
   bool isSystem() const { return m_flags.m_system; }
-  bool isSep() const { return m_flags.m_sep; }
   void setSystem() { m_flags.m_system = true; }
-  void setSep() { m_flags.m_sep = true; }
   bool isConstant() const { return m_flags.m_constant; }
   void setConstant() { m_flags.m_constant = true; }
 
@@ -115,8 +118,6 @@ public:
   bool isIndirectAltered() const { return m_flags.m_indirectAltered; }
   bool isReferenced() const { return !m_flags.m_notReferenced; }
   bool isHidden() const { return m_flags.m_hidden; }
-  bool isGeneratorParameter() const { return m_flags.m_generatorParameter; }
-  bool isRefGeneratorParameter() const { return m_flags.m_refGeneratorParameter; }
   bool isClosureVar() const { return m_flags.m_closureVar; }
   bool isRefClosureVar() const { return m_flags.m_refClosureVar; }
   bool isPassClosureVar() const { return m_flags.m_passClosureVar; }
@@ -142,8 +143,6 @@ public:
   void setIndirectAltered() { m_flags.m_indirectAltered = true; }
   void setReferenced() { m_flags.m_notReferenced = false; }
   void setHidden() { m_flags.m_hidden = true; }
-  void setGeneratorParameter() { m_flags.m_generatorParameter = true; }
-  void setRefGeneratorParameter() { m_flags.m_refGeneratorParameter = true; }
   void setClosureVar() { m_flags.m_closureVar = true; }
   void setRefClosureVar() { m_flags.m_refClosureVar = true; }
   void setPassClosureVar() { m_flags.m_passClosureVar = true; }
@@ -189,7 +188,7 @@ private:
   std::string  m_name;
   unsigned int m_hash;
   union {
-    uint64_t m_flags_val;
+    uint32_t m_flags_val;
     struct {
       /* internal */
       unsigned m_declaration_set : 1;
@@ -200,7 +199,6 @@ private:
 
       /* common */
       unsigned m_system : 1;
-      unsigned m_sep : 1;
 
       /* ConstantTable */
       unsigned m_dynamic : 1;
@@ -223,8 +221,6 @@ private:
       unsigned m_indirectAltered : 1;
       unsigned m_notReferenced : 1;
       unsigned m_hidden : 1;
-      unsigned m_generatorParameter : 1;
-      unsigned m_refGeneratorParameter : 1;
       unsigned m_closureVar : 1;
       unsigned m_refClosureVar : 1;
       unsigned m_passClosureVar : 1;
@@ -234,10 +230,12 @@ private:
       unsigned m_reseated : 1;
     } m_flags;
 
-    static_assert(
-      sizeof(m_flags_val) == sizeof(m_flags),
-      "m_flags_val must cover all the flags");
+
   };
+  static_assert(
+    sizeof(m_flags_val) == sizeof(m_flags),
+    "m_flags_val must cover all the flags");
+
   ConstructPtr        m_declaration;
   ConstructPtr        m_value;
   TypePtr             m_coerced;
@@ -279,7 +277,7 @@ private:
 /**
  * Base class of VariableTable and ConstantTable.
  */
-class SymbolTable : public boost::enable_shared_from_this<SymbolTable>,
+class SymbolTable : public std::enable_shared_from_this<SymbolTable>,
                     public JSON::CodeError::ISerializable {
 public:
   static Mutex AllSymbolTablesMutex;
@@ -345,15 +343,11 @@ public:
   ConstructPtr getDeclaration(const std::string &name) const;
   ConstructPtr getValue(const std::string &name) const;
 
-  /* Whether this constant is brought in by a separable extension */
-  void setSepExtension(const std::string &name);
-  bool isSepExtension(const std::string &name) const;
-
   /**
    * How big of a hash table for generate C++ switch statements.
    */
   int getJumpTableSize() const {
-    return Util::roundUpToPowerOfTwo(m_symbolVec.size() * 2);
+    return folly::nextPowTwo(m_symbolVec.size() * 2);
   }
 
   void canonicalizeSymbolOrder();

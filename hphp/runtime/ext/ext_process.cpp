@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -14,21 +14,37 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/ext/ext_process.h"
-#include "hphp/runtime/ext/ext_file.h"
-#include "hphp/runtime/ext/ext_function.h"
-#include "hphp/runtime/base/util/string_buffer.h"
-#include "hphp/runtime/base/zend/zend_string.h"
+
+#include <cstdlib>
+#include <vector>
+#include <string>
+#include <iostream>
+
+#include <sys/time.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
+
+#include "folly/String.h"
+
+#include "hphp/util/light-process.h"
 #include "hphp/util/lock.h"
-#include "hphp/runtime/base/file/plain_file.h"
-#include "hphp/util/light_process.h"
 #include "hphp/util/logger.h"
-#include "hphp/runtime/base/util/request_local.h"
+
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/plain-file.h"
+#include "hphp/runtime/base/request-local.h"
+#include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/thread-init-fini.h"
+#include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/ext/ext_file.h"
+#include "hphp/runtime/ext/ext_function.h"
+#include "hphp/runtime/ext/ext_string.h"
 #include "hphp/runtime/vm/repo.h"
+#include "hphp/runtime/base/request-event-handler.h"
 
 #if !defined(_NSIG) && defined(NSIG)
 # define _NSIG NSIG
@@ -41,7 +57,7 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 // build environment pair list
-static char **build_envp(CArrRef envs, std::vector<String> &senvs) {
+static char **build_envp(const Array& envs, std::vector<String> &senvs) {
   char **envp = NULL;
   int size = envs.size();
   if (size) {
@@ -49,9 +65,9 @@ static char **build_envp(CArrRef envs, std::vector<String> &senvs) {
     int i = 0;
     for (ArrayIter iter(envs); iter; ++iter, ++i) {
       StringBuffer nvpair;
-      nvpair += iter.first().toString();
-      nvpair += '=';
-      nvpair += iter.second().toString();
+      nvpair.append(iter.first().toString());
+      nvpair.append('=');
+      nvpair.append(iter.second().toString());
 
       String env = nvpair.detach();
       senvs.push_back(env);
@@ -84,8 +100,8 @@ static bool check_cmd(const char *cmd) {
       }
     }
     if (!allow) {
-      String file = g_vmContext->getContainingFileName();
-      int line = g_vmContext->getLine();
+      String file = g_context->getContainingFileName();
+      int line = g_context->getLine();
       Logger::Warning("Command %s is not in the whitelist, called at %s:%d",
                       cmd_tmp, file.data(), line);
       if (!RuntimeOption::WhitelistExecWarningOnly) {
@@ -104,14 +120,14 @@ static bool check_cmd(const char *cmd) {
 ///////////////////////////////////////////////////////////////////////////////
 // pcntl
 
-IMPLEMENT_DEFAULT_EXTENSION(pcntl);
+IMPLEMENT_DEFAULT_EXTENSION_VERSION(pcntl, NO_EXTENSION_VERSION_YET);
 
 int64_t f_pcntl_alarm(int seconds) {
   return alarm(seconds);
 }
 
-void f_pcntl_exec(CStrRef path, CArrRef args /* = null_array */,
-                  CArrRef envs /* = null_array */) {
+void f_pcntl_exec(const String& path, const Array& args /* = null_array */,
+                  const Array& envs /* = null_array */) {
   if (RuntimeOption::WhitelistExec && !check_cmd(path.data())) {
     return;
   }
@@ -141,7 +157,7 @@ void f_pcntl_exec(CStrRef path, CArrRef args /* = null_array */,
   char **envp = build_envp(envs, senvs);
   if (execve(path.c_str(), argv, envp) == -1) {
     raise_warning("Error has occured: (errno %d) %s",
-                    errno, Util::safe_strerror(errno).c_str());
+                    errno, folly::errnoStr(errno).c_str());
   }
 
   free(envp);
@@ -255,18 +271,17 @@ static Sigfunc *php_signal(int signo, Sigfunc *func, bool restart) {
 }
 
 /* Our custom signal handler that calls the appropriate php_function */
-class SignalHandlers : public RequestEventHandler {
-public:
+struct SignalHandlers final : RequestEventHandler {
   SignalHandlers() {
     memset(signaled, 0, sizeof(signaled));
     pthread_sigmask(SIG_SETMASK, NULL, &oldSet);
   }
-  virtual void requestInit() {
+  void requestInit() override {
     handlers.reset();
     // restore the old signal mask, thus unblock those that should be
     pthread_sigmask(SIG_SETMASK, &oldSet, NULL);
   }
-  virtual void requestShutdown() {
+  void requestShutdown() override {
     // block all signals
     sigset_t set;
     sigfillset(&set);
@@ -280,6 +295,16 @@ public:
   sigset_t oldSet;
 };
 IMPLEMENT_STATIC_REQUEST_LOCAL(SignalHandlers, s_signal_handlers);
+
+// We must register the s_signal_handlers RequestEventHandler
+// immediately: otherwise, pcntl_signal_handler might try to register
+// it while processing a signal, which means calling malloc to insert
+// it into various vectors and sets, which is not ok from a signal
+// handler.
+static InitFiniNode initSignalHandler(
+  [] { s_signal_handlers.get(); },
+  InitFiniNode::When::ThreadInit
+);
 
 static void pcntl_signal_handler(int signo) {
   if (signo > 0 && signo < _NSIG && !g_context.isNull()) {
@@ -307,14 +332,14 @@ bool f_pcntl_signal_dispatch() {
       signaled[i] = 0;
       if (s_signal_handlers->handlers.exists(i)) {
         vm_call_user_func(s_signal_handlers->handlers[i],
-                               CREATE_VECTOR1(i));
+                               make_packed_array(i));
       }
     }
   }
   return true;
 }
 
-bool f_pcntl_signal(int signo, CVarRef handler,
+bool f_pcntl_signal(int signo, const Variant& handler,
                     bool restart_syscalls /* = true */) {
   /* Special long value case for SIG_DFL and SIG_IGN */
   if (handler.isInteger()) {
@@ -417,7 +442,7 @@ private:
   FILE *m_proc;
 };
 
-String f_shell_exec(CStrRef cmd) {
+String f_shell_exec(const String& cmd) {
   ShellExecContext ctx;
   FILE *fp = ctx.exec(cmd.c_str());
   if (!fp) return "";
@@ -426,7 +451,7 @@ String f_shell_exec(CStrRef cmd) {
   return sbuf.detach();
 }
 
-String f_exec(CStrRef command, VRefParam output /* = null */,
+String f_exec(const String& command, VRefParam output /* = null */,
               VRefParam return_var /* = null */) {
   ShellExecContext ctx;
   FILE *fp = ctx.exec(command.c_str());
@@ -434,7 +459,7 @@ String f_exec(CStrRef command, VRefParam output /* = null */,
   StringBuffer sbuf;
   sbuf.read(fp);
 
-  Array lines = StringUtil::Explode(sbuf.detach(), "\n");
+  Array lines = StringUtil::Explode(sbuf.detach(), "\n").toArray();
   int ret = ctx.exit();
   if (WIFEXITED(ret)) ret = WEXITSTATUS(ret);
   return_var = ret;
@@ -442,21 +467,21 @@ String f_exec(CStrRef command, VRefParam output /* = null */,
   if (count > 0 && lines[count - 1].toString().empty()) {
     count--; // remove explode()'s last empty line
   }
-  if (!output.is(KindOfArray)) {
-    output = Array(ArrayData::Create());
-  }
 
+  PackedArrayInit pai(count);
   for (int i = 0; i < count; i++) {
-    output.append(lines[i]);
+    pai.append(lines[i]);
   }
+  output.wrapped() = pai.toArray();
 
   if (!count || lines.empty()) {
     return String();
   }
-  return StringUtil::Trim(lines[count - 1], StringUtil::TrimRight);
+
+  return f_rtrim(lines[count - 1].toString());
 }
 
-void f_passthru(CStrRef command, VRefParam return_var /* = null */) {
+void f_passthru(const String& command, VRefParam return_var /* = null */) {
   ShellExecContext ctx;
   FILE *fp = ctx.exec(command.c_str());
   if (!fp) return;
@@ -467,14 +492,14 @@ void f_passthru(CStrRef command, VRefParam return_var /* = null */) {
     if (len == -1 && errno == EINTR) continue;
     if (len <= 0) break; // break on error or EOF
     buffer[len] = '\0';
-    echo(String(buffer, len, AttachLiteral));
+    echo(String(buffer, len, CopyString));
   }
   int ret = ctx.exit();
   if (WIFEXITED(ret)) ret = WEXITSTATUS(ret);
   return_var = ret;
 }
 
-String f_system(CStrRef command, VRefParam return_var /* = null */) {
+String f_system(const String& command, VRefParam return_var /* = null */) {
   ShellExecContext ctx;
   FILE *fp = ctx.exec(command.c_str());
   if (!fp) return "";
@@ -483,7 +508,7 @@ String f_system(CStrRef command, VRefParam return_var /* = null */) {
     sbuf.read(fp);
   }
 
-  Array lines = StringUtil::Explode(sbuf.detach(), "\n");
+  Array lines = StringUtil::Explode(sbuf.detach(), "\n").toArray();
   int ret = ctx.exit();
   if (WIFEXITED(ret)) ret = WEXITSTATUS(ret);
   return_var = ret;
@@ -493,13 +518,14 @@ String f_system(CStrRef command, VRefParam return_var /* = null */) {
   }
 
   for (int i = 0; i < count; i++) {
-    echo(lines[i]);
+    echo(lines[i].toString());
     echo("\n");
   }
   if (!count || lines.empty()) {
     return String();
   }
-  return StringUtil::Trim(lines[count - 1], StringUtil::TrimRight);
+
+  return f_rtrim(lines[count - 1].toString());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -507,23 +533,23 @@ String f_system(CStrRef command, VRefParam return_var /* = null */) {
 
 class ChildProcess : public SweepableResourceData {
 public:
-  DECLARE_OBJECT_ALLOCATION(ChildProcess)
+  DECLARE_RESOURCE_ALLOCATION(ChildProcess)
 
   pid_t child;
   Array pipes;
   String command;
   Variant env;
 
-  static StaticString s_class_name;
+  CLASSNAME_IS("process");
   // overriding ResourceData
-  virtual CStrRef o_getClassNameHook() const { return s_class_name; }
+  virtual const String& o_getClassNameHook() const { return classnameof(); }
 
   int close() {
     // Although the PHP doc about proc_close() says that the pipes need to be
     // explicitly pclose()'ed, it seems that Zend is implicitly closing the
     // pipes when proc_close() is called.
     for (ArrayIter iter(pipes); iter; ++iter) {
-      iter.second().toObject().getTyped<PlainFile>()->close();
+      iter.second().toResource().getTyped<PlainFile>()->close();
     }
     pipes.clear();
 
@@ -544,16 +570,16 @@ public:
     return wstatus;
   }
 };
-IMPLEMENT_OBJECT_ALLOCATION_NO_DEFAULT_SWEEP(ChildProcess);
+
 void ChildProcess::sweep() {
   // do nothing here, as everything will be collected by SmartAllocator
 }
 
-StaticString ChildProcess::s_class_name("Process");
-
 #define DESC_PIPE       1
 #define DESC_FILE       2
 #define DESC_PARENT_MODE_WRITE  8
+
+const StaticString s_w("w");
 
 class DescriptorItem {
 public:
@@ -583,22 +609,22 @@ public:
     childend = dup(file->fd());
     if (childend < 0) {
       raise_warning("unable to dup File-Handle for descriptor %d - %s",
-                      index, Util::safe_strerror(errno).c_str());
+                      index, folly::errnoStr(errno).c_str());
       return false;
     }
     return true;
   }
 
-  bool readPipe(CStrRef zmode) {
+  bool readPipe(const String& zmode) {
     mode = DESC_PIPE;
     int newpipe[2];
     if (0 != pipe(newpipe)) {
       raise_warning("unable to create pipe %s",
-                      Util::safe_strerror(errno).c_str());
+                      folly::errnoStr(errno).c_str());
       return false;
     }
 
-    if (zmode != "w") {
+    if (zmode != s_w) {
       parentend = newpipe[1];
       childend = newpipe[0];
       mode |= DESC_PARENT_MODE_WRITE;
@@ -610,17 +636,25 @@ public:
     return true;
   }
 
-  bool openFile(CStrRef zfile, CStrRef zmode) {
+  bool openFile(const String& zfile, const String& zmode) {
     mode = DESC_FILE;
-    /* try a wrapper */
-    FILE *file = fopen(zfile.c_str(), zmode.c_str());
-    if (!file) {
+      /* try a wrapper */
+    Variant vfile = f_fopen(zfile.c_str(), zmode.c_str());
+    if (!vfile.isResource()) {
       raise_warning("Unable to open specified file: %s (mode %s)",
                       zfile.data(), zmode.data());
       return false;
+    } else {
+      File *file = vfile.toResource().getTyped<File>();
+      file->flush();
+      childend = dup(file->fd());
+      if (childend < 0) {
+        raise_warning("unable to dup File-Handle for descriptor %d - %s",
+                        index, folly::errnoStr(errno).c_str());
+        return false;
+      }
+      return true;
     }
-    childend = fileno(file);
-    return true;
   }
 
   void dupChild() {
@@ -637,17 +671,17 @@ public:
 
   /* clean up all the child ends and then open streams on the parent
    * ends, where appropriate */
-  Object dupParent() {
+  Resource dupParent() {
     close(childend); childend = -1;
 
     if ((mode & ~DESC_PARENT_MODE_WRITE) == DESC_PIPE) {
       /* mark the descriptor close-on-exec, so that it won't be inherited
          by potential other children */
       fcntl(parentend, F_SETFD, FD_CLOEXEC);
-      return Object(NEWOBJ(PlainFile)(parentend, true));
+      return Resource(NEWOBJ(PlainFile)(parentend, true));
     }
 
-    return Object();
+    return Resource();
   }
 };
 
@@ -657,8 +691,11 @@ public:
  */
 Mutex DescriptorItem::s_mutex(false);
 
-static bool pre_proc_open(CArrRef descriptorspec,
-                          vector<DescriptorItem> &items) {
+const StaticString s_pipe("pipe");
+const StaticString s_file("file");
+
+static bool pre_proc_open(const Array& descriptorspec,
+                          std::vector<DescriptorItem> &items) {
   /* walk the descriptor spec and set up files/pipes */
   items.resize(descriptorspec.size());
   int i = 0;
@@ -674,7 +711,7 @@ static bool pre_proc_open(CArrRef descriptorspec,
 
     Variant descitem = iter.second();
     if (descitem.isResource()) {
-      File *file = descitem.toObject().getTyped<File>();
+      File *file = descitem.toResource().getTyped<File>();
       if (!item.readFile(file)) break;
     } else if (!descitem.is(KindOfArray)) {
       raise_warning("Descriptor must be either an array or a File-Handle");
@@ -686,13 +723,13 @@ static bool pre_proc_open(CArrRef descriptorspec,
         break;
       }
       String ztype = descarr[int64_t(0)].toString();
-      if (ztype == "pipe") {
+      if (ztype == s_pipe) {
         if (!descarr.exists(int64_t(1))) {
           raise_warning("Missing mode parameter for 'pipe'");
           break;
         }
         if (!item.readPipe(descarr[int64_t(1)].toString())) break;
-      } else if (ztype == "file") {
+      } else if (ztype == s_file) {
         if (!descarr.exists(int64_t(1))) {
           raise_warning("Missing file name parameter for 'file'");
           break;
@@ -718,15 +755,15 @@ static bool pre_proc_open(CArrRef descriptorspec,
   return false;
 }
 
-static Variant post_proc_open(CStrRef cmd, Variant &pipes,
-                              CVarRef env, vector<DescriptorItem> &items,
+static Variant post_proc_open(const String& cmd, Variant &pipes,
+                              const Variant& env, std::vector<DescriptorItem> &items,
                               pid_t child) {
   if (child < 0) {
     /* failed to fork() */
     for (int i = 0; i < (int)items.size(); i++) {
       items[i].cleanup();
     }
-    raise_warning("fork failed - %s", Util::safe_strerror(errno).c_str());
+    raise_warning("fork failed - %s", folly::errnoStr(errno).c_str());
     return false;
   }
 
@@ -735,27 +772,32 @@ static Variant post_proc_open(CStrRef cmd, Variant &pipes,
   proc->command = cmd;
   proc->child = child;
   proc->env = env;
+
+  // need to set pipes to a new empty array, ignoring whatever it was
+  // previously set to
+  pipes = Variant(Array::Create());
+
   for (int i = 0; i < (int)items.size(); i++) {
-    Object f = items[i].dupParent();
+    Resource f = items[i].dupParent();
     if (!f.isNull()) {
       proc->pipes.append(f);
+      pipes.toArrRef().set(items[i].index, f);
     }
-    pipes.set(items[i].index, f);
   }
-  return Object(proc);
+  return Resource(proc);
 }
 
-Variant f_proc_open(CStrRef cmd, CArrRef descriptorspec, VRefParam pipes,
-                    CStrRef cwd /* = null_string */,
-                    CVarRef env /* = null_variant */,
-                    CVarRef other_options /* = null_variant */) {
+Variant f_proc_open(const String& cmd, const Array& descriptorspec, VRefParam pipes,
+                    const String& cwd /* = null_string */,
+                    const Variant& env /* = null_variant */,
+                    const Variant& other_options /* = null_variant */) {
   if (RuntimeOption::WhitelistExec && !check_cmd(cmd.data())) {
     return false;
   }
 
   std::vector<DescriptorItem> items;
 
-  string scwd = "";
+  std::string scwd = "";
   if (!cwd.empty()) {
     scwd = cwd.c_str();
   } else if (!g_context->getCwd().empty()) {
@@ -770,8 +812,7 @@ Variant f_proc_open(CStrRef cmd, CArrRef descriptorspec, VRefParam pipes,
     // for each name.
 
     // Env vars defined in the hdf file go in first
-    for (std::map<string, string>::const_iterator iter =
-        RuntimeOption::EnvVariables.begin();
+    for (auto iter = RuntimeOption::EnvVariables.begin();
         iter != RuntimeOption::EnvVariables.end(); ++iter) {
       enva.set(String(iter->first), String(iter->second));
     }
@@ -811,10 +852,13 @@ Variant f_proc_open(CStrRef cmd, CArrRef descriptorspec, VRefParam pipes,
     std::vector<std::string> envs;
     for (ArrayIter iter(enva); iter; ++iter) {
       StringBuffer nvpair;
-      nvpair += iter.first().toString();
-      nvpair += '=';
-      nvpair += iter.second().toString();
-      envs.push_back(nvpair.detach().c_str());
+      nvpair.append(iter.first().toString());
+      nvpair.append('=');
+      nvpair.append(iter.second().toString());
+      std::string tmp = nvpair.detach().c_str();
+      if (tmp.find('\n') == std::string::npos) {
+        envs.push_back(tmp);
+      }
     }
 
     child = LightProcess::proc_open(cmd.c_str(), created, intended,
@@ -844,32 +888,33 @@ Variant f_proc_open(CStrRef cmd, CArrRef descriptorspec, VRefParam pipes,
   if (scwd.length() > 0 && chdir(scwd.c_str())) {
     // chdir failed, the working directory remains unchanged
   }
-  vector<String> senvs; // holding those char *
+  std::vector<String> senvs; // holding those char *
   char **envp = build_envp(enva, senvs);
   execle("/bin/sh", "sh", "-c", cmd.data(), NULL, envp);
   free(envp);
   _exit(127);
 }
 
-bool f_proc_terminate(CObjRef process, int signal /* = 0 */) {
+bool f_proc_terminate(const Resource& process, int signal /* = 0 */) {
   ChildProcess *proc = process.getTyped<ChildProcess>();
   return kill(proc->child, signal <= 0 ? SIGTERM : signal) == 0;
 }
 
-int64_t f_proc_close(CObjRef process) {
+int64_t f_proc_close(const Resource& process) {
   return process.getTyped<ChildProcess>()->close();
 }
 
-static const StaticString s_command("command");
-static const StaticString s_pid("pid");
-static const StaticString s_running("running");
-static const StaticString s_signaled("signaled");
-static const StaticString s_stopped("stopped");
-static const StaticString s_exitcode("exitcode");
-static const StaticString s_termsig("termsig");
-static const StaticString s_stopsig("stopsig");
+const StaticString
+  s_command("command"),
+  s_pid("pid"),
+  s_running("running"),
+  s_signaled("signaled"),
+  s_stopped("stopped"),
+  s_exitcode("exitcode"),
+  s_termsig("termsig"),
+  s_stopsig("stopsig");
 
-Array f_proc_get_status(CObjRef process) {
+Array f_proc_get_status(const Resource& process) {
   ChildProcess *proc = process.getTyped<ChildProcess>();
 
   errno = 0;
@@ -921,15 +966,19 @@ bool f_proc_nice(int increment) {
 ///////////////////////////////////////////////////////////////////////////////
 // string functions
 
-String f_escapeshellarg(CStrRef arg) {
+const StaticString s_twosinglequotes("''");
+
+String f_escapeshellarg(const String& arg) {
   if (!arg.empty()) {
     char *ret = string_escape_shell_arg(arg.c_str());
     return String(ret, AttachString);
+  } else if (!RuntimeOption::EnableHipHopSyntax) {
+    return String(s_twosinglequotes);
   }
   return arg;
 }
 
-String f_escapeshellcmd(CStrRef command) {
+String f_escapeshellcmd(const String& command) {
   if (!command.empty()) {
     char *ret = string_escape_shell_cmd(command.c_str());
     return String(ret, AttachString);

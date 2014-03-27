@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,8 @@
 #ifndef incl_HPHP_EXPRESSION_H_
 #define incl_HPHP_EXPRESSION_H_
 
+#include "hphp/util/deprecated/declare-boost-types.h"
+#include "hphp/util/hash-map-typedefs.h"
 #include "hphp/compiler/construct.h"
 #include "hphp/compiler/analysis/type.h"
 #include "hphp/compiler/analysis/analysis_result.h"
@@ -36,6 +38,7 @@
   virtual ExpressionPtr clone();                                        \
   virtual TypePtr inferTypes(AnalysisResultPtr ar, TypePtr type,        \
                              bool coerce);                              \
+  virtual void outputCodeModel(CodeGenerator &cg);                      \
   virtual void outputPHP(CodeGenerator &cg, AnalysisResultPtr ar);
 #define DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS                            \
   DECLARE_BASE_EXPRESSION_VIRTUAL_FUNCTIONS;                            \
@@ -47,7 +50,7 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 DECLARE_BOOST_TYPES(Statement);
-DECLARE_BOOST_TYPES(Expression);
+DECLARE_EXTENDED_BOOST_TYPES(Expression);
 class Variant;
 
 #define DECLARE_EXPRESSION_TYPES(x)             \
@@ -76,7 +79,18 @@ class Variant;
     x(EncapsListExpression, None),              \
     x(ClosureExpression, None),                 \
     x(YieldExpression, None),                   \
-    x(UserAttribute, None)
+    x(AwaitExpression, None),                   \
+    x(UserAttribute, None),                     \
+    x(QueryExpression, None),                   \
+    x(FromClause, None),                        \
+    x(LetClause, None),                         \
+    x(WhereClause, None),                       \
+    x(SelectClause, None),                      \
+    x(IntoClause, None),                        \
+    x(JoinClause, None),                        \
+    x(GroupClause, None),                       \
+    x(OrderbyClause, None),                     \
+    x(Ordering, None)
 
 class Expression : public Construct {
 public:
@@ -202,7 +216,7 @@ public:
     */
   virtual int getKidCount() const { return 0; }
   ExpressionPtr getNthExpr(int n) const { return
-      boost::static_pointer_cast<Expression>(getNthKid(n)); }
+      static_pointer_cast<Expression>(getNthKid(n)); }
 
   /**
    * For cse & canonicalization
@@ -232,6 +246,7 @@ public:
   virtual bool isTemporary() const { return false; }
   virtual bool isScalar() const { return false; }
   bool isArray() const;
+  bool isCollection() const;
   virtual bool isRefable(bool checkError = false) const { return false; }
   virtual bool getScalarValue(Variant &value) { return false; }
   FileScopeRawPtr getUsedScalarScope(CodeGenerator& cg);
@@ -345,6 +360,10 @@ public:
 
   bool isTypeAssertion() const {
     return isNoRemove() && m_assertedType;
+  }
+
+  virtual bool allowCellByRef() const {
+    return false;
   }
 
   static ExpressionPtr MakeConstant(AnalysisResultConstPtr ar,

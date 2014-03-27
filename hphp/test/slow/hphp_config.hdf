@@ -1,0 +1,2 @@
+EnableZendCompat=true
+Hack.Lang.IntsOverflowToInts=true

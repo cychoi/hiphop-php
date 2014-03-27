@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,8 +16,9 @@
 */
 
 #include "hphp/runtime/ext/pdo_mysql.h"
-#include "hphp/runtime/ext/ext_stream.h"
-#include "mysql/mysql.h"
+#include "hphp/runtime/ext/stream/ext_stream.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "mysql.h"
 
 #ifdef PHP_MYSQL_UNIX_SOCK_ADDR
 #ifdef MYSQL_UNIX_ADDR
@@ -27,7 +28,8 @@
 #endif
 
 namespace HPHP {
-IMPLEMENT_DEFAULT_EXTENSION(pdo_mysql);
+
+IMPLEMENT_DEFAULT_EXTENSION_VERSION(pdo_mysql, 1.0.2);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -47,19 +49,19 @@ class PDOMySqlConnection : public PDOConnection {
 public:
   PDOMySqlConnection();
   virtual ~PDOMySqlConnection();
-  virtual bool create(CArrRef options);
+  virtual bool create(const Array& options);
 
   int handleError(const char *file, int line, PDOMySqlStatement *stmt = NULL);
 
   virtual bool support(SupportedMethod method);
   virtual bool closer();
-  virtual bool preparer(CStrRef sql, sp_PDOStatement *stmt, CVarRef options);
-  virtual int64_t doer(CStrRef sql);
-  virtual bool quoter(CStrRef input, String &quoted, PDOParamType paramtype);
+  virtual bool preparer(const String& sql, sp_PDOStatement *stmt, const Variant& options);
+  virtual int64_t doer(const String& sql);
+  virtual bool quoter(const String& input, String &quoted, PDOParamType paramtype);
   virtual bool begin();
   virtual bool commit();
   virtual bool rollback();
-  virtual bool setAttribute(int64_t attr, CVarRef value);
+  virtual bool setAttribute(int64_t attr, const Variant& value);
   virtual String lastId(const char *name);
   virtual bool fetchErr(PDOStatement *stmt, Array &info);
   virtual int getAttribute(int64_t attr, Variant &value);
@@ -76,17 +78,17 @@ private:
   unsigned       m_buffered:1;
   unsigned       m_emulate_prepare:1;
   unsigned       m_fetch_table_names:1;
-  unsigned       m__reserved:31;
   unsigned long  m_max_buffer_size;
   PDOMySqlError  m_einfo;
 };
 
 class PDOMySqlStatement : public PDOStatement {
 public:
+  DECLARE_RESOURCE_ALLOCATION(PDOMySqlStatement);
   PDOMySqlStatement(PDOMySqlConnection *conn, MYSQL *server);
   virtual ~PDOMySqlStatement();
 
-  bool create(CStrRef sql, CArrRef options);
+  bool create(const String& sql, const Array& options);
 
   virtual bool support(SupportedMethod method);
   virtual bool executer();
@@ -205,14 +207,14 @@ static int php_pdo_parse_data_source(const char *data_source,
   return n_matches;
 }
 
-static long pdo_attr_lval(CArrRef options, int opt, long defaultValue) {
+static long pdo_attr_lval(const Array& options, int opt, long defaultValue) {
   if (options.exists(opt)) {
     return options[opt].toInt64();
   }
   return defaultValue;
 }
 
-static String pdo_attr_strval(CArrRef options, int opt, const char *def) {
+static String pdo_attr_strval(const Array& options, int opt, const char *def) {
   if (options.exists(opt)) {
     return options[opt].toString();
   }
@@ -226,7 +228,7 @@ static String pdo_attr_strval(CArrRef options, int opt, const char *def) {
 
 PDOMySqlConnection::PDOMySqlConnection()
     : m_server(NULL), m_attached(0), m_buffered(0), m_emulate_prepare(0),
-      m_fetch_table_names(0), m__reserved(0), m_max_buffer_size(0) {
+      m_fetch_table_names(0), m_max_buffer_size(0) {
 }
 
 PDOMySqlConnection::~PDOMySqlConnection() {
@@ -238,13 +240,14 @@ PDOMySqlConnection::~PDOMySqlConnection() {
   }
 }
 
-bool PDOMySqlConnection::create(CArrRef options) {
+bool PDOMySqlConnection::create(const Array& options) {
   int i, ret = 0;
   char *host = NULL, *unix_socket = NULL;
   unsigned int port = 3306;
   char *dbname;
+  char *charset = nullptr;
   struct pdo_data_src_parser vars[] = {
-    { "charset",      NULL,             0 },
+    { "charset",      nullptr,          0 },
     { "dbname",       "",               0 },
     { "host",         "localhost",      0 },
     { "port",         "3306",           0 },
@@ -269,6 +272,7 @@ bool PDOMySqlConnection::create(CArrRef options) {
 
   m_max_buffer_size = 1024*1024;
   m_buffered = m_emulate_prepare = 1;
+  charset = vars[0].optval;
 
   /* handle MySQL options */
   if (!options.empty()) {
@@ -346,6 +350,13 @@ bool PDOMySqlConnection::create(CArrRef options) {
         handleError(__FILE__, __LINE__);
         goto cleanup;
       }
+    }
+  }
+
+  if (charset) {
+    if (mysql_options(m_server, MYSQL_SET_CHARSET_NAME, charset)) {
+      handleError(__FILE__, __LINE__);
+      goto cleanup;
     }
   }
 
@@ -462,9 +473,9 @@ int PDOMySqlConnection::handleError(const char *file, int line,
   return einfo->errcode;
 }
 
-bool PDOMySqlConnection::preparer(CStrRef sql, sp_PDOStatement *stmt,
-                                  CVarRef options) {
-  PDOMySqlStatement *s = new PDOMySqlStatement(this, m_server);
+bool PDOMySqlConnection::preparer(const String& sql, sp_PDOStatement *stmt,
+                                  const Variant& options) {
+  PDOMySqlStatement *s = NEWOBJ(PDOMySqlStatement)(this, m_server);
   *stmt = s;
 
   if (m_emulate_prepare) {
@@ -475,7 +486,7 @@ bool PDOMySqlConnection::preparer(CStrRef sql, sp_PDOStatement *stmt,
     return true;
   }
 
-  if (s->create(sql, options)) {
+  if (s->create(sql, options.toArray())) {
     alloc_own_columns = 1;
     return true;
   }
@@ -485,7 +496,7 @@ bool PDOMySqlConnection::preparer(CStrRef sql, sp_PDOStatement *stmt,
   return false;
 }
 
-int64_t PDOMySqlConnection::doer(CStrRef sql) {
+int64_t PDOMySqlConnection::doer(const String& sql) {
   if (mysql_real_query(m_server, sql.data(), sql.size())) {
     handleError(__FILE__, __LINE__);
     return -1;
@@ -510,10 +521,10 @@ int64_t PDOMySqlConnection::doer(CStrRef sql) {
   return c;
 }
 
-bool PDOMySqlConnection::quoter(CStrRef input, String &quoted,
+bool PDOMySqlConnection::quoter(const String& input, String &quoted,
                                 PDOParamType paramtype) {
   String s(2 * input.size() + 3, ReserveString);
-  char *buf = s.mutableSlice().ptr;
+  char *buf = s.bufferSlice().ptr;
   int len = mysql_real_escape_string(m_server, buf + 1,
                                      input.data(), input.size());
   len++;
@@ -535,7 +546,7 @@ bool PDOMySqlConnection::rollback() {
   return mysql_rollback(m_server) >= 0;
 }
 
-bool PDOMySqlConnection::setAttribute(int64_t attr, CVarRef value) {
+bool PDOMySqlConnection::setAttribute(int64_t attr, const Variant& value) {
   switch (attr) {
   case PDO_ATTR_AUTOCOMMIT:
     /* ignore if the new value equals the old one */
@@ -794,9 +805,14 @@ PDOMySqlStatement::PDOMySqlStatement(PDOMySqlConnection *conn, MYSQL *server)
       m_num_params(0), m_params(NULL), m_in_null(NULL), m_in_length(NULL),
       m_bound_result(NULL), m_out_null(NULL), m_out_length(NULL),
       m_params_given(0), m_max_length(0) {
+  this->dbh = conn;
 }
 
 PDOMySqlStatement::~PDOMySqlStatement() {
+  sweep();
+}
+
+void PDOMySqlStatement::sweep() {
   if (m_result) {
     /* free the resource */
     mysql_free_result(m_result);
@@ -845,7 +861,7 @@ PDOMySqlStatement::~PDOMySqlStatement() {
   }
 }
 
-bool PDOMySqlStatement::create(CStrRef sql, CArrRef options) {
+bool PDOMySqlStatement::create(const String& sql, const Array& options) {
   supports_placeholders = PDO_PLACEHOLDER_POSITIONAL;
 
   String nsql;
@@ -899,9 +915,8 @@ bool PDOMySqlStatement::support(SupportedMethod method) {
 }
 
 int PDOMySqlStatement::handleError(const char *file, int line) {
-  PDOMySqlConnection *conn = dynamic_cast<PDOMySqlConnection*>(dbh.get());
-  assert(conn);
-  return conn->handleError(file, line, this);
+  assert(m_conn);
+  return m_conn->handleError(file, line, this);
 }
 
 bool PDOMySqlStatement::executer() {
@@ -921,8 +936,8 @@ bool PDOMySqlStatement::executer() {
     return false;
   }
 
-  my_ulonglong row_count = mysql_affected_rows(m_server);
-  if (row_count == (my_ulonglong)-1) {
+  my_ulonglong affected_count = mysql_affected_rows(m_server);
+  if (affected_count == (my_ulonglong)-1) {
     /* we either have a query that returned a result set or an error occured
        lets see if we have access to a result set */
     if (!m_conn->buffered()) {
@@ -939,9 +954,9 @@ bool PDOMySqlStatement::executer() {
     column_count = (int) mysql_num_fields(m_result);
     m_fields = mysql_fetch_fields(m_result);
 
-  } else {
-    /* this was a DML or DDL query (INSERT, UPDATE, DELETE, ... */
-    row_count = row_count;
+  }
+  else {
+    row_count = affected_count;
   }
 
   return true;
@@ -991,17 +1006,17 @@ bool PDOMySqlStatement::describer(int colno) {
 
   if (columns.empty()) {
     for (int i = 0; i < column_count; i++) {
-      columns.set(i, Object(new PDOColumn()));
+      columns.set(i, Resource(NEWOBJ(PDOColumn)));
     }
   }
 
   // fetch all on demand, this seems easiest if we've been here before bail out
-  PDOColumn *col = columns[0].toObject().getTyped<PDOColumn>();
+  PDOColumn *col = columns[0].toResource().getTyped<PDOColumn>();
   if (!col->name.empty()) {
     return true;
   }
   for (int i = 0; i < column_count; i++) {
-    col = columns[i].toObject().getTyped<PDOColumn>();
+    col = columns[i].toResource().getTyped<PDOColumn>();
 
     if (m_conn->fetch_table_names()) {
       col->name = String(m_fields[i].table) + "." +
@@ -1100,11 +1115,11 @@ bool PDOMySqlStatement::paramHook(PDOBoundParam *param,
         return false;
       case PDO_PARAM_LOB:
         if (param->parameter.isResource()) {
-          Variant buf = f_stream_get_contents(param->parameter);
+          Variant buf = f_stream_get_contents(param->parameter.toResource());
           if (!same(buf, false)) {
             param->parameter = buf;
           } else {
-            pdo_raise_impl_error(dbh, this, "HY105",
+            pdo_raise_impl_error(m_conn, this, "HY105",
                                  "Expected a stream resource");
             return false;
           }
@@ -1147,17 +1162,18 @@ bool PDOMySqlStatement::paramHook(PDOBoundParam *param,
   return true;
 }
 
-static const StaticString s_mysql_def("mysql:def");
-static const StaticString s_not_null("not_null");
-static const StaticString s_primary_key("primary_key");
-static const StaticString s_multiple_key("multiple_key");
-static const StaticString s_unique_key("unique_key");
-static const StaticString s_blob("blob");
-static const StaticString s_native_type("native_type");
-static const StaticString s_flags("flags");
-static const StaticString s_table("table");
+const StaticString
+  s_mysql_def("mysql:def"),
+  s_not_null("not_null"),
+  s_primary_key("primary_key"),
+  s_multiple_key("multiple_key"),
+  s_unique_key("unique_key"),
+  s_blob("blob"),
+  s_native_type("native_type"),
+  s_flags("flags"),
+  s_table("table");
 
-bool PDOMySqlStatement::getColumnMeta(int64_t colno, Array &return_value) {
+bool PDOMySqlStatement::getColumnMeta(int64_t colno, Array &ret) {
   if (!m_result) {
     return false;
   }
@@ -1166,7 +1182,6 @@ bool PDOMySqlStatement::getColumnMeta(int64_t colno, Array &return_value) {
     return false;
   }
 
-  Array ret = Array::Create();
   Array flags = Array::Create();
 
   const MYSQL_FIELD *F = m_fields + colno;
@@ -1234,7 +1249,6 @@ bool PDOMySqlStatement::nextRowset() {
     return false;
   }
 
-  row_count = row_count;
   column_count = (int)mysql_num_fields(m_result);
   m_fields = mysql_fetch_fields(m_result);
   return true;
@@ -1267,6 +1281,7 @@ PDOMySql::PDOMySql() : PDODriver("mysql") {
 }
 
 PDOConnection *PDOMySql::createConnectionObject() {
+  // Doesn't use NEWOBJ because PDOConnection is malloced
   return new PDOMySqlConnection();
 }
 

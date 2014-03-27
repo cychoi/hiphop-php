@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -80,7 +80,7 @@ int FinallyStatement::getKidCount() const {
 void FinallyStatement::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_stmt = boost::dynamic_pointer_cast<Statement>(cp);
+      m_stmt = dynamic_pointer_cast<Statement>(cp);
       break;
     default:
       assert(false);
@@ -90,6 +90,17 @@ void FinallyStatement::setNthKid(int n, ConstructPtr cp) {
 
 void FinallyStatement::inferTypes(AnalysisResultPtr ar) {
   if (m_stmt) m_stmt->inferTypes(ar);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void FinallyStatement::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("FinallyStatement", 2);
+  cg.printPropertyHeader("block");
+  cg.printAsEnclosedBlock(m_stmt);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

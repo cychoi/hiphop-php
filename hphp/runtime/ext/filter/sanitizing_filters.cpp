@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,14 +18,14 @@
 #include "hphp/runtime/ext/filter/sanitizing_filters.h"
 #include "hphp/runtime/ext/ext_filter.h"
 #include "hphp/runtime/ext/ext_string.h"
-#include "hphp/runtime/base/complex_types.h"
-#include "hphp/runtime/base/zend/zend_string.h"
+#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/zend-string.h"
 
 namespace HPHP {
 
 typedef unsigned long filter_map[256];
 
-static String php_filter_encode_html(CStrRef value,
+static String php_filter_encode_html(const String& value,
                                      const unsigned char *chars) {
   int len = value.length();
   unsigned char *s = (unsigned char *)value.data();
@@ -38,12 +38,12 @@ static String php_filter_encode_html(CStrRef value,
 
   while (s < e) {
     if (chars[*s]) {
-      str += "&#";
-      str += s[0];
-      str += ';';
+      str.append("&#");
+      str.append(static_cast<int64_t>(s[0]));
+      str.append(';');
     } else {
       /* XXX: this needs to be optimized to work with blocks of 'safe' chars */
-      str += (char) s[0];
+      str.append(s[0]);
     }
     s++;
   }
@@ -59,7 +59,7 @@ static const unsigned char hexchars[] = "0123456789ABCDEF";
 
 #define DEFAULT_URL_ENCODE    LOWALPHA HIALPHA DIGIT "-._"
 
-static Variant php_filter_encode_url(CStrRef value, const unsigned char* chars,
+static Variant php_filter_encode_url(const String& value, const unsigned char* chars,
                                      const int char_len, int high, int low,
                                      int encode_nul) {
   unsigned char tmp[256];
@@ -81,18 +81,18 @@ static Variant php_filter_encode_url(CStrRef value, const unsigned char* chars,
 
   while (s < e) {
     if (tmp[*s]) {
-      str += '%';
-      str += (char) hexchars[(unsigned char) *s >> 4];
-      str += (char) hexchars[(unsigned char) *s & 15];
+      str.append('%');
+      str.append((char) hexchars[(unsigned char) *s >> 4]);
+      str.append((char) hexchars[(unsigned char) *s & 15]);
     } else {
-      str += (char) *s;
+      str.append((char) *s);
     }
     s++;
   }
   return str.detach();
 }
 
-static Variant php_filter_strip(CStrRef value, long flags) {
+static Variant php_filter_strip(const String& value, long flags) {
   unsigned char *str;
   int i;
   int len = value.length();
@@ -113,7 +113,7 @@ static Variant php_filter_strip(CStrRef value, long flags) {
     } else if ((str[i] < 32) && (flags & k_FILTER_FLAG_STRIP_LOW)) {
     } else if ((str[i] == '`') && (flags & k_FILTER_FLAG_STRIP_BACKTICK)) {
     } else {
-      buf += (char) str[i];
+      buf.append((char) str[i]);
     }
   }
   return buf.detach();
@@ -133,7 +133,7 @@ static void filter_map_update(filter_map *map, int flag,
   }
 }
 
-static Variant filter_map_apply(CStrRef value, filter_map *map) {
+static Variant filter_map_apply(const String& value, filter_map *map) {
   unsigned char *str;
   int i;
   int len = value.length();
@@ -145,11 +145,14 @@ static Variant filter_map_apply(CStrRef value, filter_map *map) {
   StringBuffer buf(len);
   for (i = 0; i < len; i++) {
     if ((*map)[str[i]]) {
-      buf += (char) str[i];
+      buf.append((char) str[i]);
     }
   }
   return buf.detach();
 }
+
+template <typename T>
+unsigned char uc(T c) { return (unsigned char)c; }
 
 Variant php_filter_string(PHP_INPUT_FILTER_PARAM_DECL) {
   unsigned char enc[256] = {0};
@@ -158,10 +161,10 @@ Variant php_filter_string(PHP_INPUT_FILTER_PARAM_DECL) {
   String stripped(php_filter_strip(value, flags));
 
   if (!(flags & k_FILTER_FLAG_NO_ENCODE_QUOTES)) {
-    enc['\''] = enc['"'] = 1;
+    enc[uc('\'')] = enc[uc('"')] = 1;
   }
   if (flags & k_FILTER_FLAG_ENCODE_AMP) {
-    enc['&'] = 1;
+    enc[uc('&')] = 1;
   }
   if (flags & k_FILTER_FLAG_ENCODE_LOW) {
     memset(enc, 1, 32);
@@ -208,7 +211,7 @@ Variant php_filter_special_chars(PHP_INPUT_FILTER_PARAM_DECL) {
   php_filter_strip(value, flags);
 
   /* encodes ' " < > & \0 to numerical entities */
-  enc['\''] = enc['"'] = enc['<'] = enc['>'] = enc['&'] = enc[0] = 1;
+  enc[uc('\'')] = enc[uc('"')] = enc[uc('<')] = enc[uc('>')] = enc[uc('&')] = enc[0] = 1;
 
   /* if strip low is not set, then we encode them as &#xx; */
   memset(enc, 1, 32);
@@ -238,7 +241,7 @@ Variant php_filter_unsafe_raw(PHP_INPUT_FILTER_PARAM_DECL) {
     php_filter_strip(value, flags);
 
     if (flags & k_FILTER_FLAG_ENCODE_AMP) {
-      enc['&'] = 1;
+      enc[uc('&')] = 1;
     }
     if (flags & k_FILTER_FLAG_ENCODE_LOW) {
       memset(enc, 1, 32);

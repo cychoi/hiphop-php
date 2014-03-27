@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,10 +13,11 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/compiler/parser/parser.h"
+#include <vector>
+
 #include "hphp/compiler/type_annotation.h"
-#include "hphp/util/parser/hphp.tab.hpp"
+#include "hphp/parser/hphp.tab.hpp"
 #include "hphp/compiler/analysis/file_scope.h"
 
 #include "hphp/compiler/expression/expression_list.h"
@@ -44,7 +45,13 @@
 #include "hphp/compiler/expression/encaps_list_expression.h"
 #include "hphp/compiler/expression/closure_expression.h"
 #include "hphp/compiler/expression/yield_expression.h"
+#include "hphp/compiler/expression/await_expression.h"
 #include "hphp/compiler/expression/user_attribute.h"
+#include "hphp/compiler/expression/query_expression.h"
+#include "hphp/compiler/expression/simple_query_clause.h"
+#include "hphp/compiler/expression/join_clause.h"
+#include "hphp/compiler/expression/group_clause.h"
+#include "hphp/compiler/expression/ordering.h"
 
 #include "hphp/compiler/statement/function_statement.h"
 #include "hphp/compiler/statement/class_statement.h"
@@ -77,6 +84,7 @@
 #include "hphp/compiler/statement/goto_statement.h"
 #include "hphp/compiler/statement/label_statement.h"
 #include "hphp/compiler/statement/use_trait_statement.h"
+#include "hphp/compiler/statement/trait_require_statement.h"
 #include "hphp/compiler/statement/trait_prec_statement.h"
 #include "hphp/compiler/statement/trait_alias_statement.h"
 #include "hphp/compiler/statement/typedef_statement.h"
@@ -88,8 +96,10 @@
 
 #include "hphp/util/lock.h"
 #include "hphp/util/logger.h"
+#include "hphp/util/text-util.h"
+#include "hphp/util/string-vsnprintf.h"
 
-#include "hphp/runtime/base/file_repository.h"
+#include "hphp/runtime/base/file-repository.h"
 
 #ifdef FACEBOOK
 #include "hphp/facebook/src/compiler/fb_compiler_hooks.h"
@@ -99,24 +109,21 @@
 #endif
 
 #define NEW_EXP0(cls)                                           \
-  cls##Ptr(new cls(BlockScopePtr(), getLocation()))
+  cls##Ptr(new cls(BlockScopePtr(),                             \
+                   getLocation()))
 #define NEW_EXP(cls, e...)                                      \
-  cls##Ptr(new cls(BlockScopePtr(), getLocation(), ##e))
+  cls##Ptr(new cls(BlockScopePtr(),                             \
+                   getLocation(), ##e))
 #define NEW_STMT0(cls)                                          \
-  cls##Ptr(new cls(BlockScopePtr(), getLocation()))
+  cls##Ptr(new cls(BlockScopePtr(), getLabelScope(),            \
+                   getLocation()))
 #define NEW_STMT(cls, e...)                                     \
-  cls##Ptr(new cls(BlockScopePtr(), getLocation(), ##e))
+  cls##Ptr(new cls(BlockScopePtr(), getLabelScope(),            \
+                   getLocation(), ##e))
 
 #define PARSE_ERROR(fmt, args...)  HPHP_PARSER_ERROR(fmt, this, ##args)
 
 using namespace HPHP::Compiler;
-
-extern void prepare_generator(Parser *_p, Token &stmt, Token &params);
-extern void create_generator(Parser *_p, Token &out, Token &params,
-                             Token &name, const std::string &genName,
-                             const char *clsname, Token *modifiers,
-                             Token &origGenFunc, bool isHhvm,
-                             Token *attr);
 
 namespace HPHP {
 
@@ -134,7 +141,7 @@ namespace Compiler {
 ///////////////////////////////////////////////////////////////////////////////
 // statics
 
-StatementListPtr Parser::ParseString(CStrRef input, AnalysisResultPtr ar,
+StatementListPtr Parser::ParseString(const String& input, AnalysisResultPtr ar,
                                      const char *fileName /* = NULL */,
                                      bool lambdaMode /* = false */) {
   assert(!input.empty());
@@ -157,7 +164,8 @@ StatementListPtr Parser::ParseString(CStrRef input, AnalysisResultPtr ar,
 Parser::Parser(Scanner &scanner, const char *fileName,
                AnalysisResultPtr ar, int fileSize /* = 0 */)
     : ParserBase(scanner, fileName), m_ar(ar), m_lambdaMode(false),
-      m_closureGenerator(false), m_nsState(SeenNothing) {
+      m_closureGenerator(false), m_nsState(SeenNothing),
+      m_aliasTable(getAutoAliasedClasses(), [&] { return isAutoAliasOn(); }) {
   string md5str = Eval::FileRepository::unitMd5(scanner.getMd5());
   MD5 md5 = MD5(md5str.c_str());
 
@@ -169,8 +177,6 @@ Parser::Parser(Scanner &scanner, const char *fileName,
 
   Lock lock(m_ar->getMutex());
   m_ar->addFileScope(m_file);
-
-  m_prependingStatements.push_back(vector<StatementPtr>());
 }
 
 bool Parser::parse() {
@@ -180,37 +186,42 @@ bool Parser::parse() {
                                     "Parse error: %s",
                                     errString().c_str());
     }
-  } catch (ParseTimeFatalException &e) {
-    m_file->cleanupForError(m_ar, e.m_line, e.getMessage());
+    return true;
+  } catch (const ParseTimeFatalException& e) {
+    m_file->cleanupForError(m_ar);
+    if (e.m_parseFatal) {
+      m_file->makeParseFatal(m_ar, e.getMessage(), e.m_line);
+    } else {
+      m_file->makeFatal(m_ar, e.getMessage(), e.m_line);
+    }
+    return false;
   }
-  return true;
 }
 
 void Parser::error(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   string msg;
-  Util::string_vsnprintf(msg, fmt, ap);
+  string_vsnprintf(msg, fmt, ap);
   va_end(ap);
 
   fatal(&m_loc, msg.c_str());
 }
 
-void Parser::fatal(Location *loc, const char *msg) {
-  throw ParseTimeFatalException(loc->file, loc->line0,
-                                "%s", msg);
+void Parser::parseFatal(const Location* loc, const char* msg) {
+  // we can't use loc->file, as the bison parser doesn't track that in YYLTYPE
+  auto file = m_file->getName().c_str();
+  auto exn = ParseTimeFatalException(file, loc->line0, "%s", msg);
+  exn.setParseFatal();
+  throw exn;
+}
+
+void Parser::fatal(const Location* loc, const char* msg) {
+  throw ParseTimeFatalException(loc->file, loc->line0, "%s", msg);
 }
 
 string Parser::errString() {
   return m_error.empty() ? getMessage() : m_error;
-}
-
-bool Parser::enableXHP() {
-  return Option::EnableXHP;
-}
-
-bool Parser::enableFinallyStatement() {
-  return Option::EnableFinallyStatement;
 }
 
 void Parser::pushComment() {
@@ -242,6 +253,39 @@ void Parser::completeScope(BlockScopePtr inner) {
   m_scopes.pop_back();
   if (m_scopes.size()) {
     m_scopes.back().push_back(inner);
+  }
+}
+
+LabelScopePtr Parser::getLabelScope() const {
+  assert(!m_labelScopes.empty());
+  assert(!m_labelScopes.back().empty());
+  assert(m_labelScopes.back().back() != nullptr);
+  return m_labelScopes.back().back();
+}
+
+void Parser::onNewLabelScope(bool fresh) {
+  if (fresh) {
+    m_labelScopes.push_back(LabelScopePtrVec());
+  }
+  assert(!m_labelScopes.empty());
+  LabelScopePtr labelScope(new LabelScope());
+  m_labelScopes.back().push_back(labelScope);
+}
+
+void Parser::onScopeLabel(const Token& stmt, const Token& label) {
+  assert(!m_labelScopes.empty());
+  assert(!m_labelScopes.back().empty());
+  for (auto& scope : m_labelScopes.back()) {
+    scope->addLabel(stmt.stmt, label.text());
+  }
+}
+
+void Parser::onCompleteLabelScope(bool fresh) {
+  assert(!m_labelScopes.empty());
+  assert(!m_labelScopes.back().empty());
+  m_labelScopes.back().pop_back();
+  if (fresh) {
+    m_labelScopes.pop_back();
   }
 }
 
@@ -383,7 +427,7 @@ void Parser::onCallParam(Token &out, Token *params, Token &expr, bool ref) {
 }
 
 void Parser::onCall(Token &out, bool dynamic, Token &name, Token &params,
-                    Token *cls, bool fromCompiler) {
+                    Token *cls) {
   ExpressionPtr clsExp;
   if (cls) {
     clsExp = cls->exp;
@@ -392,21 +436,49 @@ void Parser::onCall(Token &out, bool dynamic, Token &name, Token &params,
     out->exp = NEW_EXP(DynamicFunctionCall, name->exp,
                        dynamic_pointer_cast<ExpressionList>(params->exp),
                        clsExp);
-    assert(!fromCompiler);
   } else {
-    const string &s = name.text();
-    if (s == "func_num_args" || s == "func_get_args" || s == "func_get_arg") {
+    string funcName = name.text();
+    // strip out namespaces for func_get_args and friends check
+    size_t lastBackslash = funcName.find_last_of(NAMESPACE_SEP);
+    const string stripped = lastBackslash == string::npos
+                            ? funcName
+                            : funcName.substr(lastBackslash+1);
+    if (stripped == "func_num_args" ||
+        stripped == "func_get_args" ||
+        stripped == "func_get_arg") {
+      funcName = stripped;
       if (m_hasCallToGetArgs.size() > 0) {
         m_hasCallToGetArgs.back() = true;
       }
     }
 
+    if (isAutoAliasOn()) {
+      // Auto import a few functions from the HH namespace
+      if (stripped == "fun" ||
+          stripped == "meth_caller" ||
+          stripped == "class_meth" ||
+          stripped == "inst_meth" ||
+          stripped == "invariant_callback_register" ||
+          stripped == "invariant" ||
+          stripped == "invariant_violation" ||
+          stripped == "tuple"
+      ) {
+        funcName = "HH\\" + stripped;
+      }
+    }
+
     SimpleFunctionCallPtr call
       (new RealSimpleFunctionCall
-       (BlockScopePtr(), getLocation(), name->text(), name->num() & 2,
+       (BlockScopePtr(), getLocation(),
+        funcName, name->num() & 2,
         dynamic_pointer_cast<ExpressionList>(params->exp), clsExp));
-    if (fromCompiler) {
-      call->setFromCompiler();
+    if (m_scanner.isHHSyntaxEnabled() && !(name->num() & 2)) {
+      // If the function name is without any backslashes or
+      // namespace qualification then we treat this as a candidate
+      // for optimization via bytecode promotion.
+      // "idx" is the only function in that class for now but it's
+      // cheaper to set the bit that to check for the function name
+      call->setOptimizable();
     }
     out->exp = call;
 
@@ -525,6 +597,7 @@ void Parser::onScalar(Token &out, int type, Token &scalar) {
     case T_STRING:
     case T_LNUMBER:
     case T_DNUMBER:
+    case T_ONUMBER:
     case T_LINE:
     case T_COMPILER_HALT_OFFSET:
     case T_FUNC_C:
@@ -643,7 +716,6 @@ void Parser::onUnaryOpExp(Token &out, Token &operand, int op, bool front) {
   case T_INC:
   case T_DEC:
   case T_ISSET:
-  case T_EMPTY:
   case T_UNSET:
     if (dynamic_pointer_cast<FunctionCall>(operand->exp)) {
       PARSE_ERROR("Can't use return value in write context");
@@ -682,7 +754,7 @@ void Parser::onQOp(Token &out, Token &exprCond, Token *expYes, Token &expNo) {
 }
 
 void Parser::onArray(Token &out, Token &pairs, int op /* = T_ARRAY */) {
-  if (op != T_ARRAY && !m_scanner.hipHopSyntaxEnabled()) {
+  if (op != T_ARRAY && !m_scanner.isHHSyntaxEnabled()) {
     PARSE_ERROR("Typed collection is not enabled");
     return;
   }
@@ -746,6 +818,33 @@ void Parser::onClassConst(Token &out, Token &cls, Token &name, bool text) {
   out->exp = con;
 }
 
+void Parser::onClassClass(Token &out, Token &cls, Token &name,
+                          bool inStaticContext) {
+  if (inStaticContext) {
+    if (cls->same("parent") || cls->same("static")) {
+      PARSE_ERROR(
+        "%s::class cannot be used for compile-time class name resolution",
+        cls->text().c_str()
+      );
+      return;
+    }
+  }
+  if (cls->exp && !cls->exp->is(Expression::KindOfScalarExpression)) {
+    PARSE_ERROR("::class can only be used on scalars");
+  }
+  if (cls->same("self") || cls->same("parent") || cls->same("static")) {
+    if (cls->same("self") && m_inTrait) {
+      // Sooo... self:: works dynamically for everything in a trait except
+      // for self::CLASS where it returns the trait name. Great...
+      onScalar(out, T_TRAIT_C, cls);
+    } else {
+      onClassConst(out, cls, name, inStaticContext);
+    }
+  } else {
+    onScalar(out, T_STRING, cls);
+  }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // function/method declaration
 
@@ -756,7 +855,6 @@ void Parser::onFunctionStart(Token &name, bool doPushComment /* = true */) {
   }
   newScope();
   m_funcContexts.push_back(FunctionContext());
-  m_prependingStatements.push_back(vector<StatementPtr>());
   m_funcName = name.text();
   m_hasCallToGetArgs.push_back(false);
   m_staticVars.push_back(StringToExpressionPtrVecMap());
@@ -796,116 +894,187 @@ void Parser::fixStaticVars() {
   m_staticVars.pop_back();
 }
 
-void Parser::onFunction(Token &out, Token *modifiers, Token &ret, Token &ref,
-                        Token &name, Token &params, Token &stmt, Token *attr) {
-  ModifierExpressionPtr exp = modifiers?
-    dynamic_pointer_cast<ModifierExpression>(modifiers->exp)
-    : NEW_EXP0(ModifierExpression);
-
-  if (!stmt->stmt) {
-    stmt->stmt = NEW_STMT0(StatementList);
-  }
-
-  ExpressionListPtr old_params =
-    dynamic_pointer_cast<ExpressionList>(params->exp);
-  int attribute = m_file->popAttribute();
-  string comment = popComment();
-  LocationPtr loc = popFuncLocation();
-
-  FunctionContext funcContext = m_funcContexts.back();
-  m_funcContexts.pop_back();
-  m_prependingStatements.pop_back();
-
+void Parser::checkFunctionContext(string funcName,
+                                  FunctionContext& funcContext,
+                                  ModifierExpressionPtr modifiers,
+                                  int returnsRef) {
   funcContext.checkFinalAssertions();
 
-  bool hasCallToGetArgs = m_hasCallToGetArgs.back();
-  m_hasCallToGetArgs.pop_back();
-
-  fixStaticVars();
-
-  FunctionStatementPtr func;
-
-  string funcName = name->text();
-  if (funcName.empty()) {
-    funcName = newClosureName(m_clsName, m_containingFuncName);
-  } else if (m_lambdaMode) {
-    funcName += "{lambda}";
+  // let async modifier be mandatory
+  if (funcContext.isAsync && !modifiers->isAsync()) {
+    PARSE_ERROR("Function '%s' contains 'await' but is not declared as async.",
+                funcName.c_str());
   }
 
-  if (funcContext.isGenerator) {
-    string genName = newContinuationName(funcName);
+  if (modifiers->isAsync() && returnsRef) {
+    PARSE_ERROR("Asynchronous function '%s' cannot return reference.",
+                funcName.c_str());
+  }
 
-    Token new_params;
-    prepare_generator(this, stmt, new_params);
-
-    func = NEW_STMT(FunctionStatement, exp, ref->num(), genName,
-                    dynamic_pointer_cast<ExpressionList>(new_params->exp),
-                    ret.typeAnnotationName(),
-                    dynamic_pointer_cast<StatementList>(stmt->stmt),
-                    attribute, comment, ExpressionListPtr());
-    out->stmt = func;
-    func->getLocation()->line0 = loc->line0;
-    func->getLocation()->char0 = loc->char0;
-    {
-      func->onParse(m_ar, m_file);
-    }
-    completeScope(func->getFunctionScope());
-    if (func->ignored()) {
-      out->stmt = NEW_STMT0(StatementList);
-    } else {
-      assert(!m_prependingStatements.empty());
-      vector<StatementPtr> &prepending = m_prependingStatements.back();
-      prepending.push_back(func);
-
-      if (name->text().empty()) m_closureGenerator = true;
-      // create_generator() expects us to push the docComment back
-      // onto the comment stack so that it can make sure that the
-      // the MethodStatement it's building will get the docComment
-      pushComment(comment);
-      Token origGenFunc;
-      create_generator(this, out, params, name, genName, nullptr, nullptr,
-                       origGenFunc,
-                       (!Option::WholeProgram || !Option::ParseTimeOpts),
-                       attr);
-      m_closureGenerator = false;
-      MethodStatementPtr origStmt =
-        boost::dynamic_pointer_cast<MethodStatement>(origGenFunc->stmt);
-      assert(origStmt);
-      func->setOrigGeneratorFunc(origStmt);
-      origStmt->setGeneratorFunc(func);
-      origStmt->setHasCallToGetArgs(hasCallToGetArgs);
-      func->setHasCallToGetArgs(hasCallToGetArgs);
-    }
-
-  } else {
-    ExpressionListPtr attrList;
-    if (attr && attr->exp) {
-      attrList = dynamic_pointer_cast<ExpressionList>(attr->exp);
-    }
-
-    func = NEW_STMT(FunctionStatement, exp, ref->num(), funcName, old_params,
-                    ret.typeAnnotationName(),
-                    dynamic_pointer_cast<StatementList>(stmt->stmt),
-                    attribute, comment, attrList);
-    out->stmt = func;
-
-    {
-      func->onParse(m_ar, m_file);
-    }
-    completeScope(func->getFunctionScope());
-    if (m_closureGenerator) {
-      func->getFunctionScope()->setClosureGenerator();
-    }
-    func->getLocation()->line0 = loc->line0;
-    func->getLocation()->char0 = loc->char0;
-    if (func->ignored()) {
-      out->stmt = NEW_STMT0(StatementList);
-    }
+  if (modifiers->isAsync() && funcContext.isGenerator) {
+    PARSE_ERROR("'yield' is not allowed in async functions.");
   }
 }
 
+void Parser::prepareConstructorParameters(StatementListPtr stmts,
+                                          ExpressionListPtr params,
+                                          bool isAbstract) {
+  for (int i = 0, count = params->getCount(); i < count; i++) {
+    ParameterExpressionPtr param =
+        dynamic_pointer_cast<ParameterExpression>((*params)[i]);
+    TokenID mod = param->getModifier();
+    if (mod == 0) continue;
+
+    if (isAbstract) {
+       param->parseTimeFatal(Compiler::InvalidAttribute,
+                             "parameter modifiers not allowed on "
+                             "abstract __construct");
+    }
+    if (!stmts) {
+       param->parseTimeFatal(Compiler::InvalidAttribute,
+                             "parameter modifiers not allowed on "
+                             "__construct without a body");
+    }
+    if (param->annotation()) {
+      std::vector<std::string> typeNames;
+      param->annotation()->getAllSimpleNames(typeNames);
+      for (auto& typeName : typeNames) {
+        if (isTypeVarInImmediateScope(typeName)) {
+          param->parseTimeFatal(Compiler::InvalidAttribute,
+                                "parameter modifiers not supported with "
+                                "type variable annotation");
+        }
+      }
+    }
+    std::string name = param->getName();
+    SimpleVariablePtr value = NEW_EXP(SimpleVariable, name);
+    ScalarExpressionPtr prop = NEW_EXP(ScalarExpression, T_STRING, name);
+    SimpleVariablePtr self = NEW_EXP(SimpleVariable, "this");
+    ObjectPropertyExpressionPtr objProp =
+        NEW_EXP(ObjectPropertyExpression, self, prop);
+    AssignmentExpressionPtr assign =
+        NEW_EXP(AssignmentExpression, objProp, value, false);
+    ExpStatementPtr stmt = NEW_STMT(ExpStatement, assign);
+    stmts->insertElement(stmt);
+  }
+}
+
+string Parser::getFunctionName(FunctionType type, Token* name) {
+  switch (type) {
+    case FunctionType::Closure:
+      return newClosureName(m_clsName, m_containingFuncName);
+    case FunctionType::Function:
+      assert(name);
+      if (!m_lambdaMode) {
+        return name->text();
+      } else {
+        return name->text() + "{lambda}";
+      }
+    case FunctionType::Method:
+      assert(name);
+      return name->text();
+  }
+  not_reached();
+}
+
+StatementPtr Parser::onFunctionHelper(FunctionType type,
+                              Token *modifiers, Token &ret,
+                              Token &ref, Token *name, Token &params,
+                              Token &stmt, Token *attr, bool reloc) {
+  // prepare and validate function modifiers
+  ModifierExpressionPtr modifiersExp = modifiers && modifiers->exp ?
+    dynamic_pointer_cast<ModifierExpression>(modifiers->exp)
+    : NEW_EXP0(ModifierExpression);
+  modifiersExp->setHasPrivacy(type == FunctionType::Method);
+  if (type == FunctionType::Closure && !modifiersExp->validForClosure()) {
+    PARSE_ERROR("Invalid modifier on closure funciton.");
+  }
+  if (type == FunctionType::Function && !modifiersExp->validForFunction()) {
+    PARSE_ERROR("Invalid modifier on function %s.", name->text().c_str());
+  }
+
+  StatementListPtr stmts = stmt->stmt || stmt->num() != 1 ?
+    dynamic_pointer_cast<StatementList>(stmt->stmt)
+    : NEW_STMT0(StatementList);
+
+  ExpressionListPtr old_params =
+    dynamic_pointer_cast<ExpressionList>(params->exp);
+
+  string funcName = getFunctionName(type, name);
+
+  if (type == FunctionType::Method && old_params &&
+      funcName == "__construct") {
+    prepareConstructorParameters(stmts, old_params,
+                                 modifiersExp->isAbstract());
+  }
+
+  fixStaticVars();
+
+  int attribute = m_file->popAttribute();
+  string comment = popComment();
+
+  ExpressionListPtr attrList;
+  if (attr && attr->exp) {
+    attrList = dynamic_pointer_cast<ExpressionList>(attr->exp);
+  }
+
+  // create function/method statement
+  FunctionStatementPtr func;
+  MethodStatementPtr mth;
+  if (type == FunctionType::Method) {
+    mth = NEW_STMT(MethodStatement, modifiersExp,
+                   ref->num(), funcName, old_params,
+                   ret.typeAnnotation, stmts,
+                   attribute, comment, attrList);
+    completeScope(mth->onInitialParse(m_ar, m_file));
+  } else {
+    func = NEW_STMT(FunctionStatement, modifiersExp,
+                   ref->num(), funcName, old_params,
+                   ret.typeAnnotation, stmts,
+                   attribute, comment, attrList);
+
+    func->onParse(m_ar, m_file);
+    completeScope(func->getFunctionScope());
+    if (func->ignored()) {
+      return NEW_STMT0(StatementList);
+    }
+    mth = func;
+  }
+
+  // check and set generator/async flags
+  FunctionContext funcContext = m_funcContexts.back();
+  checkFunctionContext(funcName, funcContext, modifiersExp, ref->num());
+  mth->getFunctionScope()->setGenerator(funcContext.isGenerator);
+  mth->getFunctionScope()->setAsync(modifiersExp->isAsync());
+  m_funcContexts.pop_back();
+
+  mth->setHasCallToGetArgs(m_hasCallToGetArgs.back());
+  m_hasCallToGetArgs.pop_back();
+
+  LocationPtr loc = popFuncLocation();
+  if (reloc) {
+    mth->getLocation()->line0 = loc->line0;
+    mth->getLocation()->char0 = loc->char0;
+  }
+
+  return mth;
+}
+
+void Parser::onFunction(Token &out, Token *modifiers, Token &ret, Token &ref,
+                        Token &name, Token &params, Token &stmt, Token *attr) {
+  out->stmt = onFunctionHelper(FunctionType::Function,
+                modifiers, ret, ref, &name, params, stmt, attr, true);
+}
+
+void Parser::onMethod(Token &out, Token &modifiers, Token &ret, Token &ref,
+                      Token &name, Token &params, Token &stmt,
+                      Token *attr, bool reloc /* = true */) {
+  out->stmt = onFunctionHelper(FunctionType::Method,
+                &modifiers, ret, ref, &name, params, stmt, attr, reloc);
+}
+
 void Parser::onParam(Token &out, Token *params, Token &type, Token &var,
-                     bool ref, Token *defValue, Token *attr) {
+                     bool ref, Token *defValue, Token *attr, Token *modifier) {
   ExpressionPtr expList;
   if (params) {
     expList = params->exp;
@@ -916,18 +1085,21 @@ void Parser::onParam(Token &out, Token *params, Token &type, Token &var,
   if (attr && attr->exp) {
     attrList = dynamic_pointer_cast<ExpressionList>(attr->exp);
   }
+
   TypeAnnotationPtr typeAnnotation = type.typeAnnotation;
   expList->addElement(NEW_EXP(ParameterExpression, typeAnnotation,
-                              m_scanner.hipHopSyntaxEnabled(), var->text(),
-                              ref, defValue ? defValue->exp : ExpressionPtr(),
+                              m_scanner.isHHSyntaxEnabled(), var->text(),
+                              ref, (modifier) ? modifier->num() : 0,
+                              defValue ? defValue->exp : ExpressionPtr(),
                               attrList));
   out->exp = expList;
 }
 
 void Parser::onClassStart(int type, Token &name) {
   const Type::TypePtrMap& typeHintTypes =
-    Type::GetTypeHintTypes(m_scanner.hipHopSyntaxEnabled());
-  if (name.text() == "self" || name.text() == "parent" ||
+    Type::GetTypeHintTypes(m_scanner.isHHSyntaxEnabled());
+  if (0 == strcasecmp("self", name.text().c_str()) ||
+      0 == strcasecmp("parent", name.text().c_str()) ||
       typeHintTypes.find(name.text()) != typeHintTypes.end()) {
     PARSE_ERROR("Cannot use '%s' as class name as it is reserved",
                 name.text().c_str());
@@ -954,6 +1126,36 @@ void Parser::onClass(Token &out, int type, Token &name, Token &base,
     (ClassStatement, type, name->text(), base->text(),
      dynamic_pointer_cast<ExpressionList>(baseInterface->exp),
      popComment(), stmtList, attrList);
+
+  // look for argument promotion in ctor
+  ExpressionListPtr promote = NEW_EXP(ExpressionList);
+  cls->checkArgumentsToPromote(promote, type);
+  auto count = promote->getCount();
+  cls->setPromotedParameterCount(count);
+  for (int i = 0; i < count; i++) {
+    auto param =
+        dynamic_pointer_cast<ParameterExpression>((*promote)[i]);
+    TokenID mod = param->getModifier();
+    std::string name = param->getName();
+    std::string type = param->hasUserType() ?
+                                  param->getUserTypeHint() : "";
+
+    // create the class variable and change the location to
+    // point to the parameter location for error reporting
+    LocationPtr location = param->getLocation();
+    ModifierExpressionPtr modifier = NEW_EXP0(ModifierExpression);
+    modifier->add(mod);
+    modifier->setLocation(location);
+    SimpleVariablePtr svar = NEW_EXP(SimpleVariable, name);
+    svar->setLocation(location);
+    ExpressionListPtr expList = NEW_EXP0(ExpressionList);
+    expList->addElement(svar);
+    expList->setLocation(location);
+    ClassVariablePtr var = NEW_STMT(ClassVariable, modifier, type, expList);
+    var->setLocation(location);
+    cls->getStmts()->addElement(var);
+  }
+
   out->stmt = cls;
   {
     cls->onParse(m_ar, m_file);
@@ -998,6 +1200,10 @@ void Parser::onInterfaceName(Token &out, Token *names, Token &name) {
   }
   expList->addElement(NEW_EXP(ScalarExpression, T_STRING, name->text()));
   out->exp = expList;
+}
+
+void Parser::onTraitRequire(Token &out, Token &name, bool isExtends) {
+  out->stmt = NEW_STMT(TraitRequireStatement, name->text(), isExtends);
 }
 
 void Parser::onTraitUse(Token &out, Token &traits, Token &rules) {
@@ -1072,8 +1278,13 @@ void Parser::onTraitAliasRuleModify(Token &out, Token &rule,
   }
 
   if (accessModifiers->exp) {
-    ruleStmt->setModifiers(dynamic_pointer_cast<ModifierExpression>
-                           (accessModifiers->exp));
+    auto modifiersExp =
+      dynamic_pointer_cast<ModifierExpression>(accessModifiers->exp);
+    if (!modifiersExp->validForTraitAliasRule()) {
+      PARSE_ERROR("Only access and visibility modifiers are allowed"
+                  " in trait alias rule");
+    }
+    ruleStmt->setModifiers(modifiersExp);
   }
 
   out->stmt = ruleStmt;
@@ -1095,102 +1306,6 @@ void Parser::onClassVariableStart(Token &out, Token *modifiers, Token &decl,
       NEW_STMT(ClassConstant,
         (type) ? type->typeAnnotationName() : "",
         dynamic_pointer_cast<ExpressionList>(decl->exp));
-  }
-}
-
-void Parser::onMethod(Token &out, Token &modifiers, Token &ret, Token &ref,
-                      Token &name, Token &params, Token &stmt,
-                      Token *attr, bool reloc /* = true */) {
-  ModifierExpressionPtr exp = modifiers->exp ?
-    dynamic_pointer_cast<ModifierExpression>(modifiers->exp)
-    : NEW_EXP0(ModifierExpression);
-
-  StatementListPtr stmts;
-  if (!stmt->stmt && stmt->num() == 1) {
-    stmts = NEW_STMT0(StatementList);
-  } else {
-    stmts = dynamic_pointer_cast<StatementList>(stmt->stmt);
-  }
-
-  ExpressionListPtr old_params =
-    dynamic_pointer_cast<ExpressionList>(params->exp);
-  int attribute = m_file->popAttribute();
-  string comment = popComment();
-  LocationPtr loc = popFuncLocation();
-
-  FunctionContext funcContext = m_funcContexts.back();
-  m_funcContexts.pop_back();
-  m_prependingStatements.pop_back();
-
-  funcContext.checkFinalAssertions();
-
-  bool hasCallToGetArgs = m_hasCallToGetArgs.back();
-  m_hasCallToGetArgs.pop_back();
-
-  fixStaticVars();
-
-  MethodStatementPtr mth;
-
-  string funcName = name->text();
-  if (funcName.empty()) {
-    funcName = newClosureName(m_clsName, m_containingFuncName);
-  }
-
-  if (funcContext.isGenerator) {
-    string genName = newContinuationName(funcName);
-    if (m_inTrait) {
-      // see traits/2067.php
-      genName = newContinuationName(funcName + "@" + m_clsName);
-    }
-
-    Token new_params;
-    prepare_generator(this, stmt, new_params);
-    ModifierExpressionPtr exp2 = Construct::Clone(exp);
-    mth = NEW_STMT(MethodStatement, exp2, ref->num(), genName,
-                   dynamic_pointer_cast<ExpressionList>(new_params->exp),
-                   ret.typeAnnotationName(),
-                   dynamic_pointer_cast<StatementList>(stmt->stmt),
-                   attribute, comment, ExpressionListPtr());
-    out->stmt = mth;
-    if (reloc) {
-      mth->getLocation()->line0 = loc->line0;
-      mth->getLocation()->char0 = loc->char0;
-    }
-    {
-      completeScope(mth->onInitialParse(m_ar, m_file));
-    }
-    // create_generator() expects us to push the docComment back
-    // onto the comment stack so that it can make sure that the
-    // the MethodStatement it's building will get the docComment
-    pushComment(comment);
-    Token origGenFunc;
-    create_generator(this, out, params, name, genName, m_clsName.c_str(),
-                     &modifiers, origGenFunc,
-                     (!Option::WholeProgram || !Option::ParseTimeOpts),
-                     attr);
-    MethodStatementPtr origStmt =
-      boost::dynamic_pointer_cast<MethodStatement>(origGenFunc->stmt);
-    assert(origStmt);
-    mth->setOrigGeneratorFunc(origStmt);
-    origStmt->setGeneratorFunc(mth);
-    origStmt->setHasCallToGetArgs(hasCallToGetArgs);
-    mth->setHasCallToGetArgs(hasCallToGetArgs);
-  } else {
-    ExpressionListPtr attrList;
-    if (attr && attr->exp) {
-      attrList = dynamic_pointer_cast<ExpressionList>(attr->exp);
-    }
-    mth = NEW_STMT(MethodStatement, exp, ref->num(), funcName,
-                   old_params,
-                   ret.typeAnnotationName(),
-                   stmts, attribute, comment,
-                   attrList);
-    out->stmt = mth;
-    if (reloc) {
-      mth->getLocation()->line0 = loc->line0;
-      mth->getLocation()->char0 = loc->char0;
-    }
-    completeScope(mth->onInitialParse(m_ar, m_file));
   }
 }
 
@@ -1253,15 +1368,6 @@ void Parser::addStatement(Token &out, Token &stmts, Token &new_stmt) {
 }
 
 void Parser::addStatement(StatementPtr stmt, StatementPtr new_stmt) {
-  assert(!m_prependingStatements.empty());
-  vector<StatementPtr> &prepending = m_prependingStatements.back();
-  if (!prepending.empty()) {
-    assert(prepending.size() == 1);
-    for (unsigned i = 0; i < prepending.size(); i++) {
-      stmt->addElement(prepending[i]);
-    }
-    prepending.clear();
-  }
   if (new_stmt) {
     stmt->addElement(new_stmt);
   }
@@ -1363,104 +1469,170 @@ void Parser::onCase(Token &out, Token &cases, Token *cond, Token &stmt) {
                                  stmt->stmt));
 }
 
-void Parser::onBreak(Token &out, Token *expr) {
-  if (expr) {
-    int64_t depth = strtoll(expr->text().c_str(), nullptr, 0);
-    if (depth <= 0) {
-      PARSE_ERROR("'break' operator accepts only positive numbers");
-    }
-    out->stmt = NEW_STMT(BreakStatement, static_cast<uint64_t>(depth));
-  } else {
-    out->stmt = NEW_STMT(BreakStatement, 1UL);
-  }
-}
+void Parser::onBreakContinue(Token &out, bool isBreak, Token* expr) {
+  uint64_t depth = 1;
 
-void Parser::onContinue(Token &out, Token *expr) {
   if (expr) {
-    int64_t depth = strtoll(expr->text().c_str(), nullptr, 0);
-    if (depth <= 0) {
-      PARSE_ERROR("'continue' operator accepts only positive numbers");
+    Variant v;
+    if (!expr->exp->getScalarValue(v)) {
+      PARSE_ERROR("'%s' operator with non-constant operand is no longer "
+                  "supported", (isBreak ? "break" : "continue"));
     }
-    out->stmt = NEW_STMT(ContinueStatement, static_cast<uint64_t>(depth));
+    if (!v.isInteger() || v.toInt64() <= 0) {
+      PARSE_ERROR("'%s' operator accepts only positive numbers",
+                  (isBreak ? "break" : "continue"));
+    }
+    depth = static_cast<uint64_t>(v.toInt64());
+  }
+
+  if (isBreak) {
+    out->stmt = NEW_STMT(BreakStatement, depth);
   } else {
-    out->stmt = NEW_STMT(ContinueStatement, 1UL);
+    out->stmt = NEW_STMT(ContinueStatement, depth);
   }
 }
 
 void Parser::onReturn(Token &out, Token *expr) {
   out->stmt = NEW_STMT(ReturnStatement, expr ? expr->exp : ExpressionPtr());
-  if (!m_funcContexts.empty()) {
-    if (!m_funcContexts.back().setIsNotGenerator()) {
+  // When HipHopSyntax is enabled, "yield break" is the only supported method
+  // for early termination of a generator.
+  if (!m_funcContexts.empty() &&
+      (expr || (Scanner::AllowHipHopSyntax & Option::GetScannerType()))) {
+    FunctionContext& fc = m_funcContexts.back();
+    if (fc.isGenerator) {
       Compiler::Error(InvalidYield, out->stmt);
-      PARSE_ERROR("Cannot mix 'return' and 'yield' in the same function");
+      PARSE_ERROR((Scanner::AllowHipHopSyntax & Option::GetScannerType()) ?
+        "Cannot mix 'return' and 'yield' in the same function" :
+        "Generators cannot return values using \"return\"");
+      return;
     }
+    fc.hasReturn = true;
   }
 }
 
-static void invalidYield(LocationPtr loc) {
-  ExpressionPtr exp(new SimpleFunctionCall(BlockScopePtr(), loc, "yield",
+void Parser::invalidYield() {
+  ExpressionPtr exp(new SimpleFunctionCall(BlockScopePtr(),
+                                           getLocation(),
+                                           "yield",
                                            false,
                                            ExpressionListPtr(),
                                            ExpressionPtr()));
   Compiler::Error(Compiler::InvalidYield, exp);
 }
 
+bool Parser::canBeAsyncOrGenerator(string funcName, string clsName) {
+  if (clsName.empty()) {
+    return true;
+  }
+  if (strcasecmp(funcName.c_str(), clsName.c_str()) == 0) {
+    return false;
+  }
+  if (strncmp(funcName.c_str(), "__", 2) == 0) {
+    const char *fname = funcName.c_str() + 2;
+    if (!strcasecmp(fname, "construct") ||
+        !strcasecmp(fname, "destruct") ||
+        !strcasecmp(fname, "get") ||
+        !strcasecmp(fname, "set") ||
+        !strcasecmp(fname, "isset") ||
+        !strcasecmp(fname, "unset") ||
+        !strcasecmp(fname, "call") ||
+        !strcasecmp(fname, "callstatic") ||
+        !strcasecmp(fname, "invoke")) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool Parser::setIsGenerator() {
   if (m_funcContexts.empty()) {
-    invalidYield(getLocation());
+    invalidYield();
     PARSE_ERROR("Yield can only be used inside a function");
     return false;
   }
 
-  if (!m_funcContexts.back().setIsGenerator()) {
-    invalidYield(getLocation());
-    PARSE_ERROR("Cannot mix 'return' and 'yield' in the same function");
+  FunctionContext& fc = m_funcContexts.back();
+  if (fc.hasReturn) {
+    invalidYield();
+    PARSE_ERROR((Scanner::AllowHipHopSyntax & Option::GetScannerType()) ?
+      "Cannot mix 'return' and 'yield' in the same function" :
+      "Generators cannot return values using \"return\"");
     return false;
   }
+  if (fc.isAsync) {
+    invalidYield();
+    PARSE_ERROR("'yield' is not allowed in async functions.");
+    return false;
+  }
+  fc.isGenerator = true;
 
-  if (!m_clsName.empty()) {
-    if (strcasecmp(m_funcName.c_str(), m_clsName.c_str()) == 0) {
-      invalidYield(getLocation());
-      PARSE_ERROR("'yield' is not allowed in potential constructors");
-      return false;
-    }
-
-    if (m_funcName[0] == '_' && m_funcName[1] == '_') {
-      const char *fname = m_funcName.c_str() + 2;
-      if (!strcasecmp(fname, "construct") ||
-          !strcasecmp(fname, "destruct") ||
-          !strcasecmp(fname, "get") ||
-          !strcasecmp(fname, "set") ||
-          !strcasecmp(fname, "isset") ||
-          !strcasecmp(fname, "unset") ||
-          !strcasecmp(fname, "call") ||
-          !strcasecmp(fname, "callstatic") ||
-          !strcasecmp(fname, "invoke")) {
-        invalidYield(getLocation());
-        PARSE_ERROR("'yield' is not allowed in constructor, destructor, or "
-                    "magic methods");
-        return false;
-      }
-    }
+  if (!canBeAsyncOrGenerator(m_funcName, m_clsName)) {
+    invalidYield();
+    PARSE_ERROR("'yield' is not allowed in constructor, destructor, or "
+                "magic methods");
+    return false;
   }
 
   return true;
 }
 
 void Parser::onYield(Token &out, Token &expr) {
-  if (!setIsGenerator()) {
-    return;
+  if (setIsGenerator()) {
+    out->exp = NEW_EXP(YieldExpression, ExpressionPtr(), expr->exp);
   }
+}
 
-  out->exp = NEW_EXP(YieldExpression, expr->exp);
+void Parser::onYieldPair(Token &out, Token &key, Token &val) {
+  if (setIsGenerator()) {
+    out->exp = NEW_EXP(YieldExpression, key->exp, val->exp);
+  }
 }
 
 void Parser::onYieldBreak(Token &out) {
-  if (!setIsGenerator()) {
-    return;
+  if (setIsGenerator()) {
+    out->stmt = NEW_STMT(ReturnStatement, ExpressionPtr());
+  }
+}
+
+void Parser::invalidAwait() {
+  ExpressionPtr exp(new SimpleFunctionCall(BlockScopePtr(),
+                                           getLocation(),
+                                           "async",
+                                           false,
+                                           ExpressionListPtr(),
+                                           ExpressionPtr()));
+  Compiler::Error(Compiler::InvalidAwait, exp);
+}
+
+bool Parser::setIsAsync() {
+  if (m_funcContexts.empty()) {
+    invalidAwait();
+    PARSE_ERROR("'await' can only be used inside a function");
+    return false;
   }
 
-  out->stmt = NEW_STMT(ReturnStatement, ExpressionPtr());
+  FunctionContext& fc = m_funcContexts.back();
+  if (fc.isGenerator) {
+    invalidAwait();
+    PARSE_ERROR("'await' is not allowed in generators.");
+    return false;
+  }
+  fc.isAsync = true;
+
+  if (!canBeAsyncOrGenerator(m_funcName, m_clsName)) {
+    invalidAwait();
+    PARSE_ERROR("'await' is not allowed in constructors, destructors, or "
+                    "magic methods.");
+  }
+
+  return true;
+}
+
+
+void Parser::onAwait(Token &out, Token &expr) {
+  if (setIsAsync()) {
+    out->exp = NEW_EXP(AwaitExpression, expr->exp);
+  }
 }
 
 void Parser::onGlobal(Token &out, Token &expr) {
@@ -1526,6 +1698,10 @@ void Parser::onExpStatement(Token &out, Token &expr) {
 
 void Parser::onForEach(Token &out, Token &arr, Token &name, Token &value,
                        Token &stmt) {
+  if (dynamic_pointer_cast<FunctionCall>(name->exp) ||
+      dynamic_pointer_cast<FunctionCall>(value->exp)) {
+    PARSE_ERROR("Can't use return value in write context");
+  }
   if (value->exp && name->num()) {
     PARSE_ERROR("Key element cannot be a reference");
     return;
@@ -1553,12 +1729,18 @@ void Parser::onTry(Token &out, Token &tryStmt, Token &className, Token &var,
   out->stmt = NEW_STMT(TryStatement, tryStmt->stmt,
                        dynamic_pointer_cast<StatementList>(stmtList),
                        finallyStmt->stmt);
+  if (tryStmt->stmt) {
+    out->stmt->setLabelScope(stmtList->getLabelScope());
+  }
 }
 
 void Parser::onTry(Token &out, Token &tryStmt, Token &finallyStmt) {
   out->stmt = NEW_STMT(TryStatement, tryStmt->stmt,
                        dynamic_pointer_cast<StatementList>(NEW_STMT0(StatementList)),
                        finallyStmt->stmt);
+  if (tryStmt->stmt) {
+    out->stmt->setLabelScope(tryStmt->stmt->getLabelScope());
+  }
 }
 
 void Parser::onCatch(Token &out, Token &catches, Token &className, Token &var,
@@ -1576,6 +1758,11 @@ void Parser::onCatch(Token &out, Token &catches, Token &className, Token &var,
 
 void Parser::onFinally(Token &out, Token &stmt) {
   out->stmt = NEW_STMT(FinallyStatement, stmt->stmt);
+  // TODO (#3271396) This can be greatly improved. In particular
+  // even when a finally block exists inside a function it is often
+  // the case that the unnamed locals state & ret are not needed.
+  // See task description for further details.
+  m_file->setAttribute(FileScope::NeedsFinallyLocals);
 }
 
 void Parser::onThrow(Token &out, Token &expr) {
@@ -1591,24 +1778,57 @@ void Parser::onClosureStart(Token &name) {
   onFunctionStart(name, true);
 }
 
-void Parser::onClosure(Token &out, Token &ret, Token &ref, Token &params,
-                       Token &cparams, Token &stmts, bool is_static) {
-  Token func, name, modifiers;
+Token Parser::onClosure(ClosureType type,
+                        Token* modifiers,
+                        Token& ref,
+                        Token& params,
+                        Token& cparams,
+                        Token& stmts) {
+  Token out;
+  Token name;
 
-  ModifierExpressionPtr modifier_exp = NEW_EXP0(ModifierExpression);
-  modifiers->exp = modifier_exp;
-  if (is_static) {
-    modifier_exp->add(T_STATIC);
+  Token retIgnore;
+  auto stmt = onFunctionHelper(
+    FunctionType::Closure,
+    modifiers,
+    retIgnore,
+    ref,
+    nullptr,
+    params,
+    stmts,
+    nullptr,
+    true
+  );
+
+  ExpressionListPtr vars = dynamic_pointer_cast<ExpressionList>(cparams->exp);
+  if (vars) {
+    for (int i = vars->getCount() - 1; i >= 0; i--) {
+      ParameterExpressionPtr param(
+        dynamic_pointer_cast<ParameterExpression>((*vars)[i]));
+      if (param->getName() == "this") {
+        PARSE_ERROR("Cannot use $this as lexical variable");
+      }
+    }
   }
-  onFunction(func, &modifiers, ret, ref, name, params, stmts, 0);
 
   ClosureExpressionPtr closure = NEW_EXP(
     ClosureExpression,
-    dynamic_pointer_cast<FunctionStatement>(func->stmt),
-    dynamic_pointer_cast<ExpressionList>(cparams->exp));
+    type,
+    dynamic_pointer_cast<FunctionStatement>(stmt),
+    vars
+  );
   closure->getClosureFunction()->setContainingClosure(closure);
-  out.reset();
   out->exp = closure;
+
+  return out;
+}
+
+Token Parser::onExprForLambda(const Token& expr) {
+  auto stmt = NEW_STMT(ReturnStatement, expr.exp);
+  Token ret;
+  ret.stmt = NEW_STMT0(StatementList);
+  ret.stmt->addElement(stmt);
+  return ret;
 }
 
 void Parser::onClosureParam(Token &out, Token *params, Token &param,
@@ -1620,8 +1840,8 @@ void Parser::onClosureParam(Token &out, Token *params, Token &param,
     expList = NEW_EXP0(ExpressionList);
   }
   expList->addElement(NEW_EXP(ParameterExpression, TypeAnnotationPtr(),
-                              m_scanner.hipHopSyntaxEnabled(), param->text(),
-                              ref, ExpressionPtr(), ExpressionPtr()));
+                              m_scanner.isHHSyntaxEnabled(), param->text(),
+                              ref, 0, ExpressionPtr(), ExpressionPtr()));
   out->exp = expList;
 }
 
@@ -1634,7 +1854,15 @@ void Parser::onGoto(Token &out, Token &label, bool limited) {
 }
 
 void Parser::onTypedef(Token& out, const Token& name, const Token& type) {
-  out->stmt = NEW_STMT(TypedefStatement, name.text(), type.text());
+  // Note: we don't always get TypeAnnotations (e.g. for shape types
+  // currently).
+  auto const annot = type.typeAnnotation
+    ? type.typeAnnotation
+    : std::make_shared<TypeAnnotation>(type.text(), TypeAnnotationPtr());
+
+  auto td_stmt = NEW_STMT(TypedefStatement, name.text(), annot);
+  td_stmt->onParse(m_ar, m_file);
+  out->stmt = td_stmt;
 }
 
 void Parser::onTypeAnnotation(Token& out, const Token& name,
@@ -1681,16 +1909,240 @@ void Parser::onTypeSpecialization(Token& type, char specialization) {
   }
 }
 
+void Parser::onQuery(Token &out, Token &head, Token &body) {
+  auto qe = NEW_EXP(QueryExpression, head.exp, body.exp);
+  qe->doRewrites(m_ar, m_file);
+  out->exp = qe;
+}
+
+void appendList(ExpressionListPtr expList, Token *exps) {
+  if (exps != nullptr) {
+    assert(exps->exp->is(Expression::KindOfExpressionList));
+    ExpressionListPtr el(static_pointer_cast<ExpressionList>(exps->exp));
+    for (unsigned int i = 0; i < el->getCount(); i++) {
+      if ((*el)[i]) expList->addElement((*el)[i]);
+    }
+  }
+}
+
+void Parser::onQueryBody(
+  Token &out, Token *clauses, Token &select, Token *cont) {
+  ExpressionListPtr expList(NEW_EXP0(ExpressionList));
+  appendList(expList, clauses);
+  expList->addElement(select.exp);
+  if (cont != nullptr) expList->addElement(cont->exp);
+  out->exp = expList;
+}
+
+void Parser::onQueryBodyClause(Token &out, Token *clauses, Token &clause) {
+  ExpressionPtr expList;
+  if (clauses && clauses->exp) {
+    expList = clauses->exp;
+  } else {
+    expList = NEW_EXP0(ExpressionList);
+  }
+  expList->addElement(clause->exp);
+  out->exp = expList;
+}
+
+void Parser::onFromClause(Token &out, Token &var, Token &coll) {
+  out->exp = NEW_EXP(FromClause, var.text(), coll.exp);
+}
+
+void Parser::onLetClause(Token &out, Token &var, Token &expr) {
+  out->exp = NEW_EXP(LetClause, var.text(), expr.exp);
+}
+
+void Parser::onWhereClause(Token &out, Token &expr) {
+  out->exp = NEW_EXP(WhereClause, expr.exp);
+}
+
+void Parser::onJoinClause(Token &out, Token &var, Token &coll,
+  Token &left, Token &right) {
+  out->exp = NEW_EXP(JoinClause, var.text(), coll.exp,
+                     left.exp, right.exp, "");
+}
+
+void Parser::onJoinIntoClause(Token &out, Token &var, Token &coll,
+  Token &left, Token &right, Token &group) {
+  out->exp = NEW_EXP(JoinClause, var.text(), coll.exp,
+                     left.exp, right.exp, group.text());
+}
+
+void Parser::onOrderbyClause(Token &out, Token &orderings) {
+  out->exp = NEW_EXP(OrderbyClause, orderings.exp);
+}
+
+void Parser::onOrdering(Token &out, Token *orderings, Token &ordering) {
+  ExpressionPtr expList;
+  if (orderings && orderings->exp) {
+    expList = orderings->exp;
+  } else {
+    expList = NEW_EXP0(ExpressionList);
+  }
+  expList->addElement(ordering->exp);
+  out->exp = expList;
+}
+
+void Parser::onOrderingExpr(Token &out, Token &expr, Token *direction) {
+  out->exp = NEW_EXP(Ordering, expr.exp, (direction) ? direction->text() : "");
+}
+
+void Parser::onSelectClause(Token &out, Token &expr) {
+  out->exp = NEW_EXP(SelectClause, expr.exp);
+}
+
+void Parser::onGroupClause(Token &out, Token &coll, Token &key) {
+  out->exp = NEW_EXP(GroupClause, coll.exp, key.exp);
+}
+
+void Parser::onIntoClause(Token &out, Token &var, Token &query) {
+  out->exp = NEW_EXP(IntoClause, var.text(), query.exp);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // namespace support
 
-void Parser::nns(int token) {
+//////////////////// AliasTable /////////////////////
+
+Parser::AliasTable::AliasTable(const hphp_string_imap<std::string>& autoAliases,
+                               std::function<bool ()> autoOracle)
+  : m_autoAliases(autoAliases), m_autoOracle(autoOracle) {
+  if (!m_autoOracle) {
+    setFalseOracle();
+  }
+}
+
+void Parser::AliasTable::setFalseOracle() {
+  m_autoOracle = [] () { return false; };
+}
+
+std::string Parser::AliasTable::getName(std::string alias) {
+  auto it = m_aliases.find(alias);
+  if (it != m_aliases.end()) {
+    return it->second.name;
+  }
+  auto autoIt = m_autoAliases.find(alias);
+  if (autoIt != m_autoAliases.end()) {
+    set(alias, autoIt->second, AliasTable::AliasType::USE);
+    return autoIt->second;
+  }
+  return "";
+}
+
+std::string Parser::AliasTable::getDefName(std::string alias) {
+  auto it = m_aliases.find(alias);
+  if (it != m_aliases.end() && it->second.type == AliasType::DEF) {
+    return it->second.name;
+  }
+  return "";
+}
+
+std::string Parser::AliasTable::getUseName(std::string alias) {
+  auto it = m_aliases.find(alias);
+  if (it != m_aliases.end() && it->second.type == AliasType::USE) {
+    return it->second.name;
+  }
+  return "";
+}
+
+bool Parser::AliasTable::isAliased(std::string alias) {
+  if (isUseType(alias)) {
+    return true;
+  }
+  return m_autoOracle() && m_autoAliases.find(alias) != m_autoAliases.end();
+}
+
+bool Parser::AliasTable::isAutoType(std::string alias) {
+  return m_autoOracle() && m_autoAliases.find(alias) != m_autoAliases.end();
+}
+
+bool Parser::AliasTable::isUseType(std::string alias) {
+  auto it = m_aliases.find(alias);
+  return it != m_aliases.end() && it->second.type == AliasType::USE;
+}
+
+bool Parser::AliasTable::isDefType(std::string alias) {
+  auto it = m_aliases.find(alias);
+  return it != m_aliases.end() && it->second.type == AliasType::DEF;
+}
+
+void Parser::AliasTable::set(std::string alias,
+                             std::string name,
+                             AliasType type) {
+  m_aliases[alias] = (NameEntry){name, type};
+}
+
+/*
+ * To be called when we enter a fresh namespace.
+ */
+void Parser::AliasTable::clear() {
+  m_aliases.clear();
+}
+
+//////////////////////////////////////////////////////
+
+
+/*
+ * We auto-alias classes only on HH mode.
+ */
+bool Parser::isAutoAliasOn() {
+  return m_scanner.isHHSyntaxEnabled();
+}
+
+hphp_string_imap<std::string> Parser::getAutoAliasedClassesHelper() {
+  hphp_string_imap<std::string> autoAliases;
+  typedef AliasTable::AliasEntry AliasEntry;
+  std::vector<AliasEntry> aliases {
+    (AliasEntry){"Traversable", "HH\\Traversable"},
+    (AliasEntry){"KeyedTraversable", "HH\\KeyedTraversable"},
+    (AliasEntry){"Iterator", "HH\\Iterator"},
+    (AliasEntry){"KeyedIterator", "HH\\KeyedIterator"},
+    (AliasEntry){"Iterable", "HH\\Iterable"},
+    (AliasEntry){"KeyedIterable", "HH\\KeyedIterable"},
+    (AliasEntry){"Collection", "HH\\Collection"},
+    (AliasEntry){"Vector", "HH\\Vector"},
+    (AliasEntry){"Map", "HH\\Map"},
+    (AliasEntry){"StableMap", "HH\\Map"}, // Merging with Map
+    (AliasEntry){"Set", "HH\\Set"},
+    (AliasEntry){"Pair", "HH\\Pair"},
+    (AliasEntry){"ImmVector", "HH\\ImmVector"},
+    (AliasEntry){"ImmMap", "HH\\ImmMap"},
+    (AliasEntry){"ImmSet", "HH\\ImmSet"},
+    (AliasEntry){"InvariantException", "HH\\InvariantException"},
+
+    (AliasEntry){"bool", "HH\\bool"},
+    (AliasEntry){"boolean", "HH\\bool"},
+    (AliasEntry){"int", "HH\\int"},
+    (AliasEntry){"integer", "HH\\int"},
+    (AliasEntry){"float", "HH\\float"},
+    (AliasEntry){"double", "HH\\float"},
+    (AliasEntry){"real", "HH\\float"},
+    (AliasEntry){"num", "HH\\num"},
+    (AliasEntry){"string", "HH\\string"},
+    (AliasEntry){"resource", "HH\\resource"},
+    (AliasEntry){"mixed", "HH\\mixed"},
+  };
+  for (auto entry : aliases) {
+    autoAliases[entry.alias] = entry.name;
+  }
+  return autoAliases;
+}
+
+const hphp_string_imap<std::string>& Parser::getAutoAliasedClasses() {
+  static auto autoAliases = getAutoAliasedClassesHelper();
+  return autoAliases;
+}
+
+void Parser::nns(int token, const std::string& text) {
   if (m_nsState == SeenNamespaceStatement && token != ';') {
     error("No code may exist outside of namespace {}: %s",
           getMessage().c_str());
     return;
   }
-  if (m_nsState == SeenNothing && token != T_DECLARE) {
+
+  if (m_nsState == SeenNothing && !text.empty() && token != T_DECLARE &&
+      token != ';') {
     m_nsState = SeenNonNamespaceStatement;
   }
 }
@@ -1709,10 +2161,9 @@ void Parser::onNamespaceStart(const std::string &ns,
 
   m_nsState = InsideNamespace;
   m_nsFileScope = file_scope;
-  m_aliases.clear();
   pushComment();
-
   m_namespace = ns;
+  m_aliasTable.clear();
 }
 
 void Parser::onNamespaceEnd() {
@@ -1729,12 +2180,25 @@ void Parser::onUse(const std::string &ns, const std::string &as) {
       key = ns.substr(pos + 1);
     }
   }
-  if (m_aliases.find(key) != m_aliases.end() && m_aliases[key] != ns) {
+
+  // It's not an error if the alias already exists but is auto-imported.
+  // In that case, it gets replaced. It prompts an error if it is not
+  // auto-imported and 'use' statement is trying to replace it.
+  if (m_aliasTable.isUseType(key)) {
     error("Cannot use %s as %s because the name is already in use: %s",
           ns.c_str(), key.c_str(), getMessage().c_str());
     return;
   }
-  m_aliases[key] = ns;
+  if (m_aliasTable.isDefType(key)) {
+    auto defName = m_aliasTable.getDefName(key);
+    if (strcasecmp(defName.c_str(), ns.c_str())) {
+      error("Cannot use %s as %s because the name is already in use: %s",
+            ns.c_str(), key.c_str(), getMessage().c_str());
+      return;
+    }
+  }
+
+  m_aliasTable.set(key, ns, AliasTable::AliasType::USE);
 }
 
 std::string Parser::nsDecl(const std::string &name) {
@@ -1745,21 +2209,18 @@ std::string Parser::nsDecl(const std::string &name) {
 }
 
 std::string Parser::resolve(const std::string &ns, bool cls) {
-  string alias = ns;
   size_t pos = ns.find(NAMESPACE_SEP);
-  if (pos != string::npos) {
-    alias = ns.substr(0, pos);
-  }
+  string alias = (pos != string::npos) ? ns.substr(0, pos) : ns;
 
-  hphp_string_imap<std::string>::const_iterator iter = m_aliases.find(alias);
-  if (iter != m_aliases.end()) {
+  if (m_aliasTable.isAliased(alias)) {
+    auto name = m_aliasTable.getName(alias);
     // Was it a namespace alias?
     if (pos != string::npos) {
-      return iter->second + ns.substr(pos);
+      return name + ns.substr(pos);
     }
     // Only classes can appear directly in "use" statements
     if (cls) {
-      return iter->second;
+      return name;
     }
   }
 
@@ -1811,7 +2272,7 @@ TStatementPtr Parser::extractStatement(ScannerToken *stmt) {
 
 bool Parser::hasType(Token &type) {
   if (!type.text().empty()) {
-    if (!m_scanner.hipHopSyntaxEnabled()) {
+    if (!m_scanner.isHHSyntaxEnabled()) {
       PARSE_ERROR("Type hint is not enabled");
       return false;
     }
@@ -1824,7 +2285,16 @@ void Parser::registerAlias(std::string name) {
   size_t pos = name.rfind(NAMESPACE_SEP);
   if (pos != string::npos) {
     string key = name.substr(pos + 1);
-    m_aliases[key] = name;
+    if (m_aliasTable.isUseType(key)) {
+      auto useName = m_aliasTable.getUseName(key);
+      if (strcasecmp(useName.c_str(), name.c_str())) {
+        error("Cannot declare class %s because the name is already in use: %s",
+              name.c_str(), getMessage().c_str());
+        return;
+      }
+    } else {
+      m_aliasTable.set(key, name, AliasTable::AliasType::DEF);
+    }
   }
 }
 

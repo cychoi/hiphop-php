@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,50 +13,35 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#include "hphp/runtime/vm/class.h"
-
-#include "hphp/runtime/vm/class.h"
-#include "hphp/runtime/base/base_includes.h"
-#include "hphp/runtime/base/array/hphp_array.h"
-#include "hphp/util/util.h"
+#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/hphp-array.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/rds.h"
+#include "hphp/runtime/base/enum-cache.h"
 #include "hphp/util/debug.h"
-#include "hphp/runtime/vm/core_types.h"
-#include "hphp/runtime/vm/hhbc.h"
-#include "hphp/runtime/vm/repo.h"
-#include "hphp/runtime/vm/jit/targetcache.h"
 #include "hphp/runtime/vm/jit/translator.h"
-#include "hphp/runtime/vm/blob_helper.h"
 #include "hphp/runtime/vm/treadmill.h"
-#include "hphp/runtime/vm/name_value_table.h"
-#include "hphp/runtime/vm/name_value_table_wrapper.h"
-#include "hphp/runtime/vm/request_arena.h"
+#include "hphp/runtime/vm/native-data.h"
 #include "hphp/system/systemlib.h"
 #include "hphp/util/logger.h"
-#include "hphp/util/parser/parser.h"
-
-#include <boost/optional.hpp>
-#include <boost/utility/typed_in_place_factory.hpp>
-
+#include "hphp/parser/parser.h"
+#include "folly/Bits.h"
 #include <iostream>
 #include <algorithm>
 
 namespace HPHP {
 
-static StringData* sd86ctor = StringData::GetStaticString("86ctor");
-static StringData* sd86pinit = StringData::GetStaticString("86pinit");
-static StringData* sd86sinit = StringData::GetStaticString("86sinit");
+static StringData* sd86ctor = makeStaticString("86ctor");
+static StringData* sd86pinit = makeStaticString("86pinit");
+static StringData* sd86sinit = makeStaticString("86sinit");
 
 hphp_hash_map<const StringData*, const HhbcExtClassInfo*,
               string_data_hash, string_data_isame> Class::s_extClassHash;
-Class::InstanceCounts Class::s_instanceCounts;
-ReadWriteMutex Class::s_instanceCountsLock(RankInstanceCounts);
-Class::InstanceBitsMap Class::s_instanceBits;
-ReadWriteMutex Class::s_instanceBitsLock(RankInstanceBits);
-std::atomic<bool> Class::s_instanceBitsInit{false};
 
-static const StringData* manglePropName(const StringData* className,
-                                        const StringData* propName,
-                                        Attr              attrs) {
+const StringData* PreClass::manglePropName(const StringData* className,
+                                           const StringData* propName,
+                                           Attr              attrs) {
   switch (attrs & (AttrPublic|AttrProtected|AttrPrivate)) {
   case AttrPublic: {
     return propName;
@@ -67,7 +52,7 @@ static const StringData* manglePropName(const StringData* className,
     mangledName.push_back('*');
     mangledName.push_back('\0');
     mangledName += propName->data();
-    return StringData::GetStaticString(mangledName);
+    return makeStaticString(mangledName);
   }
   case AttrPrivate: {
     std::string mangledName = "";
@@ -75,7 +60,7 @@ static const StringData* manglePropName(const StringData* className,
     mangledName += className->data();
     mangledName.push_back('\0');
     mangledName += propName->data();
-    return StringData::GetStaticString(mangledName);
+    return makeStaticString(mangledName);
   }
   default: not_reached();
   }
@@ -90,13 +75,13 @@ PreClass::Prop::Prop(PreClass* preClass,
                      const StringData* typeConstraint,
                      const StringData* docComment,
                      const TypedValue& val,
-                     DataType hphpcType)
+                     RepoAuthType repoAuthType)
   : m_preClass(preClass)
   , m_name(n)
   , m_attrs(attrs)
   , m_typeConstraint(typeConstraint)
   , m_docComment(docComment)
-  , m_hphpcType(hphpcType)
+  , m_repoAuthType{repoAuthType}
 {
   m_mangledName = manglePropName(preClass->name(), n, attrs);
   memcpy(&m_val, &val, sizeof(TypedValue));
@@ -149,10 +134,17 @@ void PreClass::Const::prettyPrint(std::ostream& out) const {
 PreClass::PreClass(Unit* unit, int line1, int line2, Offset o,
                    const StringData* n, Attr attrs, const StringData* parent,
                    const StringData* docComment, Id id, Hoistable hoistable)
-    : m_unit(unit), m_line1(line1), m_line2(line2), m_offset(o), m_id(id),
-      m_builtinPropSize(0), m_attrs(attrs), m_hoistable(hoistable),
-      m_name(n), m_parent(parent), m_docComment(docComment),
-      m_InstanceCtor(nullptr) {
+  : m_unit(unit)
+  , m_line1(line1)
+  , m_line2(line2)
+  , m_offset(o)
+  , m_id(id)
+  , m_attrs(attrs)
+  , m_hoistable(hoistable)
+  , m_name(n)
+  , m_parent(parent)
+  , m_docComment(docComment)
+{
   m_namedEntity = Unit::GetNamedEntity(n);
 }
 
@@ -175,6 +167,8 @@ void PreClass::prettyPrint(std::ostream &out) const {
   } else if (m_hoistable == AlwaysHoistable) {
     out << " (always-hoistable)";
   }
+  if (m_attrs & AttrUnique)     out << " (unique)";
+  if (m_attrs & AttrPersistent) out << " (persistent)";
   if (m_id != -1) {
     out << " (ID " << m_id << ")";
   }
@@ -198,335 +192,55 @@ void PreClass::prettyPrint(std::ostream &out) const {
   }
 }
 
-//=============================================================================
-// PreClassEmitter::Prop.
+const StaticString s_nativedata("__nativedata");
+void PreClass::setUserAttributes(const UserAttributeMap &ua) {
+  m_userAttributes = ua;
+  m_nativeDataInfo = nullptr;
+  if (!ua.size()) return;
 
-PreClassEmitter::Prop::Prop(const PreClassEmitter* pce,
-                            const StringData* n,
-                            Attr attrs,
-                            const StringData* typeConstraint,
-                            const StringData* docComment,
-                            TypedValue* val,
-                            DataType hphpcType)
-  : m_name(n)
-  , m_attrs(attrs)
-  , m_typeConstraint(typeConstraint)
-  , m_docComment(docComment)
-  , m_hphpcType(hphpcType)
-{
-  m_mangledName = manglePropName(pce->name(), n, attrs);
-  memcpy(&m_val, val, sizeof(TypedValue));
-}
+  // Check for <<__NativeData("Type")>>
+  auto it = ua.find(s_nativedata.get());
+  if (it == ua.end()) return;
 
-PreClassEmitter::Prop::~Prop() {
-}
+  TypedValue ndiInfo = it->second;
+  if (ndiInfo.m_type != KindOfArray) return;
 
-//=============================================================================
-// PreClassEmitter.
-
-PreClassEmitter::PreClassEmitter(UnitEmitter& ue,
-                                 Id id,
-                                 const StringData* n,
-                                 PreClass::Hoistable hoistable)
-  : m_ue(ue)
-  , m_name(n)
-  , m_id(id)
-  , m_hoistable(hoistable)
-  , m_InstanceCtor(nullptr)
-  , m_builtinPropSize(0)
-{}
-
-void PreClassEmitter::init(int line1, int line2, Offset offset, Attr attrs,
-                           const StringData* parent,
-                           const StringData* docComment) {
-  m_line1 = line1;
-  m_line2 = line2;
-  m_offset = offset;
-  m_attrs = attrs;
-  m_parent = parent;
-  m_docComment = docComment;
-}
-
-PreClassEmitter::~PreClassEmitter() {
-  for (MethodVec::const_iterator it = m_methods.begin();
-       it != m_methods.end(); ++it) {
-    delete *it;
-  }
-}
-
-void PreClassEmitter::addInterface(const StringData* n) {
-  m_interfaces.push_back(n);
-}
-
-bool PreClassEmitter::addMethod(FuncEmitter* method) {
-  MethodMap::const_iterator it = m_methodMap.find(method->name());
-  if (it != m_methodMap.end()) {
-    return false;
-  }
-  m_methods.push_back(method);
-  m_methodMap[method->name()] = method;
-  return true;
-}
-
-bool PreClassEmitter::addProperty(const StringData* n, Attr attrs,
-                                  const StringData* typeConstraint,
-                                  const StringData* docComment,
-                                  TypedValue* val,
-                                  DataType hphpcType) {
-  PropMap::Builder::const_iterator it = m_propMap.find(n);
-  if (it != m_propMap.end()) {
-    return false;
-  }
-  PreClassEmitter::Prop prop(this, n, attrs, typeConstraint, docComment, val,
-    hphpcType);
-  m_propMap.add(prop.name(), prop);
-  return true;
-}
-
-const PreClassEmitter::Prop&
-PreClassEmitter::lookupProp(const StringData* propName) const {
-  PropMap::Builder::const_iterator it = m_propMap.find(propName);
-  assert(it != m_propMap.end());
-  Slot idx = it->second;
-  return m_propMap[idx];
-}
-
-bool PreClassEmitter::addConstant(const StringData* n,
-                                  const StringData* typeConstraint,
-                                  TypedValue* val,
-                                  const StringData* phpCode) {
-  ConstMap::Builder::const_iterator it = m_constMap.find(n);
-  if (it != m_constMap.end()) {
-    return false;
-  }
-  PreClassEmitter::Const const_(n, typeConstraint, val, phpCode);
-  m_constMap.add(const_.name(), const_);
-  return true;
-}
-
-void PreClassEmitter::addUsedTrait(const StringData* traitName) {
-  m_usedTraits.push_back(traitName);
-}
-
-void PreClassEmitter::addTraitPrecRule(
-    const PreClass::TraitPrecRule &rule) {
-  m_traitPrecRules.push_back(rule);
-}
-
-void PreClassEmitter::addTraitAliasRule(
-    const PreClass::TraitAliasRule &rule) {
-  m_traitAliasRules.push_back(rule);
-}
-
-void PreClassEmitter::addUserAttribute(const StringData* name, TypedValue tv) {
-  m_userAttributes[name] = tv;
-}
-
-void PreClassEmitter::commit(RepoTxn& txn) const {
-  Repo& repo = Repo::get();
-  PreClassRepoProxy& pcrp = repo.pcrp();
-  int repoId = m_ue.repoId();
-  int64_t usn = m_ue.sn();
-  pcrp.insertPreClass(repoId)
-      .insert(*this, txn, usn, m_id, m_name, m_hoistable);
-
-  for (MethodVec::const_iterator it = m_methods.begin();
-       it != m_methods.end(); ++it) {
-    (*it)->commit(txn);
-  }
-}
-
-void PreClassEmitter::setBuiltinClassInfo(const ClassInfo* info,
-                                          BuiltinCtorFunction ctorFunc,
-                                          int sz) {
-  if (info->getAttribute() & ClassInfo::IsFinal) {
-    m_attrs = m_attrs | AttrFinal;
-  }
-  if (info->getAttribute() & ClassInfo::IsAbstract) {
-    m_attrs = m_attrs | AttrAbstract;
-  }
-  if (info->getAttribute() & ClassInfo::IsTrait) {
-    m_attrs = m_attrs | AttrTrait;
-  }
-  m_attrs = m_attrs | AttrUnique;
-  m_InstanceCtor = ctorFunc;
-  m_builtinPropSize = sz - sizeof(ObjectData);
-}
-
-PreClass* PreClassEmitter::create(Unit& unit) const {
-  Attr attrs = m_attrs;
-  if (attrs & AttrPersistent &&
-      !RuntimeOption::RepoAuthoritative && SystemLib::s_inited) {
-    attrs = Attr(attrs & ~AttrPersistent);
-  }
-  PreClass* pc = new PreClass(&unit, m_line1, m_line2, m_offset, m_name,
-                              attrs, m_parent, m_docComment, m_id,
-                              m_hoistable);
-  pc->m_InstanceCtor = m_InstanceCtor;
-  pc->m_builtinPropSize = m_builtinPropSize;
-  pc->m_interfaces = m_interfaces;
-  pc->m_usedTraits = m_usedTraits;
-  pc->m_traitPrecRules = m_traitPrecRules;
-  pc->m_traitAliasRules = m_traitAliasRules;
-  pc->m_userAttributes = m_userAttributes;
-
-  PreClass::MethodMap::Builder methodBuild;
-  for (MethodVec::const_iterator it = m_methods.begin();
-       it != m_methods.end(); ++it) {
-    Func* f = (*it)->create(unit, pc);
-    methodBuild.add(f->name(), f);
-  }
-  pc->m_methods.create(methodBuild);
-
-  PreClass::PropMap::Builder propBuild;
-  for (unsigned i = 0; i < m_propMap.size(); ++i) {
-    const Prop& prop = m_propMap[i];
-    propBuild.add(prop.name(), PreClass::Prop(pc,
-                                              prop.name(),
-                                              prop.attrs(),
-                                              prop.typeConstraint(),
-                                              prop.docComment(),
-                                              prop.val(),
-                                              prop.hphpcType()));
-  }
-  pc->m_properties.create(propBuild);
-
-  PreClass::ConstMap::Builder constBuild;
-  for (unsigned i = 0; i < m_constMap.size(); ++i) {
-    const Const& const_ = m_constMap[i];
-    constBuild.add(const_.name(), PreClass::Const(pc,
-                                                  const_.name(),
-                                                  const_.typeConstraint(),
-                                                  const_.val(),
-                                                  const_.phpCode()));
-  }
-  pc->m_constants.create(constBuild);
-  return pc;
-}
-
-template<class SerDe> void PreClassEmitter::serdeMetaData(SerDe& sd) {
-  // NOTE: name, hoistable, and a few other fields currently
-  // serialized outside of this.
-  sd(m_line1)
-    (m_line2)
-    (m_offset)
-    (m_attrs)
-    (m_parent)
-    (m_docComment)
-
-    (m_interfaces)
-    (m_usedTraits)
-    (m_traitPrecRules)
-    (m_traitAliasRules)
-    (m_userAttributes)
-    (m_propMap)
-    (m_constMap)
-    ;
-}
-
-//=============================================================================
-// PreClassRepoProxy.
-
-PreClassRepoProxy::PreClassRepoProxy(Repo& repo)
-  : RepoProxy(repo)
-#define PCRP_OP(c, o) \
-  , m_##o##Local(repo, RepoIdLocal), m_##o##Central(repo, RepoIdCentral)
-    PCRP_OPS
-#undef PCRP_OP
-{
-#define PCRP_OP(c, o) \
-  m_##o[RepoIdLocal] = &m_##o##Local; \
-  m_##o[RepoIdCentral] = &m_##o##Central;
-  PCRP_OPS
-#undef PCRP_OP
-}
-
-PreClassRepoProxy::~PreClassRepoProxy() {
-}
-
-void PreClassRepoProxy::createSchema(int repoId, RepoTxn& txn) {
-  {
-    std::stringstream ssCreate;
-    ssCreate << "CREATE TABLE " << m_repo.table(repoId, "PreClass")
-             << "(unitSn INTEGER, preClassId INTEGER, name TEXT,"
-                " hoistable INTEGER, extraData BLOB,"
-                " PRIMARY KEY (unitSn, preClassId));";
-    txn.exec(ssCreate.str());
-  }
-}
-
-void PreClassRepoProxy::InsertPreClassStmt
-                      ::insert(const PreClassEmitter& pce, RepoTxn& txn,
-                               int64_t unitSn, Id preClassId,
-                               const StringData* name,
-                               PreClass::Hoistable hoistable) {
-  if (!prepared()) {
-    std::stringstream ssInsert;
-    ssInsert << "INSERT INTO " << m_repo.table(m_repoId, "PreClass")
-             << " VALUES(@unitSn, @preClassId, @name, @hoistable, "
-                "@extraData);";
-    txn.prepare(*this, ssInsert.str());
-  }
-
-  BlobEncoder extraBlob;
-  RepoTxnQuery query(txn, *this);
-  query.bindInt64("@unitSn", unitSn);
-  query.bindId("@preClassId", preClassId);
-  query.bindStaticString("@name", name);
-  query.bindInt("@hoistable", hoistable);
-  const_cast<PreClassEmitter&>(pce).serdeMetaData(extraBlob);
-  query.bindBlob("@extraData", extraBlob, /* static */ true);
-  query.exec();
-}
-
-void PreClassRepoProxy::GetPreClassesStmt
-                      ::get(UnitEmitter& ue) {
-  RepoTxn txn(m_repo);
-  if (!prepared()) {
-    std::stringstream ssSelect;
-    ssSelect << "SELECT preClassId,name,hoistable,extraData FROM "
-             << m_repo.table(m_repoId, "PreClass")
-             << " WHERE unitSn == @unitSn ORDER BY preClassId ASC;";
-    txn.prepare(*this, ssSelect.str());
-  }
-  RepoTxnQuery query(txn, *this);
-  query.bindInt64("@unitSn", ue.sn());
-  do {
-    query.step();
-    if (query.row()) {
-      Id preClassId;          /**/ query.getId(0, preClassId);
-      StringData* name;       /**/ query.getStaticString(1, name);
-      int hoistable;          /**/ query.getInt(2, hoistable);
-      BlobDecoder extraBlob = /**/ query.getBlob(3);
-      PreClassEmitter* pce = ue.newPreClassEmitter(
-        name, (PreClass::Hoistable)hoistable);
-      pce->serdeMetaData(extraBlob);
-      assert(pce->id() == preClassId);
+  // Use the first string label which references a registered type
+  // In practice, there should generally only be one item and
+  // it should be a string, but maybe that'll be extended...
+  for (ArrayIter it(ndiInfo.m_data.parr); it; ++it) {
+    Variant val = it.second();
+    if (!val.isString()) continue;
+    if ((m_nativeDataInfo = Native::getNativeDataInfo(val.toString().get()))) {
+      break;
     }
-  } while (!query.done());
-  txn.commit();
+  }
 }
 
 //=============================================================================
 // Class.
 
-ClassPtr Class::newClass(PreClass* preClass, Class* parent) {
-  unsigned classVecLen = (parent != nullptr) ? parent->m_classVecLen+1 : 1;
-  void* mem = Util::low_malloc(sizeForNClasses(classVecLen));
+static_assert(sizeof(Class) == 376, "Change this only on purpose");
+
+Class* Class::newClass(PreClass* preClass, Class* parent) {
+  auto const classVecLen = parent != nullptr ? parent->m_classVecLen + 1 : 1;
+  auto const size = offsetof(Class, m_classVec) + sizeof(Class*) * classVecLen;
+  auto const mem = low_malloc(size);
   try {
-    return ClassPtr(new (mem) Class(preClass, parent, classVecLen));
+    return new (mem) Class(preClass, parent, classVecLen);
   } catch (...) {
-    Util::low_free(mem);
+    low_free(mem);
     throw;
   }
 }
 
+void (*Class::MethodCreateHook)(Class* cls, MethodMap::Builder& builder);
+
 Class::Class(PreClass* preClass, Class* parent, unsigned classVecLen)
-  : m_preClass(PreClassPtr(preClass)), m_parent(ClassPtr(parent)),
-    m_traitsBeginIdx(0), m_traitsEndIdx(0), m_clsInfo(nullptr),
-    m_builtinPropSize(0), m_classVecLen(classVecLen), m_cachedOffset(0),
-    m_propDataCache(-1), m_propSDataCache(-1), m_InstanceCtor(nullptr),
-    m_nextClass(nullptr) {
+  : m_parent(parent)
+  , m_preClass(PreClassPtr(preClass))
+  , m_classVecLen(classVecLen)
+{
   setParent();
   setUsedTraits();
   setMethods();
@@ -537,58 +251,113 @@ Class::Class(PreClass* preClass, Class* parent, unsigned classVecLen)
   setProperties();
   setInitializers();
   setClassVec();
+  checkTraitConstraints();
+  setNativeDataInfo();
+}
+
+Class::~Class() {
+  releaseRefs();
+
+  auto methods = methodRange();
+  while (!methods.empty()) {
+    Func* meth = methods.popFront();
+    if (meth) Func::destroy(meth);
+  }
+  // clean enum cache
+  EnumCache::deleteValues(this);
+}
+
+void Class::releaseRefs() {
+  /*
+   * We have to be careful here.
+   * We want to free up as much as possible as early as possible, but
+   * some of our methods may actually belong to our parent
+   * This means we can't destroy *our* Funcs until our refCount
+   * hits zero (ie when Class::~Class gets called), because there
+   * could be a child class which hasn't yet been destroyed, which
+   * will need to inspect them. Also, we need to inspect the Funcs
+   * now (while we still have a references to parent) to determine
+   * which ones we will eventually need to free.
+   * Similarly, if any of our func's belong to a parent class, we
+   * can't free the parent, because one of our children could also
+   * have a reference to those func's (and its only reference to
+   * our parent is via this class).
+   */
+  auto methods = mutableMethodRange();
+  bool okToReleaseParent = true;
+  while (!methods.empty()) {
+    Func*& meth = methods.popFront();
+    if (meth /* releaseRefs can be called more than once */ &&
+        meth->cls() != this &&
+        ((meth->attrs() & AttrPrivate) || !meth->hasStaticLocals())) {
+      meth = nullptr;
+      okToReleaseParent = false;
+    }
+  }
+
+  if (okToReleaseParent) {
+    m_parent.reset();
+  }
+  m_declInterfaces.reset();
+  m_usedTraits.clear();
+}
+
+void Class::destroy() {
+  /*
+   * If we were never put on NamedEntity::classList, or
+   * we've already been destroy'd, there's nothing to do
+   */
+  if (!m_cachedClass.bound()) return;
+
+  Lock l(Unit::s_classesMutex);
+  // Need to recheck now we have the lock
+  if (!m_cachedClass.bound()) return;
+  // Only do this once.
+  m_cachedClass = RDS::Link<Class*>(RDS::kInvalidHandle);
+
+  PreClass* pcls = m_preClass.get();
+  pcls->namedEntity()->removeClass(this);
+  /*
+   * Regardless of refCount, this Class is now unusable.
+   * Release what we can immediately, to allow dependent
+   * classes to be freed.
+   * Needs to be under the lock, because multiple threads
+   * could call destroy
+   */
+  releaseRefs();
+  Treadmill::enqueue(
+    [this] { if (!this->decAtomicCount()) this->atomicRelease(); }
+  );
 }
 
 void Class::atomicRelease() {
-  if (m_cachedOffset != 0u) {
-    /*
-      m_cachedOffset is initialied to 0, and is only set
-      when the Class is put on the list, so we only have to
-      remove this node if its NOT 0.
-      Since we're about to remove it, reset to 0 so we know
-      its safe to kill the node during the delayed Treadmill
-      callback.
-    */
-    m_cachedOffset = 0u;
-    PreClass* pcls = m_preClass.get();
-    {
-      Lock l(Unit::s_classesMutex);
-      pcls->namedEntity()->removeClass(this);
-    }
-    Treadmill::WorkItem::enqueue(new Treadmill::FreeClassTrigger(this));
-    return;
-  }
-
+  assert(!m_cachedClass.bound());
+  assert(!getCount());
   this->~Class();
-  Util::low_free(this);
+  low_free(this);
 }
 
 Class *Class::getCached() const {
-  return *(Class**)Transl::TargetCache::handleToPtr(m_cachedOffset);
+  return *m_cachedClass;
 }
 
 void Class::setCached() {
-  *(Class**)Transl::TargetCache::handleToPtr(m_cachedOffset) = this;
+  *m_cachedClass = this;
 }
 
 bool Class::verifyPersistent() const {
   if (!(attrs() & AttrPersistent)) return false;
   if (m_parent.get() &&
-      !Transl::TargetCache::isPersistentHandle(m_parent->m_cachedOffset)) {
+      !RDS::isPersistentHandle(m_parent->classHandle())) {
     return false;
   }
-  for (size_t i = 0, nInterfaces = m_declInterfaces.size();
-       i < nInterfaces; ++i) {
-    Class* declInterface = m_declInterfaces[i].get();
-    if (!Transl::TargetCache::isPersistentHandle(
-          declInterface->m_cachedOffset)) {
+  for (auto const& declInterface : declInterfaces()) {
+    if (!RDS::isPersistentHandle(declInterface->classHandle())) {
       return false;
     }
   }
-  for (size_t i = 0; i < m_usedTraits.size(); i++) {
-    Class* usedTrait = m_usedTraits[i].get();
-    if (!Transl::TargetCache::isPersistentHandle(
-          usedTrait->m_cachedOffset)) {
+  for (auto const& usedTrait : m_usedTraits) {
+    if (!RDS::isPersistentHandle(usedTrait->classHandle())) {
       return false;
     }
   }
@@ -600,133 +369,25 @@ const Func* Class::getDeclaredCtor() const {
   return f->name() != sd86ctor ? f : nullptr;
 }
 
-void Class::initInstanceBits() {
-  assert(Transl::Translator::WriteLease().amOwner());
-  if (s_instanceBitsInit.load(std::memory_order_acquire)) return;
-
-  // First, grab a write lock on s_instanceCounts and grab the current set of
-  // counts as quickly as possible to minimize blocking other threads still
-  // trying to profile instance checks.
-  typedef std::pair<const StringData*, unsigned> Count;
-  std::vector<Count> counts;
-  uint64_t total = 0;
-  {
-    // If you think of the read-write lock as a shared-exclusive lock instead,
-    // the fact that we're grabbing a write lock to iterate over the table
-    // makes more sense: it's safe to concurrently modify a
-    // tbb::concurrent_hash_map, but iteration is not guaranteed to be safe
-    // with concurrent insertions.
-    WriteLock l(s_instanceCountsLock);
-    for (auto& pair : s_instanceCounts) {
-      counts.push_back(pair);
-      total += pair.second;
-    }
-  }
-  std::sort(counts.begin(), counts.end(), [&](const Count& a, const Count& b) {
-    return a.second > b.second;
-  });
-
-  // Next, initialize s_instanceBits with the top 127 most checked classes. Bit
-  // 0 is reserved as an 'initialized' flag
-  unsigned i = 1;
-  uint64_t accum = 0;
-  for (auto& item : counts) {
-    if (i >= kInstanceBits) break;
-    s_instanceBits[item.first] = i;
-    accum += item.second;
-    ++i;
-  }
-
-  // Print out stats about what we ended up using
-  if (Trace::moduleEnabledRelease(Trace::instancebits, 1)) {
-    Trace::traceRelease("%s: %u classes, %u (%.2f%%) of warmup checks\n",
-                        __FUNCTION__, i-1, accum, 100.0 * accum / total);
-    if (Trace::moduleEnabledRelease(Trace::instancebits, 2)) {
-      accum = 0;
-      i = 1;
-      for (auto& pair : counts) {
-        if (i >= 256) {
-          Trace::traceRelease("skipping the remainder of the %llu classes\n",
-                              counts.size());
-          break;
-        }
-        accum += pair.second;
-        Trace::traceRelease("%3u %5.2f%% %7u -- %6.2f%% %7u %s\n",
-                            i++, 100.0 * pair.second / total, pair.second,
-                            100.0 * accum / total, accum,
-                            pair.first->data());
-      }
-    }
-  }
-
-  // Finally, update m_instanceBits on every Class that currently exists. This
-  // must be done while holding a lock that blocks insertion of new Classes
-  // into their class lists, but in practice most Classes will already be
-  // created by now and this process takes at most 10ms.
-  WriteLock l(s_instanceBitsLock);
-  for (AllClasses ac; !ac.empty(); ) {
-    Class* c = ac.popFront();
-    c->setInstanceBitsAndParents();
-  }
-
-  s_instanceBitsInit.store(true, std::memory_order_release);
-}
-
-void Class::profileInstanceOf(const StringData* name) {
-  assert(name->isStatic());
-  unsigned inc = 1;
-  Class* c = Unit::lookupClass(name);
-  if (c && (c->attrs() & AttrInterface)) {
-    // Favor interfaces
-    inc = 250;
-  }
-  InstanceCounts::accessor acc;
-
-  // The extra layer of locking is here so that initInstanceBits can safely
-  // iterate over s_instanceCounts while building its map of names to bits.
-  ReadLock l(s_instanceCountsLock);
-  if (!s_instanceCounts.insert(acc, InstanceCounts::value_type(name, inc))) {
-    acc->second += inc;
-  }
-}
-
-bool Class::haveInstanceBit(const StringData* name) {
-  assert(Transl::Translator::WriteLease().amOwner());
-  assert(s_instanceBitsInit.load(std::memory_order_acquire));
-  return mapContains(s_instanceBits, name);
-}
-
-bool Class::getInstanceBitMask(const StringData* name,
-                               int& offset, uint8_t& mask) {
-  assert(Transl::Translator::WriteLease().amOwner());
-  assert(s_instanceBitsInit.load(std::memory_order_acquire));
-  const size_t bitWidth = sizeof(mask) * CHAR_BIT;
-  unsigned bit;
-  if (!mapGet(s_instanceBits, name, &bit)) return false;
-  assert(bit >= 1 && bit < kInstanceBits);
-  offset = offsetof(Class, m_instanceBits) + bit / bitWidth * sizeof(mask);
-  mask = 1u << (bit % bitWidth);
-  return true;
-}
-
 /*
- * Check whether a Class from a previous request is available to be defined.
- * The caller should check that it has the same preClass that is being defined.
- * Being available means that the parent, the interfaces and the traits are
- * already defined (or become defined via autoload, if tryAutoload is true).
+ * Check whether a Class from a previous request is available to be
+ * defined.  The caller should check that it has the same preClass that is
+ * being defined.  Being available means that the parent, the interfaces
+ * and the traits are already defined (or become defined via autoload, if
+ * tryAutoload is true).
  *
- * returns AvailTrue - if it is available
- *         AvailFail - if it is impossible to define the class at this point
- *         AvailFalse- if this particular Class* cant be defined at this point
+ * returns Avail::True - if it is available
+ *         Avail::Fail - if it is impossible to define the class at this point
+ *         Avail::False- if this particular Class* cant be defined at this point
  *
- * Note that AvailFail means that at least one of the parent, interfaces and
- * traits was not defined at all, while AvailFalse means that at least one
- * was defined but did not correspond to this Class*
+ * Note that Fail means that at least one of the parent, interfaces and
+ * traits was not defined at all, while False means that at least one was
+ * defined but did not correspond to this Class*
  *
- * The parent parameter is used for two purposes: first it avoids looking up the
- * active parent class for each potential Class*; and second its used on
- * AvailFail to return the problem class so the caller can report the error
- * correctly.
+ * The parent parameter is used for two purposes: first it avoids looking
+ * up the active parent class for each potential Class*; and second its
+ * used on Fail to return the problem class so the caller can report the
+ * error correctly.
  */
 Class::Avail Class::avail(Class*& parent, bool tryAutoload /*=false*/) const {
   if (Class *ourParent = m_parent.get()) {
@@ -735,39 +396,65 @@ Class::Avail Class::avail(Class*& parent, bool tryAutoload /*=false*/) const {
       parent = Unit::getClass(ppcls->namedEntity(), ppcls->name(), tryAutoload);
       if (!parent) {
         parent = ourParent;
-        return AvailFail;
+        return Avail::Fail;
       }
     }
-    if (parent != ourParent) return AvailFalse;
+    if (parent != ourParent) {
+      if (UNLIKELY(ourParent->isZombie())) {
+        const_cast<Class*>(this)->destroy();
+      }
+      return Avail::False;
+    }
   }
-  for (size_t i = 0, nInterfaces = m_declInterfaces.size();
-       i < nInterfaces; ++i) {
-    Class* declInterface = m_declInterfaces[i].get();
+  for (auto const& di : declInterfaces()) {
+    Class* declInterface = di.get();
     PreClass *pint = declInterface->m_preClass.get();
     Class* interface = Unit::getClass(pint->namedEntity(), pint->name(),
                                       tryAutoload);
     if (interface != declInterface) {
       if (interface == nullptr) {
         parent = declInterface;
-        return AvailFail;
+        return Avail::Fail;
       }
-      return AvailFalse;
+      if (UNLIKELY(declInterface->isZombie())) {
+        const_cast<Class*>(this)->destroy();
+      }
+      return Avail::False;
     }
   }
-  for (size_t i = 0; i < m_usedTraits.size(); i++) {
-    Class* usedTrait = m_usedTraits[i].get();
+  for (auto const& ut : m_usedTraits) {
+    Class* usedTrait = ut.get();
     PreClass* ptrait = usedTrait->m_preClass.get();
     Class* trait = Unit::getClass(ptrait->namedEntity(), ptrait->name(),
                                   tryAutoload);
     if (trait != usedTrait) {
       if (trait == nullptr) {
         parent = usedTrait;
-        return AvailFail;
+        return Avail::Fail;
       }
-      return AvailFalse;
+      if (UNLIKELY(usedTrait->isZombie())) {
+        const_cast<Class*>(this)->destroy();
+      }
+      return Avail::False;
     }
   }
-  return AvailTrue;
+  return Avail::True;
+}
+
+const Class* Class::commonAncestor(const Class* cls) const {
+  assert(isNormalClass(this) && isNormalClass(cls));
+
+  // Walk up m_classVec for both classes to look for a common ancestor.
+  auto vecIdx = std::min(m_classVecLen, cls->m_classVecLen) - 1;
+  do {
+    assert(vecIdx >= 0 &&
+           vecIdx < m_classVecLen && vecIdx < cls->m_classVecLen);
+    if (m_classVec[vecIdx] == cls->m_classVec[vecIdx]) {
+      return m_classVec[vecIdx];
+    }
+  } while (vecIdx--);
+
+  return nullptr;
 }
 
 void Class::initialize(TypedValue*& sProps) const {
@@ -778,8 +465,8 @@ void Class::initialize(TypedValue*& sProps) const {
   }
   // The asymmetry between the logic around initProps() above and initSProps()
   // below is due to the fact that instance properties only require storage in
-  // g_vmContext if there are non-scalar initializers involved, whereas static
-  // properties *always* require storage in g_vmContext.
+  // g_context if there are non-scalar initializers involved, whereas static
+  // properties *always* require storage in g_context.
   if (numStaticProperties() > 0) {
     if ((sProps = getSPropData()) == nullptr) {
       sProps = initSProps();
@@ -799,73 +486,29 @@ Class::PropInitVec* Class::initPropsImpl() const {
   assert(getPropData() == nullptr);
   // Copy initial values for properties to a new vector that can be used to
   // complete initialization for non-scalar properties via the iterative
-  // 86pinit() calls below. 86pinit() takes a reference to an array that
-  // contains the initial property values; alias propVec inside propArr such
-  // that propVec contains complete property initialization values as soon as
-  // the 86pinit() calls are done.
-  PropInitVec* propVec = PropInitVec::allocInRequestArena(m_declPropInit);
-  size_t nProps = numDeclProperties();
+  // 86pinit() calls below. 86pinit() takes a reference to an array to populate
+  // with initial property values; after it completes, we copy the values into
+  // the new propVec.
+  auto propVec = PropInitVec::allocWithSmartAllocator(m_declPropInit);
 
-  // During property initialization, we provide access to the
-  // properties by name via this NameValueTable.
+  setPropData(propVec);
 
-  // Note that constructing these on the stack is slightly
-  // risky; we're relying on nobody getting hold of references
-  // to them. Also note that the assert on the refCount below
-  // is quite inadequate; the only way for these to leak is if
-  // an error occurs - but in that case, we wont reach the assert
-  // However, since we dont /want/ these to leak into the backtrace,
-  // we prevent it by setting AttrNoInjection (see Func::init)
-  NameValueTable propNvt(numDeclProperties());
-  NameValueTableWrapper propArr(&propNvt);
-  // bump the refCount until we have a real reference to it
-  propArr.incRefCount();
-
-  // Insert propArr and sentinel into the args array, transferring ownership.
-  ArrayData* args = ArrayData::Make(2);
-  args->incRefCount();
-  {
-    // the first argument is byRef. Make a reference,
-    // and hold its refCount above one until after the call
-    Variant arg0(&propArr);
-    // match the incRef above, now we have an owner
-    propArr.decRefCount();
-    args = args->appendRef(arg0, 0);
-    {
-      // Create a sentinel that uniquely identifies uninitialized properties.
-      ObjectData* sentinel = SystemLib::AllocPinitSentinel();
-      sentinel->incRefCount();
-      TypedValue tv;
-      tv.m_data.pobj = sentinel;
-      tv.m_type = KindOfObject;
-      args = args->append(tvAsCVarRef(&tv), false);
-      sentinel->decRefCount();
-    }
-    TypedValue* tvSentinel = args->nvGetValueRef(1);
-    for (size_t i = 0; i < nProps; ++i) {
-      TypedValue& prop = (*propVec)[i];
-      if (prop.m_type == KindOfUninit) {
-        // Replace undefined values with tvSentinel, which acts as a
-        // unique sentinel for undefined properties in 86pinit().
-        tvDup(tvSentinel, &prop);
-      }
-      // We have to use m_originalMangledName here because the
-      // 86pinit methods for traits depend on it
-      const StringData* k = (m_declProperties[i].m_attrs & AttrPrivate)
-        ? m_declProperties[i].m_originalMangledName
-        : m_declProperties[i].m_name;
-      propNvt.migrateSet(k, &prop);
-    }
+  try {
     // Iteratively invoke 86pinit() methods upward
     // through the inheritance chain.
-    for (Class::InitVec::const_reverse_iterator it = m_pinitVec.rbegin();
-         it != m_pinitVec.rend(); ++it) {
+    for (auto it = m_pinitVec.rbegin(); it != m_pinitVec.rend(); ++it) {
       TypedValue retval;
-      g_vmContext->invokeFunc(&retval, *it, args, nullptr,
+      g_context->invokeFunc(&retval, *it, init_null_variant, nullptr,
                               const_cast<Class*>(this));
-      assert(!IS_REFCOUNTED_TYPE(retval.m_type));
+      assert(retval.m_type == KindOfNull);
     }
+  } catch (...) {
+    // Undo the allocation of propVec
+    smart_delete_array(propVec->begin(), propVec->size());
+    smart_delete(propVec);
+    throw;
   }
+
   // For properties that do not require deep initialization, promote strings
   // and arrays that came from 86pinit to static. This allows us to initialize
   // object properties very quickly because we can just memcpy and we don't
@@ -873,8 +516,7 @@ Class::PropInitVec* Class::initPropsImpl() const {
   // For properties that require "deep" initialization, we have to do a little
   // more work at object creation time.
   Slot slot = 0;
-  for (PropInitVec::iterator it = propVec->begin();
-       it != propVec->end(); ++it, ++slot) {
+  for (auto it = propVec->begin(); it != propVec->end(); ++it, ++slot) {
     TypedValueAux* tv = &(*it);
     // Set deepInit if the property requires "deep" initialization.
     if (m_declProperties[slot].m_attrs & AttrDeepInit) {
@@ -884,11 +526,7 @@ Class::PropInitVec* Class::initPropsImpl() const {
       tv->deepInit() = false;
     }
   }
-  // Free the args array.  propArr is allocated on the stack so it better be
-  // only referenced from args.
-  assert(propArr.getCount() == 1);
-  assert(args->getCount() == 1);
-  decRefArr(args);
+
   return propVec;
 }
 
@@ -898,7 +536,7 @@ Slot Class::getDeclPropIndex(Class* ctx, const StringData* key,
   if (propInd != kInvalidSlot) {
     Attr attrs = m_declProperties[propInd].m_attrs;
     if ((attrs & (AttrProtected|AttrPrivate)) &&
-        !g_vmContext->getDebuggerBypassCheck()) {
+        !g_context->debuggerSettings.bypassCheck) {
       // Fetch 'baseClass', which is the class in the inheritance
       // tree which first declared the property
       Class* baseClass = m_declProperties[propInd].m_class;
@@ -922,7 +560,9 @@ Slot Class::getDeclPropIndex(Class* ctx, const StringData* key,
         // private property with this name.
         accessible = false;
       } else {
-        if (ctx->classof(baseClass)) {
+        if (ctx == (Class*)-1 || ctx->classof(baseClass)) {
+          // the special ctx (Class*)-1 is used by unserialization to
+          // mean that protected properties are ok. Otherwise,
           // ctx is derived from baseClass, so we know this protected
           // property is accessible and we know ctx cannot have private
           // property with the same name, so we're done.
@@ -962,7 +602,7 @@ Slot Class::getDeclPropIndex(Class* ctx, const StringData* key,
   }
   // If ctx is an ancestor of this, check if ctx has a private property
   // with the same name.
-  if (ctx && classof(ctx)) {
+  if (ctx && ctx != (Class*)-1 && classof(ctx)) {
     Slot ctxPropInd = ctx->lookupDeclProp(key);
     if (ctxPropInd != kInvalidSlot &&
         ctx->m_declProperties[ctxPropInd].m_class == ctx &&
@@ -977,75 +617,50 @@ Slot Class::getDeclPropIndex(Class* ctx, const StringData* key,
 }
 
 TypedValue* Class::initSPropsImpl() const {
-  assert(numStaticProperties() > 0);
   assert(getSPropData() == nullptr);
+
+  // Initialize static props for parent
+  Class* parent = this->parent();
+  if (parent && parent->getSPropData() == nullptr) {
+    parent->initSPropsImpl();
+  }
+
+  if (!numStaticProperties()) return nullptr;
+
   // Create an array that is initially large enough to hold all static
   // properties.
   TypedValue* const spropTable =
-    new (request_arena()) TypedValue[m_staticProperties.size()];
+    smart_new_array<TypedValue>(m_staticProperties.size());
+  memset(spropTable, 0, m_staticProperties.size() * sizeof(TypedValue));
+  setSPropData(spropTable);
 
-  boost::optional<NameValueTable> nvt;
   const bool hasNonscalarInit = !m_sinitVec.empty();
+
+  // If there are non-scalar initializers (i.e. 86sinit methods), run them now.
+  // They'll put their initialized values into an array, and we'll read any
+  // values we need out of the array later.
   if (hasNonscalarInit) {
-    nvt = boost::in_place<NameValueTable>(m_staticProperties.size());
+    for (unsigned i = 0; i < m_sinitVec.size(); i++) {
+      TypedValue retval;
+      g_context->invokeFunc(&retval, m_sinitVec[i], init_null_variant,
+                              nullptr, const_cast<Class*>(this));
+      assert(retval.m_type == KindOfNull);
+    }
   }
 
-  // Iteratively initialize properties.  Non-scalar initializers are
-  // initialized to KindOfUninit here, and the 86sinit()-based initialization
-  // finishes the job later.
   for (Slot slot = 0; slot < m_staticProperties.size(); ++slot) {
-    const SProp& sProp = m_staticProperties[slot];
+    auto const& sProp = m_staticProperties[slot];
+    auto const* propName = sProp.m_name;
 
-    TypedValue* storage = 0;
     if (sProp.m_class == this) {
-      // Embed static property value directly in array.
-      assert(tvIsStatic(&sProp.m_val));
-      spropTable[slot] = sProp.m_val;
-      storage = &spropTable[slot];
-    } else {
-      // Alias parent class's static property.
-      bool visible, accessible;
-      storage = sProp.m_class->getSProp(nullptr, sProp.m_name, visible,
-                                        accessible);
-      tvBindIndirect(&spropTable[slot], storage);
-    }
-
-    if (hasNonscalarInit) {
-      nvt->migrateSet(sProp.m_name, storage);
-    }
-  }
-
-  // Invoke 86sinit's if necessary, to handle non-scalar initializers.
-  if (hasNonscalarInit) {
-    // See note in initPropsImpl for why its ok to allocate
-    // this on the stack.
-    NameValueTableWrapper nvtWrapper(&*nvt);
-    nvtWrapper.incRefCount();
-
-    ArrayData* args = ArrayData::Make(1);
-    args->incRefCount();
-    try {
-      {
-        Variant arg0(&nvtWrapper);
-        args = args->appendRef(arg0, false);
-
-        for (unsigned i = 0; i < m_sinitVec.size(); i++) {
-          TypedValue retval;
-          g_vmContext->invokeFunc(&retval, m_sinitVec[i], args, nullptr,
-                                  const_cast<Class*>(this));
-          assert(!IS_REFCOUNTED_TYPE(retval.m_type));
-        }
+      if (spropTable[slot].m_type == KindOfUninit) {
+        spropTable[slot] = sProp.m_val;
       }
-      // Release the args array.  nvtWrapper is on the stack, so it
-      // better have a single reference.
-      assert(args->getCount() == 1);
-      args->release();
-      assert(nvtWrapper.getCount() == 1);
-    } catch (...) {
-      assert(args->getCount() == 1);
-      args->release();
-      assert(nvtWrapper.getCount() == 1);
-      throw;
+    } else {
+      bool visible, accessible;
+      auto* storage = sProp.m_class->getSProp(nullptr, propName,
+                                              visible, accessible);
+      tvBindIndirect(&spropTable[slot], storage);
     }
   }
 
@@ -1079,7 +694,7 @@ TypedValue* Class::getSProp(Class* ctx, const StringData* sPropName,
       case AttrPublic:
       case AttrProtected: accessible = true; break;
       case AttrPrivate:
-        accessible = g_vmContext->getDebuggerBypassCheck(); break;
+        accessible = g_context->debuggerSettings.bypassCheck; break;
       default:            not_reached();
       }
     } else {
@@ -1089,7 +704,7 @@ TypedValue* Class::getSProp(Class* ctx, const StringData* sPropName,
       case AttrPublic:    accessible = true; break;
       case AttrProtected:
       case AttrPrivate:
-        accessible = g_vmContext->getDebuggerBypassCheck(); break;
+        accessible = g_context->debuggerSettings.bypassCheck; break;
       default:            not_reached();
       }
     }
@@ -1117,81 +732,69 @@ TypedValue Class::getStaticPropInitVal(const SProp& prop) {
   return declCls->m_staticProperties[s].m_val;
 }
 
-HphpArray* Class::initClsCnsData() const {
-  Slot nConstants = m_constants.size();
-  HphpArray* constants = ArrayData::Make(nConstants);
-  constants->incRefCount();
-
-  if (m_parent.get() != nullptr) {
-    if (g_vmContext->getClsCnsData(m_parent.get()) == nullptr) {
-      // Initialize recursively up the inheritance chain.
-      m_parent->initClsCnsData();
-    }
-  }
-
-  for (Slot i = 0; i < nConstants; ++i) {
-    const Const& constant = m_constants[i];
-    const TypedValue* tv = &constant.m_val;
-    constants->set((StringData*)constant.m_name, tvAsCVarRef(tv), false);
-    // XXX: set() converts KindOfUninit to KindOfNull, but our class
-    // constant logic needs to store KindOfUninit to indicate the the
-    // constant's value has not been computed yet. We should find a better
-    // way to deal with this.
-    if (tv->m_type == KindOfUninit) {
-      constants->nvGetValueRef(i)->m_type = KindOfUninit;
-    }
-  }
-
-  g_vmContext->setClsCnsData(this, constants);
-  return constants;
-}
-
-TypedValue* Class::cnsNameToTV(const StringData* clsCnsName,
-                               Slot& clsCnsInd) const {
+Cell* Class::cnsNameToTV(const StringData* clsCnsName,
+                         Slot& clsCnsInd) const {
   clsCnsInd = m_constants.findIndex(clsCnsName);
   if (clsCnsInd == kInvalidSlot) {
     return nullptr;
   }
-  return const_cast<TypedValue*>(&m_constants[clsCnsInd].m_val);
+  auto const ret = const_cast<Cell*>(&m_constants[clsCnsInd].m_val);
+  assert(cellIsPlausible(*ret));
+  return ret;
 }
 
-TypedValue* Class::clsCnsGet(const StringData* clsCnsName) const {
+Cell Class::clsCnsGet(const StringData* clsCnsName) const {
   Slot clsCnsInd;
-  TypedValue* clsCns = cnsNameToTV(clsCnsName, clsCnsInd);
-  if (!clsCns || clsCns->m_type != KindOfUninit) {
-    return clsCns;
+  Cell* clsCns = cnsNameToTV(clsCnsName, clsCnsInd);
+  if (!clsCns) return make_tv<KindOfUninit>();
+  if (clsCns->m_type != KindOfUninit) {
+    return *clsCns;
   }
 
-  // This constant has a non-scalar initializer, so look in g_vmContext for
-  // an entry associated with this class.
-  HphpArray* clsCnsData = g_vmContext->getClsCnsData(this);
-  if (clsCnsData == nullptr) {
-    clsCnsData = initClsCnsData();
+  // This constant has a non-scalar initializer, meaning it will be
+  // potentially different in different requests, which we store
+  // separately in an array living off in RDS.
+  m_nonScalarConstantCache.bind();
+  auto& clsCnsData = *m_nonScalarConstantCache;
+
+  if (clsCnsData.get() == nullptr) {
+    clsCnsData = Array::attach(HphpArray::MakeReserve(m_constants.size()));
+  } else {
+    clsCns = clsCnsData->nvGet(clsCnsName);
+    if (clsCns) return *clsCns;
   }
 
-  clsCns = clsCnsData->nvGetValueRef(clsCnsInd);
-  if (clsCns->m_type == KindOfUninit) {
-    // The class constant has not been initialized yet; do so.
-    static StringData* sd86cinit = StringData::GetStaticString("86cinit");
-    const Func* meth86cinit =
-      m_constants[clsCnsInd].m_class->lookupMethod(sd86cinit);
-    TypedValue tv[1];
-    tv->m_data.pstr = (StringData*)clsCnsName;
-    tv->m_type = KindOfString;
-    clsCnsName->incRefCount();
-    g_vmContext->invokeFuncFew(clsCns, meth86cinit, ActRec::encodeClass(this),
-                               nullptr, 1, tv);
-  }
-  return clsCns;
+  // The class constant has not been initialized yet; do so.
+  static auto const sd86cinit = makeStaticString("86cinit");
+  auto const meth86cinit =
+    m_constants[clsCnsInd].m_class->lookupMethod(sd86cinit);
+  TypedValue args[1] = {
+    make_tv<KindOfStaticString>(
+      const_cast<StringData*>(m_constants[clsCnsInd].m_name))
+  };
+
+  Cell ret;
+  g_context->invokeFuncFew(
+    &ret,
+    meth86cinit,
+    ActRec::encodeClass(this),
+    nullptr,
+    1,
+    args
+  );
+  assert(isUncounted(ret));
+
+  clsCnsData.set(StrNR(clsCnsName), cellAsCVarRef(ret), true /* isKey */);
+
+  assert(cellIsPlausible(ret));
+  return ret;
 }
 
-/*
- * Class::clsCnsType: provide the current runtime type of this class
- *   constant. This has predictive value for the translator.
- */
 DataType Class::clsCnsType(const StringData* cnsName) const {
   Slot slot;
-  TypedValue* cns = cnsNameToTV(cnsName, slot);
+  auto const cns = cnsNameToTV(cnsName, slot);
+  // TODO(#2913342): lookup the constant in RDS in case it's dynamic
+  // and already initialized.
   if (!cns) return KindOfUninit;
   return cns->m_type;
 }
@@ -1202,10 +805,11 @@ void Class::setParent() {
     Attr attrs = m_parent->attrs();
     if (UNLIKELY(attrs & (AttrFinal | AttrInterface | AttrTrait))) {
       static StringData* sd___MockClass =
-        StringData::GetStaticString("__MockClass");
+        makeStaticString("__MockClass");
       if (!(attrs & AttrFinal) ||
           m_preClass->userAttributes().find(sd___MockClass) ==
-          m_preClass->userAttributes().end()) {
+          m_preClass->userAttributes().end() ||
+          m_parent->isCollectionClass()) {
         raise_error("Class %s may not inherit from %s (%s)",
                     m_preClass->name()->data(),
                     ((attrs & AttrFinal)     ? "final class" :
@@ -1214,42 +818,75 @@ void Class::setParent() {
       }
     }
   }
+
   // Cache m_preClass->attrs()
   m_attrCopy = m_preClass->attrs();
+
   // Handle stuff specific to cppext classes
   if (m_preClass->instanceCtor()) {
-    m_InstanceCtor = m_preClass->instanceCtor();
-    m_builtinPropSize = m_preClass->builtinPropSize();
+    m_instanceCtor = m_preClass->instanceCtor();
+    m_instanceDtor = m_preClass->instanceDtor();
+    m_builtinODTailSize = m_preClass->builtinObjSize() -
+      m_preClass->builtinODOffset();
     m_clsInfo = ClassInfo::FindSystemClassInterfaceOrTrait(nameRef());
   } else if (m_parent.get()) {
-    m_InstanceCtor = m_parent->m_InstanceCtor;
-    m_builtinPropSize = m_parent->m_builtinPropSize;
+    m_instanceCtor = m_parent->m_instanceCtor;
+    m_instanceDtor = m_parent->m_instanceDtor;
+    m_builtinODTailSize = m_parent->m_builtinODTailSize;
+    // XXX: should this be copying over the clsInfo also?  Might be
+    // broken...
   }
 }
 
 static Func* findSpecialMethod(Class* cls, const StringData* name) {
   if (!cls->preClass()->hasMethod(name)) return nullptr;
   Func* f = cls->preClass()->lookupMethod(name);
-  f = f->clone();
+  f = f->clone(cls);
   f->setNewFuncId();
-  f->setCls(cls);
   f->setBaseCls(cls);
   f->setHasPrivateAncestor(false);
   return f;
 }
 
-void Class::setSpecial() {
-  static StringData* sd_toString = StringData::GetStaticString("__toString");
-  static StringData* sd_uuconstruct =
-    StringData::GetStaticString("__construct");
-  static StringData* sd_uudestruct =
-    StringData::GetStaticString("__destruct");
+const StaticString
+  s_toString("__toString"),
+  s_construct("__construct"),
+  s_destruct("__destruct"),
+  s_invoke("__invoke"),
+  s_sleep("__sleep"),
+  s_get("__get"),
+  s_set("__set"),
+  s_isset("__isset"),
+  s_unset("__unset"),
+  s_call("__call"),
+  s_callStatic("__callStatic"),
+  s_clone("__clone");
 
-  m_toString = lookupMethod(sd_toString);
-  m_dtor = lookupMethod(sd_uudestruct);
+void Class::setSpecial() {
+  m_toString = lookupMethod(s_toString.get());
+  m_dtor = lookupMethod(s_destruct.get());
+
+  /*
+   * The invoke method is only cached in the Class for a fast path JIT
+   * translation.  If someone defines a weird __invoke (e.g. as a
+   * static method), we don't bother caching it here so the translated
+   * code won't have to check for that case.
+   *
+   * Note that AttrStatic on a closure's __invoke Func* means it is a
+   * static closure---but the call to __invoke still works as if it
+   * were a non-static method call---so they are excluded from that
+   * here.  (The closure prologue uninstalls the $this and installs
+   * the appropriate static context.)
+   */
+  m_invoke = lookupMethod(s_invoke.get());
+  if (m_invoke &&
+      (m_invoke->attrs() & AttrStatic) &&
+       !m_invoke->isClosureBody()) {
+    m_invoke = nullptr;
+  }
 
   // Look for __construct() declared in either this class or a trait
-  Func* fConstruct = lookupMethod(sd_uuconstruct);
+  Func* fConstruct = lookupMethod(s_construct.get());
   if (fConstruct && (fConstruct->preClass() == m_preClass.get() ||
                      fConstruct->preClass()->attrs() & AttrTrait)) {
     m_ctor = fConstruct;
@@ -1281,7 +918,7 @@ void Class::setSpecial() {
   // Use 86ctor(), since no program-supplied constructor exists
   m_ctor = findSpecialMethod(this, sd86ctor);
   assert(m_ctor && "class had no user-defined constructor or 86ctor");
-  assert((m_ctor->attrs() & ~AttrBuiltin) ==
+  assert((m_ctor->attrs() & ~AttrBuiltin & ~AttrAbstract) ==
          (AttrPublic|AttrNoInjection|AttrPhpLeafFn));
 }
 
@@ -1289,8 +926,7 @@ void Class::applyTraitPrecRule(const PreClass::TraitPrecRule& rule,
                                MethodToTraitListMap& importMethToTraitMap) {
   const StringData* methName          = rule.getMethodName();
   const StringData* selectedTraitName = rule.getSelectedTraitName();
-  TraitNameSet      otherTraitNames;
-  rule.getOtherTraitNames(otherTraitNames);
+  auto otherTraitNames = rule.getOtherTraitNames();
 
   auto methIter = importMethToTraitMap.find(methName);
   if (methIter == importMethToTraitMap.end()) {
@@ -1316,33 +952,35 @@ void Class::applyTraitPrecRule(const PreClass::TraitPrecRule& rule,
 
   // Check error conditions
   if (!foundSelectedTrait) {
-    raise_error("unknown trait '%s'", selectedTraitName->data());
+    raise_error(Strings::TRAITS_UNKNOWN_TRAIT, selectedTraitName->data());
   }
   if (otherTraitNames.size()) {
-    raise_error("unknown trait '%s'", (*otherTraitNames.begin())->data());
+    raise_error(Strings::TRAITS_UNKNOWN_TRAIT,
+                (*otherTraitNames.begin())->data());
   }
 }
 
-ClassPtr Class::findSingleTraitWithMethod(const StringData* methName) {
+Class* Class::findSingleTraitWithMethod(const StringData* methName) {
   // Note: m_methods includes methods from parents / traits recursively
-  ClassPtr traitCls = ClassPtr();
-  for (size_t t = 0; t < m_usedTraits.size(); t++) {
-    if (m_usedTraits[t]->m_methods.contains(methName)) {
-      if (traitCls.get() != nullptr) { // more than one trait contains method
-        return ClassPtr();
+  Class* traitCls = nullptr;
+  for (auto const& t : m_usedTraits) {
+    if (t->m_methods.contains(methName)) {
+      if (traitCls != nullptr) { // more than one trait contains method
+        raise_error("more than one trait contains method '%s'",
+          methName->data());
       }
-      traitCls = m_usedTraits[t];
+      traitCls = t.get();
     }
   }
   return traitCls;
 }
 
 void Class::setImportTraitMethodModifiers(TraitMethodList& methList,
-                                          ClassPtr         traitCls,
+                                          Class*           traitCls,
                                           Attr             modifiers) {
   for (TraitMethodList::iterator iter = methList.begin();
        iter != methList.end(); iter++) {
-    if (iter->m_trait.get() == traitCls.get()) {
+    if (iter->m_trait == traitCls) {
       iter->m_modifiers = modifiers;
       return;
     }
@@ -1357,9 +995,26 @@ void Class::addTraitAlias(const StringData* traitName,
   char buf[traitName->size() + origMethName->size() + 9];
   sprintf(buf, "%s::%s", (traitName->empty() ? "(null)" : traitName->data()),
           origMethName->data());
-  const StringData* origName = StringData::GetStaticString(buf);
+  const StringData* origName = makeStaticString(buf);
   m_traitAliases.push_back(std::pair<const StringData*, const StringData*>
                            (newMethName, origName));
+}
+
+// not const due to memoization
+const Class::TraitAliasVec& Class::traitAliases() {
+
+  // We keep track of trait aliases in the class only to support
+  // ReflectionClass::getTraitAliases. So let's load this info from the
+  // preClass only on demand.
+  auto const& preClassRules = m_preClass->traitAliasRules();
+  if (m_traitAliases.size() != preClassRules.size()) {
+    for (auto const& rule : preClassRules) {
+      addTraitAlias(rule.getTraitName(),
+                    rule.getOrigMethodName(),
+                    rule.getNewMethodName());
+    }
+  }
+  return m_traitAliases;
 }
 
 void Class::applyTraitAliasRule(const PreClass::TraitAliasRule& rule,
@@ -1368,15 +1023,15 @@ void Class::applyTraitAliasRule(const PreClass::TraitAliasRule& rule,
   const StringData* origMethName = rule.getOrigMethodName();
   const StringData* newMethName  = rule.getNewMethodName();
 
-  ClassPtr traitCls;
+  Class* traitCls = nullptr;
   if (traitName->empty()) {
     traitCls = findSingleTraitWithMethod(origMethName);
   } else {
     traitCls = Unit::loadClass(traitName);
   }
 
-  if (!traitCls.get() || (!(traitCls->attrs() & AttrTrait))) {
-    raise_error("unknown trait '%s'", traitName->data());
+  if (!traitCls || (!(traitCls->attrs() & AttrTrait))) {
+    raise_error(Strings::TRAITS_UNKNOWN_TRAIT, traitName->data());
   }
 
   // Save info to support ReflectionClass::getTraitAliases
@@ -1384,7 +1039,7 @@ void Class::applyTraitAliasRule(const PreClass::TraitAliasRule& rule,
 
   Func* traitMeth = traitCls->lookupMethod(origMethName);
   if (!traitMeth) {
-    raise_error("unknown trait method '%s'", origMethName->data());
+    raise_error(Strings::TRAITS_UNKNOWN_TRAIT_METHOD, origMethName->data());
   }
 
   Attr ruleModifiers;
@@ -1399,26 +1054,20 @@ void Class::applyTraitAliasRule(const PreClass::TraitAliasRule& rule,
       importMethToTraitMap[newMethName].push_back(traitMethod);
     }
   }
-  if (ruleModifiers & AttrStatic) {
-    raise_error("cannot use 'static' as access modifier");
-  }
 }
 
 void Class::applyTraitRules(MethodToTraitListMap& importMethToTraitMap) {
-  for (size_t i = 0; i < m_preClass->traitPrecRules().size(); i++) {
-    applyTraitPrecRule(m_preClass->traitPrecRules()[i],
-                       importMethToTraitMap);
+  for (auto const& precRule : m_preClass->traitPrecRules()) {
+    applyTraitPrecRule(precRule, importMethToTraitMap);
   }
-  for (size_t i = 0; i < m_preClass->traitAliasRules().size(); i++) {
-    applyTraitAliasRule(m_preClass->traitAliasRules()[i],
-                        importMethToTraitMap);
+  for (auto const& aliasRule : m_preClass->traitAliasRules()) {
+    applyTraitAliasRule(aliasRule, importMethToTraitMap);
   }
 }
 
 void Class::importTraitMethod(const TraitMethod&  traitMethod,
                               const StringData*   methName,
                               MethodMap::Builder& builder) {
-  ClassPtr trait     = traitMethod.m_trait;
   Func*    method    = traitMethod.m_method;
   Attr     modifiers = traitMethod.m_modifiers;
 
@@ -1449,9 +1098,9 @@ void Class::importTraitMethod(const TraitMethod&  traitMethod,
     }
     parentMethod = existingMethod;
   }
-  Func* f = method->clone();
+  Func* f = method->clone(this);
   f->setNewFuncId();
-  f->setClsAndName(this, methName);
+  f->setName(methName);
   f->setAttrs(modifiers);
   if (!parentMethod) {
     // New method
@@ -1521,8 +1170,8 @@ void Class::importTraitMethods(MethodMap::Builder& builder) {
   MethodToTraitListMap importMethToTraitMap;
 
   // 1. Find all methods to be imported
-  for (size_t t = 0; t < m_usedTraits.size(); t++) {
-    ClassPtr trait = m_usedTraits[t];
+  for (auto const& t : m_usedTraits) {
+    Class* trait = t.get();
     for (Slot i = 0; i < trait->m_methods.size(); ++i) {
       Func* method = trait->m_methods[i];
       const StringData* methName = method->name();
@@ -1555,7 +1204,7 @@ void Class::importTraitMethods(MethodMap::Builder& builder) {
       // OK if the class will override the method...
       if (m_preClass->hasMethod(iter->first)) continue;
 
-      raise_error("method '%s' declared in multiple traits",
+      raise_error(Strings::METHOD_IN_MULTIPLE_TRAITS,
                   iter->first->data());
     }
 
@@ -1571,7 +1220,7 @@ void Class::methodOverrideCheck(const Func* parentMethod, const Func* method) {
 
   if ((parentMethod->attrs() & AttrFinal)) {
     static StringData* sd___MockClass =
-      StringData::GetStaticString("__MockClass");
+      makeStaticString("__MockClass");
     if (m_preClass->userAttributes().find(sd___MockClass) ==
         m_preClass->userAttributes().end()) {
       raise_error("Cannot override final method %s::%s()",
@@ -1604,6 +1253,11 @@ void Class::methodOverrideCheck(const Func* parentMethod, const Func* method) {
                 (method->attrs() & AttrStatic) ? "" : "non-",
                 m_preClass->name()->data());
   }
+
+  // This used to be a global bool that guarded all bug-for-bug
+  // compatibility with hphpi, but it's moved here because this is the
+  // last use site.  (We need to evaluate if we can remove this one.)
+  const bool hphpiCompat = true;
 
   Func* baseMethod = parentMethod->baseCls()->lookupMethod(method->name());
   if (!(method->attrs() & AttrAbstract) &&
@@ -1659,9 +1313,8 @@ void Class::setMethods() {
       assert(parentMethod);
       methodOverrideCheck(parentMethod, method);
       // Overlay.
-      Func* f = method->clone();
+      Func* f = method->clone(this);
       f->setNewFuncId();
-      f->setCls(this);
       Class* baseClass;
       assert(!(f->attrs() & AttrPrivate) ||
              (parentMethod->attrs() & AttrPrivate));
@@ -1679,9 +1332,8 @@ void Class::setMethods() {
       // This is the first class that declares the method
       Class* baseClass = this;
       // Append.
-      Func* f = method->clone();
+      Func* f = method->clone(this);
       f->setNewFuncId();
-      f->setCls(this);
       f->setBaseCls(baseClass);
       f->setHasPrivateAncestor(false);
       builder.add(method->name(), f);
@@ -1705,12 +1357,15 @@ void Class::setMethods() {
       // we're cloning it so that we get a distinct set of static
       // locals and a separate translation, not a different context
       // class.
-      f = f->clone();
-      if (f->attrs() & AttrClone) {
-        f->setCls(this);
-      }
+      f = f->clone(f->attrs() & AttrClone ? this : f->cls());
       f->setNewFuncId();
     }
+  }
+
+  if (Class::MethodCreateHook) {
+    Class::MethodCreateHook(this, builder);
+    // running MethodCreateHook may add methods to builder
+    m_traitsEndIdx = builder.size();
   }
 
   // If class is not abstract, check that all abstract methods have been defined
@@ -1733,23 +1388,14 @@ void Class::setMethods() {
 }
 
 void Class::setODAttributes() {
-  static StringData* sd__sleep = StringData::GetStaticString("__sleep");
-  static StringData* sd__get = StringData::GetStaticString("__get");
-  static StringData* sd__set = StringData::GetStaticString("__set");
-  static StringData* sd__isset = StringData::GetStaticString("__isset");
-  static StringData* sd__unset = StringData::GetStaticString("__unset");
-  static StringData* sd__call = StringData::GetStaticString("__call");
-  static StringData* sd__callStatic
-    = StringData::GetStaticString("__callStatic");
-
   m_ODAttrs = 0;
-  if (lookupMethod(sd__sleep     )) { m_ODAttrs |= ObjectData::HasSleep;      }
-  if (lookupMethod(sd__get       )) { m_ODAttrs |= ObjectData::UseGet;        }
-  if (lookupMethod(sd__set       )) { m_ODAttrs |= ObjectData::UseSet;        }
-  if (lookupMethod(sd__isset     )) { m_ODAttrs |= ObjectData::UseIsset;      }
-  if (lookupMethod(sd__unset     )) { m_ODAttrs |= ObjectData::UseUnset;      }
-  if (lookupMethod(sd__call      )) { m_ODAttrs |= ObjectData::HasCall;       }
-  if (lookupMethod(sd__callStatic)) { m_ODAttrs |= ObjectData::HasCallStatic; }
+  if (lookupMethod(s_sleep.get()     )) { m_ODAttrs |= ObjectData::HasSleep; }
+  if (lookupMethod(s_get.get()       )) { m_ODAttrs |= ObjectData::UseGet;   }
+  if (lookupMethod(s_set.get()       )) { m_ODAttrs |= ObjectData::UseSet;   }
+  if (lookupMethod(s_isset.get()     )) { m_ODAttrs |= ObjectData::UseIsset; }
+  if (lookupMethod(s_unset.get()     )) { m_ODAttrs |= ObjectData::UseUnset; }
+  if (lookupMethod(s_call.get()      )) { m_ODAttrs |= ObjectData::HasCall;  }
+  if (lookupMethod(s_clone.get()     )) { m_ODAttrs |= ObjectData::HasClone; }
 }
 
 void Class::setConstants() {
@@ -1763,14 +1409,15 @@ void Class::setConstants() {
   }
 
   // Copy in interface constants.
-  for (std::vector<ClassPtr>::const_iterator it = m_declInterfaces.begin();
-       it != m_declInterfaces.end(); ++it) {
-    for (Slot slot = 0; slot < (*it)->m_constants.size(); ++slot) {
-      const Const& iConst = (*it)->m_constants[slot];
+  for (int i = 0, size = m_interfaces.size(); i < size; ++i) {
+    const Class* iface = m_interfaces[i];
+
+    for (Slot slot = 0; slot < iface->m_constants.size(); ++slot) {
+      auto const iConst = iface->m_constants[slot];
 
       // If you're inheriting a constant with the same name as an
       // existing one, they must originate from the same place.
-      ConstMap::Builder::iterator existing = builder.find(iConst.m_name);
+      auto const existing = builder.find(iConst.m_name);
       if (existing != builder.end() &&
           builder[existing->second].m_class != iConst.m_class) {
         raise_error("Cannot inherit previously-inherited constant %s",
@@ -1823,6 +1470,7 @@ void Class::setProperties() {
   PropMap::Builder curPropMap;
   SPropMap::Builder curSPropMap;
   m_hasDeepInitProps = false;
+  Slot traitOffset = 0;
 
   if (m_parent.get() != nullptr) {
     // m_hasDeepInitProps indicates if there are properties that require
@@ -1846,7 +1494,15 @@ void Class::setProperties() {
       prop.m_docComment = parentProp.m_docComment;
       prop.m_typeConstraint = parentProp.m_typeConstraint;
       prop.m_name = parentProp.m_name;
-      prop.m_hphpcType = parentProp.m_hphpcType;
+      prop.m_repoAuthType = parentProp.m_repoAuthType;
+      // Temporarily assign parent properties' indexes to their additive
+      // inverses minus one. After assigning current properties' indexes,
+      // we will use these negative indexes to assign new indexes to
+      // parent properties that haven't been overlayed.
+      prop.m_idx = -parentProp.m_idx - 1;
+      if (traitOffset < -prop.m_idx) {
+        traitOffset = -prop.m_idx;
+      }
       if (!(parentProp.m_attrs & AttrPrivate)) {
         curPropMap.add(prop.m_name, prop);
       } else {
@@ -1866,12 +1522,25 @@ void Class::setProperties() {
       sProp.m_typeConstraint = parentProp.m_typeConstraint;
       sProp.m_docComment = parentProp.m_docComment;
       sProp.m_class = parentProp.m_class;
+      sProp.m_idx = -parentProp.m_idx - 1;
+      if (traitOffset < -sProp.m_idx) {
+        traitOffset = -sProp.m_idx;
+      }
       tvWriteUninit(&sProp.m_val);
       curSPropMap.add(sProp.m_name, sProp);
     }
   }
 
-  assert(AttrPublic < AttrProtected && AttrProtected < AttrPrivate);
+  Slot traitIdx = m_preClass->numProperties();
+  if (RuntimeOption::RepoAuthoritative) {
+    for (auto const& traitName : m_preClass->usedTraits()) {
+      Class* classPtr = Unit::loadClass(traitName);
+      traitIdx -= classPtr->m_declProperties.size() +
+                  classPtr->m_staticProperties.size();
+    }
+  }
+
+  static_assert(AttrPublic < AttrProtected && AttrProtected < AttrPrivate, "");
   for (Slot slot = 0; slot < m_preClass->numProperties(); ++slot) {
     const PreClass::Prop* preProp = &m_preClass->properties()[slot];
 
@@ -1920,7 +1589,12 @@ void Class::setProperties() {
         prop.m_class = this;
         prop.m_typeConstraint = preProp->typeConstraint();
         prop.m_docComment = preProp->docComment();
-        prop.m_hphpcType = preProp->hphpcType();
+        prop.m_repoAuthType = preProp->repoAuthType();
+        if (slot < traitIdx) {
+          prop.m_idx = slot;
+        } else {
+          prop.m_idx = slot + m_preClass->numProperties() + traitOffset;
+        }
         curPropMap.add(preProp->name(), prop);
         m_declPropInit.push_back(m_preClass->lookupProp(preProp->name())
                                  ->val());
@@ -1931,13 +1605,21 @@ void Class::setProperties() {
         // property.
         PropMap::Builder::iterator it2 = curPropMap.find(preProp->name());
         if (it2 != curPropMap.end()) {
-          assert((curPropMap[it2->second].m_attrs
-                 & (AttrPublic|AttrProtected|AttrPrivate)) == AttrProtected);
+          Prop& prop = curPropMap[it2->second];
+          assert((prop.m_attrs & (AttrPublic|AttrProtected|AttrPrivate)) ==
+                 AttrProtected);
+          prop.m_class = this;
+          prop.m_docComment = preProp->docComment();
+          if (slot < traitIdx) {
+            prop.m_idx = slot;
+          } else {
+            prop.m_idx = slot + m_preClass->numProperties() + traitOffset;
+          }
           const TypedValue& tv = m_preClass->lookupProp(preProp->name())->val();
           TypedValueAux& tvaux = m_declPropInit[it2->second];
           tvaux.m_data = tv.m_data;
           tvaux.m_type = tv.m_type;
-          copyDeepInitAttr(preProp, &curPropMap[it2->second]);
+          copyDeepInitAttr(preProp, &prop);
           break;
         }
         // Append a new protected property.
@@ -1950,7 +1632,12 @@ void Class::setProperties() {
         // This is the first class to declare this property
         prop.m_class = this;
         prop.m_docComment = preProp->docComment();
-        prop.m_hphpcType = preProp->hphpcType();
+        prop.m_repoAuthType = preProp->repoAuthType();
+        if (slot < traitIdx) {
+          prop.m_idx = slot;
+        } else {
+          prop.m_idx = slot + m_preClass->numProperties() + traitOffset;
+        }
         curPropMap.add(preProp->name(), prop);
         m_declPropInit.push_back(m_preClass->lookupProp(preProp->name())
                                  ->val());
@@ -1962,6 +1649,8 @@ void Class::setProperties() {
         PropMap::Builder::iterator it2 = curPropMap.find(preProp->name());
         if (it2 != curPropMap.end()) {
           Prop& prop = curPropMap[it2->second];
+          prop.m_class = this;
+          prop.m_docComment = preProp->docComment();
           if ((prop.m_attrs & (AttrPublic|AttrProtected|AttrPrivate))
               == AttrProtected) {
             // Weaken protected property to public.
@@ -1970,11 +1659,16 @@ void Class::setProperties() {
             prop.m_attrs = Attr(prop.m_attrs ^ (AttrProtected|AttrPublic));
             prop.m_typeConstraint = preProp->typeConstraint();
           }
+          if (slot < traitIdx) {
+            prop.m_idx = slot;
+          } else {
+            prop.m_idx = slot + m_preClass->numProperties() + traitOffset;
+          }
           const TypedValue& tv = m_preClass->lookupProp(preProp->name())->val();
           TypedValueAux& tvaux = m_declPropInit[it2->second];
           tvaux.m_data = tv.m_data;
           tvaux.m_type = tv.m_type;
-          copyDeepInitAttr(preProp, &curPropMap[it2->second]);
+          copyDeepInitAttr(preProp, &prop);
           break;
         }
         // Append a new public property.
@@ -1987,7 +1681,12 @@ void Class::setProperties() {
         // This is the first class to declare this property
         prop.m_class = this;
         prop.m_docComment = preProp->docComment();
-        prop.m_hphpcType = preProp->hphpcType();
+        prop.m_repoAuthType = preProp->repoAuthType();
+        if (slot < traitIdx) {
+          prop.m_idx = slot;
+        } else {
+          prop.m_idx = slot + m_preClass->numProperties() + traitOffset;
+        }
         curPropMap.add(preProp->name(), prop);
         m_declPropInit.push_back(m_preClass->lookupProp(preProp->name())
                                  ->val());
@@ -1997,7 +1696,7 @@ void Class::setProperties() {
       }
     } else { // Static property.
       // Prohibit non-static-->static redeclaration.
-      PropMap::Builder::iterator it2 = curPropMap.find(preProp->name());
+      auto const it2 = curPropMap.find(preProp->name());
       if (it2 != curPropMap.end()) {
         // Find class that declared non-static property.
         Class* ancestor;
@@ -2012,7 +1711,7 @@ void Class::setProperties() {
                     preProp->name()->data());
       }
       // Get parent's equivalent property, if one exists.
-      SPropMap::Builder::iterator it3 = curSPropMap.find(preProp->name());
+      auto const it3 = curSPropMap.find(preProp->name());
       Slot sPropInd = kInvalidSlot;
       // Prohibit strengthening.
       if (it3 != curSPropMap.end()) {
@@ -2034,17 +1733,47 @@ void Class::setProperties() {
         sPropInd = curSPropMap.size();
         curSPropMap.add(sProp.m_name, sProp);
       }
-      SProp& sProp = curSPropMap[sPropInd];
       // Finish initializing.
-      sProp.m_attrs = preProp->attrs();
+      auto& sProp = curSPropMap[sPropInd];
+      sProp.m_attrs          = preProp->attrs();
       sProp.m_typeConstraint = preProp->typeConstraint();
-      sProp.m_docComment = preProp->docComment();
-      sProp.m_class = this;
-      sProp.m_val = m_preClass->lookupProp(preProp->name())->val();
+      sProp.m_docComment     = preProp->docComment();
+      sProp.m_class          = this;
+      sProp.m_val            = m_preClass->lookupProp(preProp->name())->val();
+      sProp.m_repoAuthType   = preProp->repoAuthType();
+      if (slot < traitIdx) {
+        sProp.m_idx = slot;
+      } else {
+        sProp.m_idx = slot + m_preClass->numProperties() + traitOffset;
+      }
     }
   }
 
-  importTraitProps(curPropMap, curSPropMap);
+  // After assigning indexes for current properties, we reassign indexes to
+  // parent properties that haven't been overlayed to make sure that they
+  // are greater than those of current properties.
+  int idxOffset = m_preClass->numProperties() - 1;
+  int curIdx = idxOffset;
+  for (Slot slot = 0; slot < curPropMap.size(); ++slot) {
+    Prop& prop = curPropMap[slot];
+    if (prop.m_idx < 0) {
+      prop.m_idx = idxOffset - prop.m_idx;
+      if (curIdx < prop.m_idx) {
+        curIdx = prop.m_idx;
+      }
+    }
+  }
+  for (Slot slot = 0; slot < curSPropMap.size(); ++slot) {
+    SProp& sProp = curSPropMap[slot];
+    if (sProp.m_idx < 0) {
+      sProp.m_idx = idxOffset - sProp.m_idx;
+      if (curIdx < sProp.m_idx) {
+        curIdx = sProp.m_idx;
+      }
+    }
+  }
+
+  importTraitProps(curIdx + 1, curPropMap, curSPropMap);
 
   m_declProperties.create(curPropMap);
   m_staticProperties.create(curSPropMap);
@@ -2066,9 +1795,10 @@ bool Class::compatibleTraitPropInit(TypedValue& tv1, TypedValue& tv2) {
   }
 }
 
-void Class::importTraitInstanceProp(ClassPtr    trait,
+void Class::importTraitInstanceProp(Class*      trait,
                                     Prop&       traitProp,
                                     TypedValue& traitPropVal,
+                                    const int idxOffset,
                                     PropMap::Builder& curPropMap) {
   PropMap::Builder::iterator prevIt = curPropMap.find(traitProp.m_name);
 
@@ -2078,9 +1808,14 @@ void Class::importTraitInstanceProp(ClassPtr    trait,
     prop.m_class = this; // set current class as the first declaring prop
     // private props' mangled names contain the class name, so regenerate them
     if (prop.m_attrs & AttrPrivate) {
-      prop.m_mangledName = manglePropName(m_preClass->name(), prop.m_name,
-                                          prop.m_attrs);
+      prop.m_mangledName = PreClass::manglePropName(m_preClass->name(),
+                                                    prop.m_name,
+                                                    prop.m_attrs);
     }
+    if (prop.m_attrs & AttrDeepInit) {
+      m_hasDeepInitProps = true;
+    }
+    prop.m_idx += idxOffset;
     curPropMap.add(prop.m_name, prop);
     m_declPropInit.push_back(traitPropVal);
   } else {
@@ -2095,8 +1830,9 @@ void Class::importTraitInstanceProp(ClassPtr    trait,
   }
 }
 
-void Class::importTraitStaticProp(ClassPtr trait,
+void Class::importTraitStaticProp(Class*   trait,
                                   SProp&   traitProp,
+                                  const int idxOffset,
                                   PropMap::Builder& curPropMap,
                                   SPropMap::Builder& curSPropMap) {
   // Check if prop already declared as non-static
@@ -2110,6 +1846,7 @@ void Class::importTraitStaticProp(ClassPtr trait,
     // New prop, go ahead and add it
     SProp prop = traitProp;
     prop.m_class = this; // set current class as the first declaring prop
+    prop.m_idx += idxOffset;
     curSPropMap.add(prop.m_name, prop);
   } else {
     // Redeclared prop, make sure it matches previous declaration
@@ -2135,42 +1872,49 @@ void Class::importTraitStaticProp(ClassPtr trait,
   }
 }
 
-void Class::importTraitProps(PropMap::Builder& curPropMap,
+void Class::importTraitProps(int idxOffset,
+                             PropMap::Builder& curPropMap,
                              SPropMap::Builder& curSPropMap) {
   if (attrs() & AttrNoExpandTrait) return;
-  for (size_t t = 0; t < m_usedTraits.size(); t++) {
-    ClassPtr trait = m_usedTraits[t];
+  for (auto& t : m_usedTraits) {
+    Class* trait = t.get();
 
     // instance properties
     for (Slot p = 0; p < trait->m_declProperties.size(); p++) {
-      Prop&       traitProp    = trait->m_declProperties[p];
+      Prop& traitProp          = trait->m_declProperties[p];
       TypedValue& traitPropVal = trait->m_declPropInit[p];
-      importTraitInstanceProp(trait, traitProp, traitPropVal,
+      importTraitInstanceProp(trait, traitProp, traitPropVal, idxOffset,
                               curPropMap);
     }
 
     // static properties
     for (Slot p = 0; p < trait->m_staticProperties.size(); ++p) {
       SProp& traitProp = trait->m_staticProperties[p];
-      importTraitStaticProp(trait, traitProp, curPropMap,
+      importTraitStaticProp(trait, traitProp, idxOffset, curPropMap,
                             curSPropMap);
     }
+
+    idxOffset += trait->m_declProperties.size() +
+                 trait->m_staticProperties.size();
   }
 }
 
 void Class::addTraitPropInitializers(bool staticProps) {
   if (attrs() & AttrNoExpandTrait) return;
   for (unsigned t = 0; t < m_usedTraits.size(); t++) {
-    ClassPtr trait = m_usedTraits[t];
+    Class* trait = m_usedTraits[t].get();
     InitVec& traitInitVec = staticProps ? trait->m_sinitVec : trait->m_pinitVec;
     InitVec& thisInitVec  = staticProps ? m_sinitVec : m_pinitVec;
     // Insert trait's 86[ps]init into the current class, avoiding repetitions.
     for (unsigned m = 0; m < traitInitVec.size(); m++) {
-      // Linear search, but these vectors shouldn't be big.
-      if (find(thisInitVec.begin(), thisInitVec.end(), traitInitVec[m]) ==
-          thisInitVec.end()) {
-        thisInitVec.push_back(traitInitVec[m]);
-      }
+      // Clone 86[ps]init methods, and set the class to the current class.
+      // This allows 86[ps]init to determine the property offset for the
+      // initializer array corectly.
+      Func *f = traitInitVec[m]->clone(this);
+      f->setNewFuncId();
+      f->setBaseCls(this);
+      f->setHasPrivateAncestor(false);
+      thisInitVec.push_back(f);
     }
   }
 }
@@ -2203,8 +1947,8 @@ void Class::setInitializers() {
   m_hasInitMethods = (m_pinitVec.size() > 0 || m_sinitVec.size() > 0);
 
   // The __init__ method defined in the Exception class gets special treatment
-  static StringData* sd__init__ = StringData::GetStaticString("__init__");
-  static StringData* sd_exn = StringData::GetStaticString("Exception");
+  static StringData* sd__init__ = makeStaticString("__init__");
+  static StringData* sd_exn = makeStaticString("Exception");
   const Func* einit = lookupMethod(sd__init__);
   m_callsCustomInstanceInit =
     (einit && einit->preClass()->name()->isame(sd_exn));
@@ -2264,6 +2008,26 @@ void Class::checkInterfaceMethods() {
   }
 }
 
+/*
+ * Look up the interfaces implemented by traits used by the class, and add them
+ * to the provided builder.
+ */
+void Class::addInterfacesFromUsedTraits(InterfaceMap::Builder& builder) const {
+
+  for (auto const& trait: m_usedTraits) {
+    int numIfcs = trait->m_interfaces.size();
+
+    for (int i = 0; i < numIfcs; i++) {
+      Class* interface = trait->m_interfaces[i];
+      if (builder.find(interface->name()) == builder.end()) {
+        builder.add(interface->name(), interface);
+      }
+    }
+  }
+}
+
+const StaticString s_Stringish("Stringish");
+
 void Class::setInterfaces() {
   InterfaceMap::Builder interfacesBuilder;
   if (m_parent.get() != nullptr) {
@@ -2273,20 +2037,23 @@ void Class::setInterfaces() {
       interfacesBuilder.add(interface->name(), interface);
     }
   }
+
+  std::vector<ClassPtr> declInterfaces;
+
   for (PreClass::InterfaceVec::const_iterator it =
          m_preClass->interfaces().begin();
        it != m_preClass->interfaces().end(); ++it) {
-    auto cp = ClassPtr(Unit::loadClass(*it));
-    if (cp.get() == nullptr) {
+    Class* cp = Unit::loadClass(*it);
+    if (cp == nullptr) {
       raise_error("Undefined interface: %s", (*it)->data());
     }
     if (!(cp->attrs() & AttrInterface)) {
       raise_error("%s cannot implement %s - it is not an interface",
                   m_preClass->name()->data(), cp->name()->data());
     }
-    m_declInterfaces.push_back(cp);
+    declInterfaces.push_back(ClassPtr(cp));
     if (interfacesBuilder.find(cp->name()) == interfacesBuilder.end()) {
-      interfacesBuilder.add(cp->name(), cp.get());
+      interfacesBuilder.add(cp->name(), cp);
     }
     int size = cp->m_interfaces.size();
     for (int i = 0; i < size; i++) {
@@ -2298,31 +2065,161 @@ void Class::setInterfaces() {
       }
     }
   }
+
+  m_numDeclInterfaces = declInterfaces.size();
+  m_declInterfaces.reset(new ClassPtr[declInterfaces.size()]);
+  std::copy(begin(declInterfaces), end(declInterfaces),
+    m_declInterfaces.get());
+
+  addInterfacesFromUsedTraits(interfacesBuilder);
+
+  if (m_toString) {
+    auto const present = interfacesBuilder.find(s_Stringish.get());
+    if (present == interfacesBuilder.end()
+        && (!(attrs() & AttrInterface) ||
+            !m_preClass->name()->isame(s_Stringish.get()))) {
+      Class* stringish = Unit::lookupClass(s_Stringish.get());
+      assert(stringish != nullptr);
+      assert((stringish->attrs() & AttrInterface));
+      interfacesBuilder.add(stringish->name(), stringish);
+    }
+  }
+
   m_interfaces.create(interfacesBuilder);
   checkInterfaceMethods();
 }
 
+void Class::setNativeDataInfo() {
+  for (auto cls = this; cls; cls = cls->parent()) {
+    if ((m_nativeDataInfo = cls->preClass()->nativeDataInfo())) {
+      m_instanceCtor = Native::nativeDataInstanceCtor;
+      m_instanceDtor = Native::nativeDataInstanceDtor;
+      break;
+    }
+  }
+}
+
 void Class::setUsedTraits() {
-  for (PreClass::UsedTraitVec::const_iterator
-       it = m_preClass->usedTraits().begin();
-       it != m_preClass->usedTraits().end(); it++) {
-    auto classPtr = ClassPtr(Unit::loadClass(*it));
-    if (classPtr.get() == nullptr) {
-      raise_error("Trait '%s' not found", (*it)->data());
+  for (auto const& traitName : m_preClass->usedTraits()) {
+    Class* classPtr = Unit::loadClass(traitName);
+    if (classPtr == nullptr) {
+      raise_error(Strings::TRAITS_UNKNOWN_TRAIT, traitName->data());
     }
     if (!(classPtr->attrs() & AttrTrait)) {
       raise_error("%s cannot use %s - it is not a trait",
                   m_preClass->name()->data(),
                   classPtr->name()->data());
     }
-    m_usedTraits.push_back(classPtr);
+
+
+    if (RuntimeOption::RepoAuthoritative) {
+      // In RepoAuthoritative mode (with the WholeProgram compiler
+      // optimizations), the contents of traits are flattened away into the
+      // preClasses of "use"r classes. Continuing here allows us to avoid
+      // unnecessarily attempting to re-import trait methods and
+      // properties, only to fail due to (surprise surprise!) the same
+      // method/property existing on m_preClass.
+      continue;
+    }
+
+    m_usedTraits.push_back(ClassPtr(classPtr));
+  }
+}
+
+void Class::checkTraitConstraints() const {
+
+  if (attrs() & AttrInterface) {
+    return; // nothing to do
+  }
+
+  if (attrs() & AttrTrait) {
+    for (auto const& req : m_preClass->traitRequirements()) {
+      auto const reqName = req.name();
+      auto const reqCls = Unit::loadClass(reqName);
+      if (!reqCls) {
+        raise_error("%s '%s' required by trait '%s' cannot be loaded",
+                    req.is_extends() ? "Class" : "Interface",
+                    reqName->data(),
+                    m_preClass->name()->data());
+      }
+
+      if (req.is_extends()) {
+        if (reqCls->attrs() & (AttrTrait | AttrInterface | AttrFinal)) {
+          raise_error(Strings::TRAIT_BAD_REQ_EXTENDS,
+                      m_preClass->name()->data(),
+                      reqName->data(),
+                      reqName->data());
+        }
+      } else {
+        assert(req.is_implements());
+        if (!(reqCls->attrs() & AttrInterface)) {
+          raise_error(Strings::TRAIT_BAD_REQ_IMPLEMENTS,
+                      m_preClass->name()->data(),
+                      reqName->data(),
+                      reqName->data());
+        }
+      }
+    }
+    return;
+  }
+
+  checkTraitConstraintsRec(usedTraitClasses(), nullptr);
+}
+
+void Class::checkTraitConstraintsRec(const std::vector<ClassPtr>& usedTraits,
+                                     const StringData* recName) const {
+
+  if (!usedTraits.size()) { return; }
+
+  for (auto const& ut : usedTraits) {
+    auto const usedTrait = ut.get();
+    auto const ptrait = usedTrait->preClass();
+
+    for (auto const& req : ptrait->traitRequirements()) {
+      auto const reqName = req.name();
+      if (req.is_extends()) {
+        auto reqExtCls = Unit::lookupClass(reqName);
+        // errors should've been raised for the following when the
+        // usedTrait was first loaded
+        assert(reqExtCls != nullptr);
+        assert(!(reqExtCls->attrs() & (AttrTrait | AttrInterface)));
+
+        if ((m_classVecLen < reqExtCls->m_classVecLen) ||
+            (m_classVec[reqExtCls->m_classVecLen-1] != reqExtCls)) {
+          raise_error(Strings::TRAIT_REQ_EXTENDS,
+                      m_preClass->name()->data(),
+                      reqName->data(),
+                      ptrait->name()->data(),
+                      ((recName == nullptr) ? "use" : recName->data()));
+        }
+        continue;
+      }
+
+      assert(req.is_implements());
+      if (!ifaceofDirect(reqName)) {
+        raise_error(Strings::TRAIT_REQ_IMPLEMENTS,
+                    m_preClass->name()->data(),
+                    reqName->data(),
+                    ptrait->name()->data(),
+                    ((recName == nullptr) ? "use" : recName->data()));
+      }
+    }
+  }
+
+  // separate loop for recursive checks
+  for (auto const& ut : usedTraits) {
+    Class* usedTrait = ut.get();
+    checkTraitConstraintsRec(
+      usedTrait->usedTraitClasses(),
+      recName == nullptr ? usedTrait->preClass()->name() : recName
+    );
   }
 }
 
 void Class::setClassVec() {
   if (m_classVecLen > 1) {
     assert(m_parent.get() != nullptr);
-    memcpy(m_classVec, m_parent.get()->m_classVec,
+    memcpy(m_classVec, m_parent->m_classVec,
            (m_classVecLen-1) * sizeof(Class*));
   }
   m_classVec[m_classVecLen-1] = this;
@@ -2341,17 +2238,19 @@ void Class::setInstanceBitsImpl() {
   // are initialized yet.
   if (m_instanceBits.test(0)) return;
 
-  InstanceBits bits;
+  InstanceBits::BitSet bits;
   bits.set(0);
-  auto setBits = [&](ClassPtr& c) {
+  auto setBits = [&](Class* c) {
     if (setParents) c->setInstanceBitsAndParents();
     bits |= c->m_instanceBits;
   };
-  if (m_parent.get()) setBits(m_parent);
-  std::for_each(m_declInterfaces.begin(), m_declInterfaces.end(), setBits);
+  if (m_parent.get()) setBits(m_parent.get());
 
-  unsigned bit;
-  if (mapGet(s_instanceBits, m_preClass->name(), &bit)) {
+  int numIfaces = m_interfaces.size();
+  for (int i = 0; i < numIfaces; i++) setBits(m_interfaces[i]);
+
+  // XXX: this assert fails on the initFlag; oops.
+  if (unsigned bit = InstanceBits::lookup(m_preClass->name())) {
     bits.set(bit);
   }
   m_instanceBits = bits;
@@ -2364,30 +2263,6 @@ Class* Class::findMethodBaseClass(const StringData* methName) {
   const Func* f = lookupMethod(methName);
   if (f == nullptr) return nullptr;
   return f->baseCls();
-}
-
-void Class::getMethodNames(const Class* ctx, HphpArray* methods) const {
-  Func* const* pcMethods = m_preClass->methods();
-  for (size_t i = 0, sz = m_preClass->numMethods(); i < sz; i++) {
-    Func* func = pcMethods[i];
-    if (func->isGenerated()) continue;
-    if (!(func->attrs() & AttrPublic)) {
-      if (!ctx) continue;
-      if (ctx != this) {
-        if (func->attrs() & AttrPrivate) continue;
-        func = lookupMethod(func->name());
-        if (!ctx->classof(func->baseCls()) &&
-            !func->baseCls()->classof(ctx)) {
-          continue;
-        }
-      }
-    }
-    methods->set(const_cast<StringData*>(func->name()), true_varNR, false);
-  }
-  if (m_parent.get()) m_parent.get()->getMethodNames(ctx, methods);
-  for (int i = 0, sz = m_declInterfaces.size(); i < sz; i++) {
-    m_declInterfaces[i].get()->getMethodNames(ctx, methods);
-  }
 }
 
 // Returns true iff this class declared the given method.
@@ -2422,25 +2297,32 @@ void Class::getClassInfo(ClassInfoVM* ci) {
                      ? m_preClass->docComment()->data() : "";
 
   // Parent class.
-  if (m_parent.get()) {
-    ci->m_parentClass = m_parent->name()->data();
-  } else {
-    ci->m_parentClass = "";
-  }
+  ci->m_parentClass = (m_parent.get()) ? m_parent->name()->data() : "";
 
   // Interfaces.
-  for (unsigned i = 0; i < m_declInterfaces.size(); i++) {
-    ci->m_interfacesVec.push_back(
-        m_declInterfaces[i]->name()->data());
-    ci->m_interfaces.insert(
-        m_declInterfaces[i]->name()->data());
+  for (auto const& ifaceName: m_preClass->interfaces()) {
+    ci->m_interfacesVec.push_back(ifaceName->data());
+    ci->m_interfaces.insert(ifaceName->data());
   }
+  if (m_interfaces.size() > m_preClass->interfaces().size()) {
+    for (int i = 0; i < m_interfaces.size(); ++i) {
+      auto const& ifaceName = m_interfaces[i]->name();
+
+      if (ci->m_interfaces.find(ifaceName->data()) == ci->m_interfaces.end()) {
+        ci->m_interfacesVec.push_back(ifaceName->data());
+        ci->m_interfaces.insert(ifaceName->data());
+      }
+    }
+  }
+  assert(ci->m_interfaces.size() == ci->m_interfacesVec.size());
 
   // Used traits.
-  for (unsigned t = 0; t < m_usedTraits.size(); t++) {
-    const char* traitName = m_usedTraits[t]->name()->data();
-    ci->m_traitsVec.push_back(traitName);
-    ci->m_traits.insert(traitName);
+  for (auto const& traitName : m_preClass->usedTraits()) {
+    // Use the preclass list of trait names to avoid accounting for
+    // trait flattening.
+    const char* traitNameChars = traitName->data();
+    ci->m_traitsVec.push_back(traitNameChars);
+    ci->m_traits.insert(traitNameChars);
   }
 
   // Trait aliases.
@@ -2528,11 +2410,18 @@ void Class::getClassInfo(ClassInfoVM* ci) {
     ki->name = m_constants[i].m_name->data();
     ki->valueLen = m_constants[i].m_phpCode->size();
     ki->valueText = m_constants[i].m_phpCode->data();
-    ki->setValue(tvAsCVarRef(clsCnsGet(m_constants[i].m_name)));
+    auto const cell = clsCnsGet(m_constants[i].m_name);
+    assert(cell.m_type != KindOfUninit);
+    ki->setValue(cellAsCVarRef(cell));
 
     ci->m_constants[ki->name] = ki;
     ci->m_constantsVec.push_back(ki);
   }
+}
+
+size_t Class::declPropOffset(Slot index) const {
+  assert(index >= 0);
+  return sizeof(ObjectData) + m_builtinODTailSize + index * sizeof(TypedValue);
 }
 
 Class::PropInitVec::~PropInitVec() {
@@ -2542,11 +2431,10 @@ Class::PropInitVec::~PropInitVec() {
 Class::PropInitVec::PropInitVec() : m_data(nullptr), m_size(0), m_smart(false) {}
 
 Class::PropInitVec*
-Class::PropInitVec::allocInRequestArena(const PropInitVec& src) {
-  ThreadInfo* info UNUSED = ThreadInfo::s_threadInfo.getNoCheck();
-  PropInitVec* p = new (request_arena()) PropInitVec;
+Class::PropInitVec::allocWithSmartAllocator(const PropInitVec& src) {
+  PropInitVec* p = smart_new<PropInitVec>();
   p->m_size = src.size();
-  p->m_data = new (request_arena()) TypedValueAux[src.size()];
+  p->m_data = smart_new_array<TypedValueAux>(src.size());
   memcpy(p->m_data, src.m_data, src.size() * sizeof(*p->m_data));
   p->m_smart = true;
   return p;
@@ -2557,7 +2445,7 @@ Class::PropInitVec::operator=(const PropInitVec& piv) {
   assert(!m_smart);
   if (this != &piv) {
     unsigned sz = m_size = piv.size();
-    if (sz) sz = Util::roundUpToPowerOfTwo(sz);
+    if (sz) sz = folly::nextPowTwo(sz);
     free(m_data);
     m_data = (TypedValueAux*)malloc(sz * sizeof(*m_data));
     assert(m_data);
@@ -2572,60 +2460,83 @@ void Class::PropInitVec::push_back(const TypedValue& v) {
    * the allocated size is always the next power of two (or zero)
    * so we just need to reallocate when we hit a power of two
    */
-  if (!m_size || Util::isPowerOfTwo(m_size)) {
+  if (!m_size || folly::isPowTwo(m_size)) {
     unsigned size = m_size ? m_size * 2 : 1;
     m_data = (TypedValueAux*)realloc(m_data, size * sizeof(*m_data));
     assert(m_data);
   }
-  tvDup(&v, &m_data[m_size++]);
+  cellDup(v, m_data[m_size++]);
 }
 
-using Transl::TargetCache::handleToRef;
-
-const Class::PropInitVec* Class::getPropData() const {
-  if (m_propDataCache == (unsigned)-1) return nullptr;
-  return handleToRef<PropInitVec*>(m_propDataCache);
+Class::PropInitVec* Class::getPropData() const {
+  return m_propDataCache.bound() ? *m_propDataCache : nullptr;
 }
 
 void Class::initPropHandle() const {
-  if (UNLIKELY(m_propDataCache == (unsigned)-1)) {
-    const_cast<unsigned&>(m_propDataCache) =
-      Transl::TargetCache::allocClassInitProp(name());
-  }
+  m_propDataCache.bind();
 }
 
 void Class::initProps() const {
-  setPropData(initPropsImpl());
+  initPropsImpl();
 }
 
 void Class::setPropData(PropInitVec* propData) const {
   assert(getPropData() == nullptr);
   initPropHandle();
-  handleToRef<PropInitVec*>(m_propDataCache) = propData;
+  *m_propDataCache = propData;
 }
 
 TypedValue* Class::getSPropData() const {
-  if (m_propSDataCache == (unsigned)-1) return nullptr;
-  return handleToRef<TypedValue*>(m_propSDataCache);
+  return m_propSDataCache.bound() ? *m_propSDataCache : nullptr;
 }
 
 void Class::initSPropHandle() const {
-  if (UNLIKELY(m_propSDataCache == (unsigned)-1)) {
-    const_cast<unsigned&>(m_propSDataCache) =
-      Transl::TargetCache::allocClassInitSProp(name());
-  }
+  m_propSDataCache.bind();
 }
 
 TypedValue* Class::initSProps() const {
   TypedValue* sprops = initSPropsImpl();
-  setSPropData(sprops);
   return sprops;
 }
 
 void Class::setSPropData(TypedValue* sPropData) const {
   assert(getSPropData() == nullptr);
   initSPropHandle();
-  handleToRef<TypedValue*>(m_propSDataCache) = sPropData;
+  *m_propSDataCache = sPropData;
 }
 
- } // HPHP::VM
+void Class::getChildren(std::vector<TypedValue*>& out) {
+  for (Slot i = 0; i < m_staticProperties.size(); ++i) {
+    if (m_staticProperties[i].m_class != this) continue;
+    out.push_back(&m_staticProperties[i].m_val);
+  }
+}
+
+// True if a CPP extension class has opted into serialization.
+bool Class::isCppSerializable() const {
+  assert(instanceCtor()); // Only call this on CPP classes
+  auto info = clsInfo();
+  auto p = this;
+  while ((!info) && (p = p->parent())) {
+    info = p->clsInfo();
+  }
+  return info &&
+    (info->getAttribute() & ClassInfo::IsCppSerializable);
+}
+
+bool Class::isCollectionClass() const {
+  auto s = name();
+  return Collection::stringToType(s->data(), s->size()) !=
+         Collection::InvalidType;
+}
+
+RefData* Class::zGetSProp(Class* ctx, const StringData* sPropName,
+                          bool& visible, bool& accessible) const {
+  auto tv = getSProp(ctx, sPropName, visible, accessible);
+  if (tv->m_type != KindOfRef) {
+    tvBox(tv);
+  }
+  return tv->m_data.pref;
+}
+
+} // HPHP::VM

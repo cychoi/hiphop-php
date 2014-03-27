@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,8 @@
 #ifndef incl_HPHP_CONSTRUCT_H_
 #define incl_HPHP_CONSTRUCT_H_
 
-#include "hphp/util/json.h"
+#include "hphp/compiler/json.h"
+#include <memory>
 #include "hphp/compiler/code_generator.h"
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/analysis/block_scope.h"
@@ -67,7 +68,7 @@ public:
 /**
  * Base class of Expression and Statement.
  */
-class Construct : public boost::enable_shared_from_this<Construct>,
+class Construct : public std::enable_shared_from_this<Construct>,
                   public JSON::CodeError::ISerializable {
 protected:
   Construct(BlockScopePtr scope, LocationPtr loc);
@@ -178,7 +179,10 @@ public:
     return m_blockScope->getContainingClass();
   }
   void resetScope(BlockScopeRawPtr scope, bool resetOrigScope=false);
-  void parseTimeFatal(Compiler::ErrorType error, const char *fmt, ...);
+  void parseTimeFatal(Compiler::ErrorType error, const char *fmt, ...)
+    ATTRIBUTE_PRINTF(3,4);
+  void analysisTimeFatal(Compiler::ErrorType error, const char *fmt, ...)
+    ATTRIBUTE_PRINTF(3,4);
   virtual int getLocalEffects() const { return UnknownEffect;}
   int getChildrenEffects() const;
   int getContainedEffects() const;
@@ -186,15 +190,16 @@ public:
   virtual bool kidUnused(int i) const { return false; }
 
   template<typename T>
-  static boost::shared_ptr<T> Clone(boost::shared_ptr<T> constr) {
+  static std::shared_ptr<T> Clone(std::shared_ptr<T> constr) {
     if (constr) {
-      return boost::dynamic_pointer_cast<T>(constr->clone());
+      return dynamic_pointer_cast<T>(constr->clone());
     }
-    return boost::shared_ptr<T>();
+    return std::shared_ptr<T>();
   }
 
   template<typename T>
-  boost::shared_ptr<T> Clone(boost::shared_ptr<T> constr, BlockScopePtr scope) {
+  std::shared_ptr<T> Clone(std::shared_ptr<T> constr,
+                           BlockScopePtr scope) {
     if (constr) {
       constr = constr->clone();
       constr->resetScope(scope);
@@ -241,6 +246,11 @@ public:
   static void dump(int spc, AnalysisResultConstPtr ar, bool functionOnly,
                    const AstWalkerStateVec &start,
                    ConstructPtr endBefore, ConstructPtr endAfter);
+
+  /**
+   * Generates a serialized Code Model corresponding to this AST.
+   */
+  virtual void outputCodeModel(CodeGenerator &cg) = 0;
 
   /**
    * Called when generating code.

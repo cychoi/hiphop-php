@@ -7,7 +7,6 @@
             "name": "asio_get_current_context_idx",
             "desc": "Get index of the current scheduler context, or 0 if there is none",
             "flags": [
-                "HasDocComment"
             ],
             "return": {
                 "type": "Int32",
@@ -20,11 +19,10 @@
             "name": "asio_get_running_in_context",
             "desc": "Get currently running wait handle in a context specified by its index",
             "flags": [
-                "HasDocComment"
             ],
             "return": {
                 "type": "Object",
-                "desc": "A ContinuationWaitHandle that is running in a specified context"
+                "desc": "An AsyncFunctionWaitHandle that is running in a specified context"
             },
             "args": [
                 {
@@ -38,47 +36,12 @@
             "name": "asio_get_running",
             "desc": "Get currently running wait handle, or null if there is none",
             "flags": [
-                "HasDocComment"
             ],
             "return": {
                 "type": "Object",
-                "desc": "A ContinuationWaitHandle that is running in the current context"
+                "desc": "An AsyncFunctionWaitHandle that is running in the current context"
             },
             "args": [
-            ]
-        },
-        {
-            "name": "asio_set_on_failed_callback",
-            "desc": "DEPRECATED: use ContinuationWaitHandle::setOnFailCallback()",
-            "flags": [
-                "HasDocComment"
-            ],
-            "return": {
-                "type": null
-            },
-            "args": [
-                {
-                    "name": "on_failed_cb",
-                    "type": "Variant",
-                    "desc": "A Closure to be called when wait handle fails"
-                }
-            ]
-        },
-        {
-            "name": "asio_set_on_started_callback",
-            "desc": "DEPRECATED: use ContinuationWaitHandle::setOnCreateCallback()",
-            "flags": [
-                "HasDocComment"
-            ],
-            "return": {
-                "type": null
-            },
-            "args": [
-                {
-                    "name": "on_started_cb",
-                    "type": "Variant",
-                    "desc": "A Closure to be called when wait handle is started"
-                }
             ]
         }
     ],
@@ -89,7 +52,7 @@
             "flags": [
                 "IsAbstract",
                 "IsCppAbstract",
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "ifaces": [
                 "Awaitable"
@@ -98,8 +61,7 @@
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
@@ -112,7 +74,6 @@
                     "desc": "Set callback for when join() is called",
                     "flags": [
                         "IsStatic",
-                        "HasDocComment",
                         "HipHopSpecific"
                     ],
                     "return": {
@@ -130,7 +91,6 @@
                     "name": "getWaitHandle",
                     "desc": "Return this wait handle (for Awaitable interface)",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Object"
@@ -142,7 +102,6 @@
                     "name": "import",
                     "desc": "Import this wait handle to the current scheduler context",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -154,7 +113,6 @@
                     "name": "join",
                     "desc": "Wait until this wait handle is finished and return its result (operates in a new scheduler context)",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Variant",
@@ -167,7 +125,6 @@
                     "name": "isFinished",
                     "desc": "Check if this wait handle finished (succeeded or failed)",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean",
@@ -180,7 +137,6 @@
                     "name": "isSucceeded",
                     "desc": "Check if this wait handle succeeded",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean",
@@ -193,7 +149,6 @@
                     "name": "isFailed",
                     "desc": "Check if this wait handle failed",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Boolean",
@@ -206,7 +161,6 @@
                     "name": "getID",
                     "desc": "Get unique ID of this wait handle (amongst existing ones)",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Int64",
@@ -219,7 +173,6 @@
                     "name": "getName",
                     "desc": "Get name of the operation behind this wait handle",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "String",
@@ -232,7 +185,6 @@
                     "name": "getExceptionIfFailed",
                     "desc": "Get exception if this wait handle has failed, or null",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Object",
@@ -252,14 +204,13 @@
             "flags": [
                 "IsAbstract",
                 "IsCppAbstract",
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
@@ -276,38 +227,18 @@
             "parent": "StaticWaitHandle",
             "desc": "A wait handle representing static result",
             "flags": [
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
                     },
                     "args": [
-                    ]
-                },
-                {
-                    "name": "create",
-                    "desc": "Create a wait handle that always succeeds with a given result",
-                    "flags": [
-                        "IsStatic",
-                        "HasDocComment"
-                    ],
-                    "return": {
-                        "type": "Object",
-                        "desc": "A StaticResultWaitHandle representing given result"
-                    },
-                    "args": [
-                        {
-                            "name": "result",
-                            "type": "Variant",
-                            "desc": "A result wait handle will succeed with"
-                        }
                     ]
                 }
             ],
@@ -319,38 +250,18 @@
             "parent": "StaticWaitHandle",
             "desc": "A wait handle representing statically failed operation",
             "flags": [
-                "HasDocComment"
+                     "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
                     },
                     "args": [
-                    ]
-                },
-                {
-                    "name": "create",
-                    "desc": "Create a wait handle that always fails with a given exception",
-                    "flags": [
-                        "IsStatic",
-                        "HasDocComment"
-                    ],
-                    "return": {
-                        "type": "Object",
-                        "desc": "A StaticExceptionWaitHandle representing given exception"
-                    },
-                    "args": [
-                        {
-                            "name": "exception",
-                            "type": "Object",
-                            "desc": "An exception wait handle will fail with"
-                        }
                     ]
                 }
             ],
@@ -364,14 +275,13 @@
             "flags": [
                 "IsAbstract",
                 "IsCppAbstract",
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
@@ -383,7 +293,6 @@
                     "name": "getContextIdx",
                     "desc": "Get index of the scheduler context this wait handle operates in",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Int32",
@@ -396,11 +305,10 @@
                     "name": "getCreator",
                     "desc": "Get wait handle that created this wait handle",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Object",
-                        "desc": "A ContinuationWaitHandle that was being executed when this wait handle was constructed"
+                        "desc": "An AsyncFunctionWaitHandle that was being executed when this wait handle was constructed"
                     },
                     "args": [
                     ]
@@ -409,11 +317,22 @@
                     "name": "getParents",
                     "desc": "Get wait handles blocked on this wait handle",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "VariantVec",
                         "desc": "An array of BlockableWaitHandles blocked on this wait handle"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "getDependencyStack",
+                    "desc": "Get the dependency stack for this wait handle",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": "VariantVec",
+                        "desc": "A representation of the call stack of wait handles, starting with this wait handle. Each element in the array is a wait handle, or null which represents crossing a context boundary."
                     },
                     "args": [
                     ]
@@ -429,14 +348,13 @@
             "flags": [
                 "IsAbstract",
                 "IsCppAbstract",
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
@@ -449,18 +367,17 @@
             ]
         },
         {
-            "name": "ContinuationWaitHandle",
+            "name": "AsyncFunctionWaitHandle",
             "parent": "BlockableWaitHandle",
-            "desc": "A wait handle representing asynchronous execution powered by Continuation",
+            "desc": "A wait handle representing asynchronous execution of async function",
             "flags": [
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
@@ -470,10 +387,9 @@
                 },
                 {
                     "name": "setOnCreateCallback",
-                    "desc": "Set callback to be called when a continuation wait handle is created",
+                    "desc": "Set callback to be called when an AsyncFunctionWaitHandle is created",
                     "flags": [
                         "IsStatic",
-                        "HasDocComment",
                         "HipHopSpecific"
                     ],
                     "return": {
@@ -483,16 +399,15 @@
                         {
                             "name": "on_create_cb",
                             "type": "Variant",
-                            "desc": "A Closure to be called when continuation is created"
+                            "desc": "A Closure to be called when an AsyncFunctionWaitHandle is created"
                         }
                     ]
                 },
                 {
-                    "name": "setOnYieldCallback",
-                    "desc": "Set callback to be called when a continuation yields",
+                    "name": "setOnAwaitCallback",
+                    "desc": "Set callback to be called when an async function blockingly awaits",
                     "flags": [
                         "IsStatic",
-                        "HasDocComment",
                         "HipHopSpecific"
                     ],
                     "return": {
@@ -500,18 +415,17 @@
                     },
                     "args": [
                         {
-                            "name": "on_yield_cb",
+                            "name": "on_await_cb",
                             "type": "Variant",
-                            "desc": "A Closure to be called when continuations yields"
+                            "desc": "A Closure to be called when an async function blockingly await"
                         }
                     ]
                 },
                 {
                     "name": "setOnSuccessCallback",
-                    "desc": "Set callback to be called when a continuation finishes successfully",
+                    "desc": "Set callback to be called when an async function finishes successfully",
                     "flags": [
                         "IsStatic",
-                        "HasDocComment",
                         "HipHopSpecific"
                     ],
                     "return": {
@@ -521,16 +435,15 @@
                         {
                             "name": "on_success_cb",
                             "type": "Variant",
-                            "desc": "A Closure to be called when continuations finishes"
+                            "desc": "A Closure to be called when an async function finishes"
                         }
                     ]
                 },
                 {
                     "name": "setOnFailCallback",
-                    "desc": "Set callback to be called when a continuation fails",
+                    "desc": "Set callback to be called when an async function fails",
                     "flags": [
                         "IsStatic",
-                        "HasDocComment",
                         "HipHopSpecific"
                     ],
                     "return": {
@@ -540,7 +453,7 @@
                         {
                             "name": "on_fail_cb",
                             "type": "Variant",
-                            "desc": "A Closure to be called when continuations fails"
+                            "desc": "A Closure to be called when an async function fails"
                         }
                     ]
                 },
@@ -548,7 +461,6 @@
                     "name": "getPrivData",
                     "desc": "Get user's private data",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": "Object",
@@ -561,7 +473,6 @@
                     "name": "setPrivData",
                     "desc": "Set user's private data",
                     "flags": [
-                        "HasDocComment"
                     ],
                     "return": {
                         "type": null
@@ -583,14 +494,13 @@
             "parent": "BlockableWaitHandle",
             "desc": "A wait handle representing an array of asynchronous operations",
             "flags": [
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
@@ -602,8 +512,7 @@
                     "name": "create",
                     "desc": "Create a wait handle that waits for a given array of dependencies",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "return": {
                         "type": "Object",
@@ -622,7 +531,65 @@
                     "desc": "Set callback for when a GenArrayWaitHandle is created",
                     "flags": [
                         "IsStatic",
-                        "HasDocComment",
+                        "HipHopSpecific"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "on_create_cb",
+                            "type": "Variant",
+                            "desc": "A Closure to be called on creation"
+                        }
+                    ]
+                }
+            ],
+            "consts": [
+            ]
+        },
+        {
+            "name": "GenMapWaitHandle",
+            "parent": "BlockableWaitHandle",
+            "desc": "A wait handle representing a map of asynchronous operations",
+            "flags": [
+                "NoDefaultSweep"
+            ],
+            "funcs": [
+                {
+                    "name": "__construct",
+                    "flags": [
+                        "IsPrivate"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "create",
+                    "desc": "Create a wait handle that waits for a given map of dependencies",
+                    "flags": [
+                        "IsStatic"
+                    ],
+                    "return": {
+                        "type": "Object",
+                        "desc": "A WaitHandle that will wait for a given map of dependencies and return their results"
+                    },
+                    "args": [
+                        {
+                            "name": "dependencies",
+                            "type": "Variant",
+                            "desc": "A map of dependencies to wait for"
+                        }
+                    ]
+                },
+                {
+                    "name": "setOnCreateCallback",
+                    "desc": "Set callback for when a GenMapWaitHandle is created",
+                    "flags": [
+                        "IsStatic",
                         "HipHopSpecific"
                     ],
                     "return": {
@@ -645,14 +612,13 @@
             "parent": "BlockableWaitHandle",
             "desc": "A wait handle representing a vector of asynchronous operations",
             "flags": [
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
@@ -664,8 +630,7 @@
                     "name": "create",
                     "desc": "Create a wait handle that waits for a given vector of dependencies",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "return": {
                         "type": "Object",
@@ -684,7 +649,6 @@
                     "desc": "Set callback for when a GenVectorWaitHandle is created",
                     "flags": [
                         "IsStatic",
-                        "HasDocComment",
                         "HipHopSpecific"
                     ],
                     "return": {
@@ -707,14 +671,13 @@
             "parent": "BlockableWaitHandle",
             "desc": "A wait handle proxy that sets result to a given reference",
             "flags": [
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
@@ -726,8 +689,7 @@
                     "name": "create",
                     "desc": "Create a wait handle that stores result of a dependency to a given reference",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "return": {
                         "type": "Object",
@@ -752,7 +714,6 @@
                     "desc": "Set callback for when a SetResultToRefWaitHandle is created",
                     "flags": [
                         "IsStatic",
-                        "HasDocComment",
                         "HipHopSpecific"
                     ],
                     "return": {
@@ -775,14 +736,13 @@
             "parent": "WaitableWaitHandle",
             "desc": "A wait handle that succeeds with null once desired scheduling priority is eligible for execution",
             "flags": [
-                "HasDocComment"
+                "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null
@@ -794,8 +754,7 @@
                     "name": "create",
                     "desc": "Create a wait handle that succeeds once desired scheduling priority is eligible for execution",
                     "flags": [
-                        "IsStatic",
-                        "HasDocComment"
+                        "IsStatic"
                     ],
                     "return": {
                         "type": "Object",
@@ -804,7 +763,7 @@
                     "args": [
                         {
                             "name": "queue",
-                            "type": "Int32",
+                            "type": "Int64",
                             "desc": "A scheduling queue to use (defined by QUEUE_* constants)"
                         },
                         {
@@ -818,33 +777,97 @@
             "consts": [
                 {
                     "name": "QUEUE_DEFAULT",
-                    "type": "Int32",
+                    "type": "Int64",
                     "desc": "A queue that is run whenever there is nothing else to do"
                 },
                 {
                     "name": "QUEUE_NO_PENDING_IO",
-                    "type": "Int32",
+                    "type": "Int64",
                     "desc": "A queue that is run only once there is no pending I\/O operation"
                 }
             ]
         },
         {
-            "name": "ExternalThreadEventWaitHandle",
+            "name": "SessionScopedWaitHandle",
             "parent": "WaitableWaitHandle",
-            "desc": "A wait handle that synchronizes against C++ operation in external thread",
-            "bases": [
-                "Sweepable"
-            ],
+            "desc": "A wait handle whose execution is session-managed",
             "flags": [
-                "HasDocComment",
+                "IsAbstract",
+                "IsCppAbstract",
                 "NoDefaultSweep"
             ],
             "funcs": [
                 {
                     "name": "__construct",
                     "flags": [
-                        "IsPrivate",
-                        "HasDocComment"
+                        "IsPrivate"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                    ]
+                }
+            ],
+            "consts": [
+            ]
+        },
+        {
+            "name": "SleepWaitHandle",
+            "parent": "SessionScopedWaitHandle",
+            "desc": "A wait handle that succeeds with null after the desired timeout expires",
+            "flags": [
+                "NoDefaultSweep"
+            ],
+            "funcs": [
+                {
+                    "name": "__construct",
+                    "flags": [
+                        "IsPrivate"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "create",
+                    "desc": "Create a wait handle that succeeds after the desired timeout expires",
+                    "flags": [
+                        "IsStatic"
+                    ],
+                    "return": {
+                        "type": "Object",
+                        "desc": "A SleepWaitHandle that succeeds after the desired timeout expires"
+                    },
+                    "args": [
+                        {
+                            "name": "usecs",
+                            "type": "Int64",
+                            "desc": "Non-negative number of microseconds to sleep for"
+                        }
+                    ]
+                }
+            ],
+            "consts": [
+            ]
+        },
+        {
+            "name": "ExternalThreadEventWaitHandle",
+            "parent": "SessionScopedWaitHandle",
+            "desc": "A wait handle that synchronizes against C++ operation in external thread",
+            "bases": [
+                "Sweepable"
+            ],
+            "flags": [
+                "NoDefaultSweep"
+            ],
+            "funcs": [
+                {
+                    "name": "__construct",
+                    "flags": [
+                        "IsPrivate"
                     ],
                     "return": {
                         "type": null

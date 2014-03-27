@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,7 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_complete.h"
+#include <vector>
 #include "hphp/runtime/debugger/cmd/cmd_info.h"
 
 namespace HPHP { namespace Eval {
@@ -34,7 +35,7 @@ void CmdComplete::list(DebuggerClient &client) {
 }
 
 void CmdComplete::help(DebuggerClient &client) {
-  client.helpTitle("Copmplete");
+  client.helpTitle("Complete");
   client.help("complete <cmd>");
   client.helpBody(
     "This command provides the same results as TAB completion does on the"
@@ -44,12 +45,12 @@ void CmdComplete::help(DebuggerClient &client) {
   );
 }
 
-void CmdComplete::onClientImpl(DebuggerClient &client) {
+void CmdComplete::onClient(DebuggerClient &client) {
   if (DebuggerCommand::displayedHelp(client)) return;
   std::string text = client.lineRest(1);
   std::vector<std::string> res = client.getAllCompletions(text);
   for (size_t i = 0; i < res.size(); ++i) {
-    client.print(res[i].c_str());
+    client.print("%s", res[i].c_str());
   }
 }
 

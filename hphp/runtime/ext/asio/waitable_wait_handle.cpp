@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,9 +15,13 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/ext/ext_asio.h"
+#include "hphp/runtime/ext/asio/waitable_wait_handle.h"
+
 #include "hphp/runtime/ext/asio/asio_context.h"
 #include "hphp/runtime/ext/asio/asio_session.h"
+#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
+#include "hphp/runtime/ext/asio/blockable_wait_handle.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
@@ -83,18 +87,11 @@ Array c_WaitableWaitHandle::t_getparents() {
   return result;
 }
 
-c_BlockableWaitHandle* c_WaitableWaitHandle::addParent(c_BlockableWaitHandle* parent) {
-  c_BlockableWaitHandle* prev = m_firstParent;
-  m_firstParent = parent;
-  return prev;
-}
-
-void c_WaitableWaitHandle::setResult(const TypedValue* result) {
-  assert(result);
-  assert(result->m_type != KindOfRef);
+void c_WaitableWaitHandle::setResult(const Cell& result) {
+  assert(cellIsPlausible(result));
 
   setState(STATE_SUCCEEDED);
-  tvDupCell(result, &m_resultOrException);
+  cellDup(result, m_resultOrException);
 
   // unref creator
   if (m_creator) {
@@ -129,6 +126,8 @@ void c_WaitableWaitHandle::setException(ObjectData* exception) {
 
 // throws on context depth level overflows and cross-context cycles
 void c_WaitableWaitHandle::join() {
+  JIT::EagerVMRegAnchor _;
+
   AsioSession* session = AsioSession::Get();
 
   assert(!isFinished());
@@ -161,14 +160,54 @@ c_WaitableWaitHandle* c_WaitableWaitHandle::getChild() {
   return nullptr;
 }
 
-bool c_WaitableWaitHandle::hasCycle(c_WaitableWaitHandle* start) {
-  assert(start);
+bool
+c_WaitableWaitHandle::isDescendantOf(c_WaitableWaitHandle* wait_handle) const {
+  assert(wait_handle);
 
-  while (start != this && start && !start->isFinished()) {
-    start = start->getChild();
+  while (wait_handle != this && wait_handle && !wait_handle->isFinished()) {
+    wait_handle = wait_handle->getChild();
   }
 
-  return start == this;
+  return wait_handle == this;
+}
+
+Array c_WaitableWaitHandle::t_getdependencystack() {
+  Array result = Array::Create();
+  if (isFinished()) return result;
+  hphp_hash_set<int64_t> visited;
+  auto wait_handle = this;
+  while (wait_handle != nullptr) {
+    result.append(wait_handle);
+    visited.insert(wait_handle->t_getid());
+    auto context_idx = wait_handle->getContextIdx();
+
+    // 1. find parent in the same context
+    auto p = wait_handle->getFirstParent();
+    while (p) {
+      if ((p->getContextIdx() == context_idx) &&
+          visited.find(p->t_getid()) == visited.end()) {
+        wait_handle = p;
+        break;
+      }
+      p = p->getNextParent();
+    }
+    if (p) continue;
+
+    // 2. follow creator
+    if (m_creator && !m_creator->isFinished() &&
+        (m_creator->getContextIdx() == context_idx) &&
+        visited.find(m_creator->t_getid()) == visited.end()) {
+      wait_handle = m_creator;
+      continue;
+    }
+
+    // 3. cross the context boundary
+    result.append(null_object);
+    wait_handle = (context_idx > 1)
+      ? AsioSession::Get()->getContext(context_idx - 1)->getCurrent()
+      : nullptr;
+  }
+  return result;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

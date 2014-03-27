@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | PHP Version 5                                                        |
    +----------------------------------------------------------------------+
-   | Copyright (c) 1997-2010 The PHP Group                                |
+   | Copyright (c) 1997-2013 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,7 @@
    +----------------------------------------------------------------------+
  */
 
-/* $Id: tm2unixtime.c,v 1.28 2009-05-03 16:31:04 derick Exp $ */
+/* $Id$ */
 
 #include "timelib.h"
 
@@ -179,11 +179,11 @@ void timelib_do_rel_normalize(timelib_time *base, timelib_rel_time *rt)
 	do {} while (do_range_limit(0, 12, 12, &rt->m, &rt->y));
 }
 
-static void do_normalize(timelib_time* time)
+void timelib_do_normalize(timelib_time* time)
 {
-	do {} while (do_range_limit(0, 60, 60, &time->s, &time->i));
-	do {} while (do_range_limit(0, 60, 60, &time->i, &time->h));
-	do {} while (do_range_limit(0, 24, 24, &time->h, &time->d));
+	if (time->s != TIMELIB_UNSET) do {} while (do_range_limit(0, 60, 60, &time->s, &time->i));
+	if (time->s != TIMELIB_UNSET) do {} while (do_range_limit(0, 60, 60, &time->i, &time->h));
+	if (time->s != TIMELIB_UNSET) do {} while (do_range_limit(0, 24, 24, &time->h, &time->d));
 	do {} while (do_range_limit(1, 13, 12, &time->m, &time->y));
 
 	do {} while (do_range_limit_days(&time->y, &time->m, &time->d));
@@ -195,7 +195,7 @@ static void do_adjust_relative(timelib_time* time)
 	if (time->relative.have_weekday_relative) {
 		do_adjust_for_weekday(time);
 	}
-	do_normalize(time);
+	timelib_do_normalize(time);
 
 	if (time->have_relative) {
 		time->s += time->relative.s;
@@ -215,60 +215,57 @@ static void do_adjust_relative(timelib_time* time)
 			time->m++;
 			break;
 	}
-	do_normalize(time);
+	timelib_do_normalize(time);
 }
 
 static void do_adjust_special_weekday(timelib_time* time)
 {
-	timelib_sll current_dow, count;
+	timelib_sll count, dow, rem;
 
 	count = time->relative.special.amount;
+	dow = timelib_day_of_week(time->y, time->m, time->d);
 
-	current_dow = timelib_day_of_week(time->y, time->m, time->d);
-	if (count == 0) {
-		/* skip over saturday and sunday */
-		if (current_dow == 6) {
-			time->d += 2;
-		}
-		/* skip over sunday */
-		if (current_dow == 0) {
+	/* Add increments of 5 weekdays as a week, leaving the DOW unchanged. */
+	time->d += (count / 5) * 7;
+
+	/* Deal with the remainder. */
+	rem = (count % 5);
+
+	if (count > 0) {
+		if (rem == 0) {
+			/* Head back to Friday if we stop on the weekend. */
+			if (dow == 0) {
+				time->d -= 2;
+			} else if (dow == 6) {
+				time->d -= 1;
+			}
+		} else if (dow == 6) {
+			/* We ended up on Saturday, but there's still work to do, so move
+			 * to Sunday and continue from there. */
 			time->d += 1;
-		}
-	} else if (count > 0) {
-		/* skip over saturday and sunday */
-		if (current_dow == 5) {
+		} else if (dow + rem > 5) {
+			/* We're on a weekday, but we're going past Friday, so skip right
+			 * over the weekend. */
 			time->d += 2;
 		}
-		/* skip over sunday */
-		if (current_dow == 6) {
-			time->d += 1;
-		}
-		/* add increments of 5 weekdays as a week */
-		time->d += (count / 5) * 7;
-		/* if current DOW plus the remainder > 5, add two days */
-		current_dow = timelib_day_of_week(time->y, time->m, time->d);
-		time->d += (count % 5);
-		if ((count % 5) + current_dow > 5) {
-			time->d += 2;
-		}
-	} else if (count < 0) {
-		/* skip over sunday and saturday */
-		if (current_dow == 1) {
-			time->d -= 2;
-		}
-		/* skip over satruday */
-		if (current_dow == 0 ) {
+	} else {
+		/* Completely mirror the forward direction. This also covers the 0
+		 * case, since if we start on the weekend, we want to move forward as
+		 * if we stopped there while going backwards. */
+		if (rem == 0) {
+			if (dow == 6) {
+				time->d += 2;
+			} else if (dow == 0) {
+				time->d += 1;
+			}
+		} else if (dow == 0) {
 			time->d -= 1;
-		}
-		/* subtract increments of 5 weekdays as a week */
-		time->d += (count / 5) * 7;
-		/* if current DOW minus the remainder < 0, subtract two days */
-		current_dow = timelib_day_of_week(time->y, time->m, time->d);
-		time->d += (count % 5);
-		if ((count % 5) + current_dow < 1) {
+		} else if (dow + rem < 1) {
 			time->d -= 2;
 		}
 	}
+
+	time->d += rem;
 }
 
 static void do_adjust_special(timelib_time* time)
@@ -280,7 +277,7 @@ static void do_adjust_special(timelib_time* time)
 				break;
 		}
 	}
-	do_normalize(time);
+	timelib_do_normalize(time);
 	memset(&(time->relative.special), 0, sizeof(time->relative.special));
 }
 
@@ -300,7 +297,7 @@ static void do_adjust_special_early(timelib_time* time)
 				break;
 		}
 	}
-	do_normalize(time);
+	timelib_do_normalize(time);
 }
 
 static timelib_sll do_years(timelib_sll year)

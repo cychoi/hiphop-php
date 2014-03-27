@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -107,13 +107,13 @@ int TryStatement::getKidCount() const {
 void TryStatement::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_tryStmt = boost::dynamic_pointer_cast<Statement>(cp);
+      m_tryStmt = dynamic_pointer_cast<Statement>(cp);
       break;
     case 1:
-      m_catches = boost::dynamic_pointer_cast<StatementList>(cp);
+      m_catches = dynamic_pointer_cast<StatementList>(cp);
       break;
     case 2:
-      m_finallyStmt = boost::dynamic_pointer_cast<Statement>(cp);
+      m_finallyStmt = dynamic_pointer_cast<Statement>(cp);
     default:
       assert(false);
       break;
@@ -124,6 +124,28 @@ void TryStatement::inferTypes(AnalysisResultPtr ar) {
   if (m_tryStmt) m_tryStmt->inferTypes(ar);
   if (m_catches) m_catches->inferTypes(ar);
   if (m_finallyStmt) m_finallyStmt->inferTypes(ar);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void TryStatement::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = 2;
+  if (m_catches->getCount() > 0) numProps++;
+  if (m_finallyStmt != nullptr) numProps++;
+  cg.printObjectHeader("TryStatement", numProps);
+  cg.printPropertyHeader("block");
+  cg.printAsEnclosedBlock(m_tryStmt);
+  if (m_catches->getCount() > 0)  {
+    cg.printPropertyHeader("catchStatements");
+    cg.printStatementVector(m_catches);
+  }
+  if (m_finallyStmt != nullptr) {
+    cg.printPropertyHeader("finallyStatement");
+    m_finallyStmt->outputCodeModel(cg);
+  }
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

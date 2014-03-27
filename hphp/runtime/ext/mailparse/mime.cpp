@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,18 +16,14 @@
 */
 
 #include "hphp/runtime/ext/mailparse/mime.h"
-#include "hphp/runtime/ext/ext_stream.h"
-#include "hphp/runtime/base/file/mem_file.h"
-#include "hphp/runtime/base/runtime_error.h"
+#include "hphp/runtime/ext/stream/ext_stream.h"
+#include "hphp/runtime/base/mem-file.h"
+#include "hphp/runtime/base/runtime-error.h"
 
 #define MAXLEVELS  20
 #define MAXPARTS  300
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
-
-StaticString MimePart::s_class_name("mailparse_mail_structure");
-
 ///////////////////////////////////////////////////////////////////////////////
 
 MimePart::MimeHeader::MimeHeader()
@@ -167,7 +163,7 @@ MimePart::MimeHeader::MimeHeader(php_rfc822_tokenized_t *toks)
             rfc2231_to_mime(value_buf, NULL, 0, prevcharset_p);
 
             m_attributes.set(name_buf, value_buf.detach());
-            value_buf.reset();
+            value_buf.clear();
 
             prevcharset_p = 0;
             is_rfc2231_name = false;
@@ -219,12 +215,12 @@ void MimePart::MimeHeader::clear() {
   m_attributes = null_array;
 }
 
-Variant MimePart::MimeHeader::get(CStrRef attrname) {
+Variant MimePart::MimeHeader::get(const String& attrname) {
   return m_attributes[attrname];
 }
 
-void MimePart::MimeHeader::getAll(Array &ret, CStrRef valuelabel,
-                                  CStrRef attrprefix) {
+void MimePart::MimeHeader::getAll(Array &ret, const String& valuelabel,
+                                  const String& attrprefix) {
   for (ArrayIter iter(m_attributes); iter; ++iter) {
     ret.set(attrprefix + iter.first().toString(), iter.second());
   }
@@ -281,26 +277,24 @@ void MimePart::MimeHeader::rfc2231_to_mime(StringBuffer &value_buf,
 
   /* If first encoded token*/
   if (charset_p && !prevcharset_p && startofvalue) {
-    value_buf += "=?";
-    value_buf += value;
-    value_buf += "?Q?";
-    value_buf += startofvalue;
+    value_buf.append("=?");
+    value_buf.append(value);
+    value_buf.append("?Q?");
+    value_buf.append(startofvalue);
   }
 
   /* If last encoded token*/
   if (prevcharset_p && !charset_p) {
-    value_buf += "?=";
+    value_buf.append("?=");
   }
 
   /* Append value*/
   if ((!charset_p || (prevcharset_p && charset_p)) && value) {
-    value_buf += value;
+    value_buf.append(value);
   }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
-IMPLEMENT_OBJECT_ALLOCATION(MimePart);
 
 MimePart::MimePart()
   : m_startpos(0), m_endpos(0), m_bodystart(0), m_bodyend(0),
@@ -330,7 +324,7 @@ bool MimePart::enumeratePartsImpl(Enumerator *top, Enumerator **child,
 
   for (ArrayIter iter(m_children); iter; ++iter) {
     if (next.id) {
-      MimePart *childpart = iter.second().toObject().getTyped<MimePart>();
+      MimePart *childpart = iter.second().toResource().getTyped<MimePart>();
       if (!childpart->enumeratePartsImpl(top, &next.next, callback, ptr)) {
         return false;
       }
@@ -411,7 +405,7 @@ bool MimePart::findPart(Enumerator *id, void *ptr) {
   return true;
 }
 
-Object MimePart::findByName(const char *name) {
+Resource MimePart::findByName(const char *name) {
   struct find_part_struct find;
   find.searchfor = name;
   find.foundpart = NULL;
@@ -425,7 +419,8 @@ static int filter_into_work_buffer(int c, void *dat) {
 }
 
 int MimePart::filter(int c) {
-  m_parsedata.workbuf += (char)c;
+  char buf[] = {(char)c, '\0'};
+  m_parsedata.workbuf += buf;
   if (m_parsedata.workbuf.size() >= 4096) {
     (this->*m_extract_func)(m_parsedata.workbuf);
     m_parsedata.workbuf.clear();
@@ -472,7 +467,7 @@ void MimePart::decoderFinish() {
   }
 }
 
-void MimePart::decoderFeed(CStrRef str) {
+void MimePart::decoderFeed(const String& str) {
   if (!str.empty()) {
     if (m_extract_filter) {
       for (int i = 0; i < str.size(); i++) {
@@ -488,15 +483,17 @@ void MimePart::decoderFeed(CStrRef str) {
   }
 }
 
+const StaticString s_1_pt_0("1.0");
+
 bool MimePart::isVersion1() {
-  return m_mime_version == "1.0" || !m_parent.isNull();
+  return m_mime_version == s_1_pt_0 || !m_parent.isNull();
 }
 
 MimePart *MimePart::getParent() {
   return m_parent.getTyped<MimePart>();
 }
 
-static const StaticString
+const StaticString
   s_headers("headers"),
   s_starting_pos("starting-pos"),
   s_starting_pos_body("starting-pos-body"),
@@ -518,7 +515,11 @@ static const StaticString
   s_content_description("content-description"),
   s_content_language("content-language"),
   s_content_md5("content-md5"),
-  s_boundary("boundary");
+  s_boundary("boundary"),
+  s_to("to"),
+  s_cc("cc"),
+  s_mime_version("mime-version"),
+  s_content_transfer_encoding("content-transfer-encoding");
 
 Variant MimePart::getPartData() {
   Array ret = Array::Create();
@@ -587,7 +588,7 @@ Variant MimePart::getPartData() {
     php_rfc822_tokenize_free(toks);
   }
 
-  auto copyHeader = [&](CVarRef key) {
+  auto copyHeader = [&](const Variant& key) {
     if (m_headers.exists(key)) ret.set(key, m_headers[key]);
   };
   copyHeader(s_content_description);
@@ -623,7 +624,7 @@ MimePart *MimePart::createChild(int startpos, bool inherit) {
   m_parsedata.lastpart = child;
   child->m_parent = this;
 
-  m_children.append(Object(child));
+  m_children.append(Resource(child));
   child->m_startpos = child->m_endpos = child->m_bodystart =
     child->m_bodyend = startpos;
 
@@ -672,7 +673,7 @@ bool MimePart::processHeader() {
 
     /* add the header to the hash.
      * join multiple To: or Cc: lines together */
-    if ((header_key == "to" || header_key == "cc") &&
+    if ((header_key == s_to || header_key == s_cc) &&
         m_headers.exists(header_key)) {
       String newstr = m_headers[header_key].toString();
       newstr += ", ";
@@ -682,7 +683,7 @@ bool MimePart::processHeader() {
       if (m_headers.exists(header_key)) {
         Variant &zheaderval = m_headers.lvalAt(header_key);
         if (zheaderval.isArray()) {
-          zheaderval.append(String(header_val, CopyString));
+          zheaderval.toArrRef().append(String(header_val, CopyString));
         } else {
           // Create a nested array if there is more than one of the same header
           Array zarr = Array::Create();
@@ -696,21 +697,21 @@ bool MimePart::processHeader() {
     }
 
     /* if it is useful, keep a pointer to it in the mime part */
-    if (header_key == "mime-version") {
+    if (header_key == s_mime_version) {
       m_mime_version = header_val_stripped;
-    } else if (header_key == "content-location") {
+    } else if (header_key == s_content_location) {
       m_content_location =
         String(php_rfc822_recombine_tokens
                (toks, 2, toks->ntokens-2,
                 PHP_RFC822_RECOMBINE_IGNORE_COMMENTS), AttachString);
-    } else if (header_key == "content-base") {
+    } else if (header_key == s_content_base) {
       m_content_base =
         String(php_rfc822_recombine_tokens
                (toks, 2, toks->ntokens-2,
                 PHP_RFC822_RECOMBINE_IGNORE_COMMENTS), AttachString);
-    } else if (header_key == "content-transfer-encoding") {
+    } else if (header_key == s_content_transfer_encoding) {
       m_content_transfer_encoding = header_val_stripped;
-    } else if (header_key == "content-type") {
+    } else if (header_key == s_content_type) {
       m_content_type = MimeHeader(toks);
       Variant boundary = m_content_type.get(s_boundary);
       if (!boundary.isNull()) {
@@ -720,7 +721,7 @@ bool MimePart::processHeader() {
       if (!charset.isNull()) {
         m_charset = charset.toString();
       }
-    } else if (header_key == "content-disposition") {
+    } else if (header_key == s_content_disposition) {
       m_content_disposition = MimeHeader(toks);
     }
   }
@@ -730,7 +731,7 @@ bool MimePart::processHeader() {
   return true;
 }
 
-bool MimePart::ProcessLine(MimePart *workpart, CStrRef line) {
+bool MimePart::ProcessLine(MimePart *workpart, const String& line) {
   /* sanity check */
   if (workpart->m_children.size() > MAXPARTS) {
     raise_warning("MIME message too complex");
@@ -902,24 +903,24 @@ void MimePart::UpdatePositions(MimePart *part, int newendpos,
   }
 }
 
-Variant MimePart::extract(CVarRef filename, CVarRef callbackfunc, int decode,
+Variant MimePart::extract(const Variant& filename, const Variant& callbackfunc, int decode,
                           bool isfile) {
   /* filename can be a filename or a stream */
-  Object file;
+  Resource file;
   File *f = NULL;
   if (filename.isResource()) {
-    f = filename.toObject().getTyped<File>();
+    f = filename.toResource().getTyped<File>();
   } else if (isfile) {
-    Variant stream = File::Open(filename, "rb");
+    Variant stream = File::Open(filename.toString(), "rb");
     if (!same(stream, false)) {
-      file = stream.toObject();
+      file = stream.toResource();
       f = file.getTyped<File>();
     }
   } else {
     /* filename is the actual data */
     String data = filename.toString();
     f = NEWOBJ(MemFile)(data.data(), data.size());
-    file = Object(f);
+    file = Resource(f);
   }
 
   if (f == NULL) {
@@ -944,7 +945,7 @@ Variant MimePart::extract(CVarRef filename, CVarRef callbackfunc, int decode,
       return m_extract_context;
     }
     if (callbackfunc.isResource()) {
-      return f_stream_get_contents(callbackfunc);
+      return f_stream_get_contents(callbackfunc.toResource());
     }
     return true;
   }
@@ -981,19 +982,19 @@ int MimePart::extractImpl(int decode, File *src) {
   return true;
 }
 
-void MimePart::callUserFunc(CStrRef s) {
-  vm_call_user_func(m_extract_context, CREATE_VECTOR1(s));
+void MimePart::callUserFunc(const String& s) {
+  vm_call_user_func(m_extract_context, make_packed_array(s));
 }
 
-void MimePart::outputToStdout(CStrRef s) {
+void MimePart::outputToStdout(const String& s) {
   echo(s);
 }
 
-void MimePart::outputToFile(CStrRef s) {
-  m_extract_context.toObject().getTyped<File>()->write(s);
+void MimePart::outputToFile(const String& s) {
+  m_extract_context.toResource().getTyped<File>()->write(s);
 }
 
-void MimePart::outputToString(CStrRef s) {
+void MimePart::outputToString(const String& s) {
   m_extract_context = m_extract_context.toString() + s;
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,15 +19,19 @@
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/compiler/analysis/variable_table.h"
-#include "hphp/util/parser/scanner.h"
+#include "hphp/parser/scanner.h"
 #include "hphp/util/logger.h"
-#include "hphp/util/db_query.h"
-#include "hphp/util/util.h"
+#include "hphp/util/db-query.h"
+#include "hphp/util/text-util.h"
 #include "hphp/util/process.h"
+#include "hphp/hhbbc/hhbbc.h"
 #include <boost/algorithm/string/trim.hpp>
+#include <map>
+#include <set>
+#include <vector>
 #include "hphp/runtime/base/preg.h"
 
-using namespace HPHP;
+namespace HPHP {
 
 using std::set;
 using std::map;
@@ -35,7 +39,6 @@ using std::map;
 
 ///////////////////////////////////////////////////////////////////////////////
 
-std::string Option::SystemRoot;
 std::string Option::RootDirectory;
 set<string> Option::PackageDirectories;
 set<string> Option::PackageFiles;
@@ -53,7 +56,6 @@ map<string, string> Option::IncludeRoots;
 map<string, string> Option::AutoloadRoots;
 vector<string> Option::IncludeSearchPaths;
 string Option::DefaultIncludeRoot;
-vector<Option::SepExtensionOptions> Option::SepExtensions;
 map<string, int> Option::DynamicFunctionCalls;
 
 bool Option::GeneratePickledPHP = false;
@@ -70,7 +72,7 @@ vector<string> Option::DynamicMethodPrefixes;
 vector<string> Option::DynamicMethodPostfixes;
 vector<string> Option::DynamicClassPrefixes;
 vector<string> Option::DynamicClassPostfixes;
-set<string> Option::DynamicInvokeFunctions;
+set<string, stdltistr> Option::DynamicInvokeFunctions;
 set<string> Option::VolatileClasses;
 map<string,string> Option::AutoloadClassMap;
 map<string,string> Option::AutoloadFuncMap;
@@ -85,13 +87,11 @@ string Option::RepoCentralPath;
 bool Option::RepoDebugInfo = false;
 
 string Option::IdPrefix = "$$";
-string Option::LabelEscape = "$";
 
 string Option::LambdaPrefix = "df_";
 string Option::Tab = "  ";
 
 const char *Option::UserFilePrefix = "php/";
-const char *Option::ClassHeaderPrefix = "cls/";
 
 bool Option::PreOptimization = false;
 bool Option::PostOptimization = false;
@@ -99,6 +99,7 @@ bool Option::SeparateCompilation = false;
 bool Option::SeparateCompLib = false;
 bool Option::AnalyzePerfectVirtuals = true;
 bool Option::HardTypeHints = true;
+bool Option::HardConstProp = true;
 
 bool Option::KeepStatementsWithNoEffect = false;
 
@@ -113,27 +114,26 @@ std::string Option::ProgramName;
 
 bool Option::ParseTimeOpts = true;
 bool Option::EnableHipHopSyntax = false;
+bool Option::EnableZendCompat = false;
 bool Option::JitEnableRenameFunction = false;
 bool Option::EnableHipHopExperimentalSyntax = false;
 bool Option::EnableShortTags = true;
 bool Option::EnableAspTags = false;
-bool Option::EnableXHP = true;
-bool Option::EnableFinallyStatement = false;
+bool Option::EnableXHP = false;
+bool Option::IntsOverflowToInts = false;
 int Option::ParserThreadCount = 0;
 
 int Option::GetScannerType() {
   int type = 0;
   if (EnableShortTags) type |= Scanner::AllowShortTags;
-  if (EnableHipHopSyntax) type |= Scanner::AllowHipHopSyntax;
   if (EnableAspTags) type |= Scanner::AllowAspTags;
+  if (EnableXHP) type |= Scanner::AllowXHPSyntax;
+  if (EnableHipHopSyntax) type |= Scanner::AllowHipHopSyntax;
   return type;
 }
 
 int Option::InvokeFewArgsCount = 6;
-bool Option::InvokeWithSpecificArgs = true;
-bool Option::FlattenInvoke = true;
 int Option::InlineFunctionThreshold = -1;
-bool Option::UseVirtualDispatch = false;
 bool Option::EliminateDeadCode = true;
 bool Option::CopyProp = false;
 bool Option::LocalCopyProp = true;
@@ -144,6 +144,7 @@ bool Option::VariableCoalescing = false;
 bool Option::ArrayAccessIdempotent = false;
 bool Option::DumpAst = false;
 bool Option::WholeProgram = true;
+bool Option::UseHHBBC = !getenv("HHVM_DISABLE_HHBBC");
 bool Option::RecordErrors = true;
 std::string Option::DocJson;
 
@@ -152,28 +153,9 @@ bool Option::AllVolatile = false;
 
 StringBag Option::OptionStrings;
 
-bool Option::GenerateCppLibCode = false;
-bool Option::GenerateSourceInfo = false;
 bool Option::GenerateDocComments = true;
 
-void (*Option::m_hookHandler)(Hdf &config);
 bool (*Option::PersistenceHook)(BlockScopeRawPtr scope, FileScopeRawPtr file);
-
-///////////////////////////////////////////////////////////////////////////////
-// load from a PHP file
-
-std::string Option::GetSystemRoot() {
-  if (SystemRoot.empty()) {
-    const char *home = getenv("HPHP_HOME");
-    if (!home || !*home) {
-      throw Exception("Environment variable HPHP_HOME is not set, "
-                      "and neither is the SystemRoot option.");
-    }
-    SystemRoot = home;
-    SystemRoot += "/hphp";
-  }
-  return SystemRoot;
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 // load from HDF file
@@ -222,25 +204,7 @@ void Option::Load(Hdf &config) {
     }
 
     READ_CG_OPTION(IdPrefix);
-    READ_CG_OPTION(LabelEscape);
     READ_CG_OPTION(LambdaPrefix);
-  }
-
-  int count = 0;
-  for (Hdf hdf = config["SepExtensions"].firstChild(); hdf.exists();
-       hdf = hdf.next()) {
-    ++count;
-  }
-  SepExtensions.resize(count);
-  count = 0;
-  for (Hdf hdf = config["SepExtensions"].firstChild(); hdf.exists();
-       hdf = hdf.next()) {
-    SepExtensionOptions &options = SepExtensions[count++];
-    options.name = hdf.getName();
-    options.soname = hdf["soname"].getString();
-    options.include_path = hdf["include"].getString();
-    options.lib_path = hdf["libpath"].getString();
-    options.shared = hdf["shared"].getBool();
   }
 
   config["DynamicFunctionPrefix"].get(DynamicFunctionPrefixes);
@@ -276,32 +240,38 @@ void Option::Load(Hdf &config) {
   }
 
   HardTypeHints = config["HardTypeHints"].getBool(true);
+  HardConstProp = config["HardConstProp"].getBool(true);
 
   EnableHipHopSyntax = config["EnableHipHopSyntax"].getBool();
+  EnableZendCompat = config["EnableZendCompat"].getBool();
   JitEnableRenameFunction = config["JitEnableRenameFunction"].getBool();
   EnableHipHopExperimentalSyntax =
     config["EnableHipHopExperimentalSyntax"].getBool();
   EnableShortTags = config["EnableShortTags"].getBool(true);
 
+  IntsOverflowToInts =
+    config["Hack"]["Lang"]["IntsOverflowToInts"].getBool(EnableHipHopSyntax);
+
   EnableAspTags = config["EnableAspTags"].getBool();
 
-  EnableXHP = config["EnableXHP"].getBool(true);
+  EnableXHP = config["EnableXHP"].getBool(false);
+
+  if (EnableHipHopSyntax) {
+    // If EnableHipHopSyntax is true, it forces EnableXHP to true
+    // regardless of how it was set in the config
+    EnableXHP = true;
+  }
 
   ParserThreadCount = config["ParserThreadCount"].getInt32(0);
   if (ParserThreadCount <= 0) {
     ParserThreadCount = Process::GetCPUCount();
   }
 
-  EnableFinallyStatement = config["EnableFinallyStatement"].getBool();
-
   EnableEval = (EvalLevel)config["EnableEval"].getByte(0);
   AllDynamic = config["AllDynamic"].getBool(true);
   AllVolatile = config["AllVolatile"].getBool();
 
-  GenerateCppLibCode       = config["GenerateCppLibCode"].getBool(false);
-  GenerateSourceInfo       = config["GenerateSourceInfo"].getBool(false);
   GenerateDocComments      = config["GenerateDocComments"].getBool(true);
-  UseVirtualDispatch       = config["UseVirtualDispatch"].getBool(false);
   EliminateDeadCode        = config["EliminateDeadCode"].getBool(true);
   CopyProp                 = config["CopyProp"].getBool(false);
   LocalCopyProp            = config["LocalCopyProp"].getBool(true);
@@ -312,8 +282,10 @@ void Option::Load(Hdf &config) {
   ArrayAccessIdempotent    = config["ArrayAccessIdempotent"].getBool(false);
   DumpAst                  = config["DumpAst"].getBool(false);
   WholeProgram             = config["WholeProgram"].getBool(true);
+  UseHHBBC                 = config["UseHHBBC"].getBool(UseHHBBC);
 
-  if (m_hookHandler) m_hookHandler(config);
+  // Temporary, during file-cache migration.
+  FileCache::UseNewCache   = config["UseNewCache"].getBool(false);
 
   OnLoad();
 }
@@ -378,22 +350,22 @@ std::string Option::MangleFilename(const std::string &name, bool id) {
   ret += name;
 
   if (id) {
-    Util::replaceAll(ret, "/", "$");
-    Util::replaceAll(ret, "-", "_");
-    Util::replaceAll(ret, ".", "_");
+    replaceAll(ret, "/", "$");
+    replaceAll(ret, "-", "_");
+    replaceAll(ret, ".", "_");
   }
   return ret;
 }
 
 bool Option::IsFileExcluded(const std::string &file,
                             const std::set<std::string> &patterns) {
-  String sfile(file.c_str(), file.size(), AttachLiteral);
+  String sfile(file.c_str(), file.size(), CopyString);
   for (set<string>::const_iterator iter = patterns.begin();
        iter != patterns.end(); ++iter) {
     const std::string &pattern = *iter;
     Variant matches;
     Variant ret = preg_match(String(pattern.c_str(), pattern.size(),
-                                    AttachLiteral), sfile, matches);
+                                    CopyString), sfile, matches);
     if (ret.toInt64() > 0) {
       return true;
     }
@@ -410,3 +382,15 @@ void Option::FilterFiles(std::vector<std::string> &files,
   }
 }
 
+//////////////////////////////////////////////////////////////////////
+
+void initialize_hhbbc_options() {
+  if (!Option::UseHHBBC) return;
+  HHBBC::options.InterceptableFunctions = Option::DynamicInvokeFunctions;
+  HHBBC::options.HardConstProp          = Option::HardConstProp;
+  HHBBC::options.HardTypeHints          = Option::HardTypeHints;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+}

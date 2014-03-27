@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,8 +22,11 @@
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/jit/translator.h"
 
+#define KindOfUnknown DontUseKindOfUnknownInThisFile
+#define KindOfInvalid DontUseKindOfInvalidInThisFile
+
 namespace HPHP {
-namespace Transl {
+namespace JIT {
 
 static inline DataType
 normalizeDataType(DataType dt) {
@@ -36,69 +39,55 @@ normalizeDataType(DataType dt) {
   return dt == KindOfStaticString ? KindOfString : dt;
 }
 
-RuntimeType::RuntimeType(DataType outer, DataType inner /* = KindOfInvalid */,
-                         const Class* klass /* = NULL */)
-  : m_kind(VALUE) {
-  m_value.outerType = normalizeDataType(outer);
-  m_value.innerType = normalizeDataType(inner);
+void RuntimeType::init(DataType outer,
+                       DataType inner /* = KindOfNone */,
+                       const Class* klass /*= nullptr*/) {
+  m_value.outerType = outer;
+  m_value.innerType = inner;
   m_value.klass = klass;
   m_value.knownClass = nullptr;
   consistencyCheck();
+}
+
+RuntimeType::RuntimeType(DataType outer, DataType inner /* = KindOfNone */,
+                         const Class* klass /* = NULL */)
+  : m_kind(VALUE) {
+  init(normalizeDataType(outer), normalizeDataType(inner), klass);
 }
 
 RuntimeType::RuntimeType(const StringData* sd)
   : m_kind(VALUE) {
-  m_value.outerType = KindOfString;
-  m_value.innerType = KindOfInvalid;
+  init(KindOfString);
   m_value.string = sd;
-  m_value.knownClass = nullptr;
-  consistencyCheck();
 }
 
 RuntimeType::RuntimeType(const ArrayData* ad)
   : m_kind(VALUE) {
-  m_value.outerType = KindOfArray;
-  m_value.innerType = KindOfInvalid;
+  init(KindOfArray);
   m_value.array = ad;
-  m_value.knownClass = nullptr;
-  consistencyCheck();
 }
 
 RuntimeType::RuntimeType(bool value)
   : m_kind(VALUE) {
-  m_value.outerType = KindOfBoolean;
-  m_value.innerType = KindOfInvalid;
-  m_value.klass = nullptr;
+  init(KindOfBoolean);
   m_value.boolean = value;
   m_value.boolValid = true;
-  m_value.knownClass = nullptr;
-  consistencyCheck();
 }
 
 RuntimeType::RuntimeType(int64_t value)
   : m_kind(VALUE) {
-  m_value.outerType = KindOfInt64;
-  m_value.innerType = KindOfInvalid;
+  init(KindOfInt64);
   m_value.intval = value;
-  m_value.knownClass = nullptr;
-  consistencyCheck();
 }
 
 RuntimeType::RuntimeType(const Class* klass)
   : m_kind(VALUE) {
-  m_value.outerType = KindOfClass;
-  m_value.innerType = KindOfInvalid;
-  m_value.klass = klass;
-  m_value.knownClass = nullptr;
-  consistencyCheck();
+  init(KindOfClass, KindOfNone, klass);
 }
 
 RuntimeType::RuntimeType() :
   m_kind(VALUE) {
-  m_value.outerType = KindOfInvalid;
-  m_value.innerType = KindOfInvalid;
-  m_value.klass = nullptr;
-  m_value.knownClass = nullptr;
+  init(KindOfNone);
 }
 
 RuntimeType::RuntimeType(const Iter* it) :
@@ -115,10 +104,7 @@ RuntimeType RuntimeType::box() const {
     consistencyCheck();
     return *this;
   }
-  RuntimeType rtt;
-  rtt.m_value.outerType = KindOfRef;
-  rtt.m_value.innerType = m_value.outerType;
-  rtt.consistencyCheck();
+  RuntimeType rtt(KindOfRef, m_value.outerType);
   return rtt;
 }
 
@@ -128,10 +114,7 @@ RuntimeType RuntimeType::unbox() const {
     consistencyCheck();
     return *this;
   }
-  RuntimeType rtt;
-  rtt.m_value.outerType = m_value.innerType;
-  rtt.m_value.innerType = KindOfInvalid;
-  rtt.consistencyCheck();
+  RuntimeType rtt(m_value.innerType);
   return rtt;
 }
 
@@ -201,35 +184,55 @@ RuntimeType::valueGeneric() const {
 const Class*
 RuntimeType::knownClass() const {
   consistencyCheck();
+  assert(hasKnownClass());
   return m_value.knownClass;
+}
+
+bool
+RuntimeType::hasArrayKind() const {
+  consistencyCheck();
+  return m_value.arrayKindValid;
+}
+
+ArrayData::ArrayKind
+RuntimeType::arrayKind() const {
+  consistencyCheck();
+  assert(hasArrayKind());
+  return m_value.arrayKind;
 }
 
 RuntimeType
 RuntimeType::setValueType(DataType newInner) const {
   assert(m_kind == VALUE);
-  RuntimeType rtt;
-  rtt.m_kind = VALUE;
-  rtt.m_value.outerType = outerType();
   if (outerType() == KindOfRef) {
-    rtt.m_value.innerType = newInner;
-  } else {
-    rtt.m_value.outerType = newInner;
+    RuntimeType rtt(KindOfRef, newInner);
+    assert(rtt.valueType() == newInner);
+    return rtt;
   }
+  RuntimeType rtt(newInner);
   assert(rtt.valueType() == newInner);
-  rtt.m_value.klass = nullptr;
-  rtt.consistencyCheck();
   return rtt;
 }
 
 RuntimeType
 RuntimeType::setKnownClass(const Class* klass) const {
   assert(isObject() || (isRef() && innerType() == KindOfObject));
+  RuntimeType rtt(outerType(), innerType(), m_value.klass);
+  rtt.m_kind = this->m_kind;
+  rtt.m_value.knownClass = klass;
+  rtt.consistencyCheck();
+  return rtt;
+}
+
+RuntimeType
+RuntimeType::setArrayKind(ArrayData::ArrayKind arrayKind) const {
+  assert(isArray() || (isRef() && innerType() == KindOfArray));
   RuntimeType rtt;
   rtt.m_kind = this->m_kind;
   rtt.m_value.outerType = outerType();
   rtt.m_value.innerType = innerType();
-  rtt.m_value.klass = m_value.klass;
-  rtt.m_value.knownClass = klass;
+  rtt.m_value.arrayKindValid = true;
+  rtt.m_value.arrayKind = arrayKind;
   rtt.consistencyCheck();
   return rtt;
 }
@@ -268,8 +271,8 @@ bool RuntimeType::isRef() const {
 }
 
 bool RuntimeType::isVagueValue() const {
-  return m_kind == VALUE && (outerType() == KindOfInvalid ||
-                             outerType() == KindOfAny);
+  assert(IMPLIES(m_kind == VALUE, outerType() != KindOfNone));
+  return m_kind == VALUE && outerType() == KindOfAny;
 }
 
 bool RuntimeType::isRefCounted() const {
@@ -308,7 +311,7 @@ bool RuntimeType::isClass() const {
   return isValue() && outerType() == KindOfClass;
 }
 
-bool RuntimeType::hasKnownType() const {
+bool RuntimeType::hasKnownClass() const {
   return isObject() && m_value.knownClass != nullptr;
 }
 
@@ -371,15 +374,22 @@ string RuntimeType::pretty() const {
     sprintf(buf, "(Value %s)", tname(m_value.outerType).c_str());
   }
   string retval = buf;
-  if (valueType() == KindOfObject && valueClass() != nullptr) {
-    char buf2[1024];
-    sprintf(buf2, "(OfClass %s)", valueClass()->preClass()->name()->data());
-    retval += string(buf2);
+  if (valueType() == KindOfObject) {
+    if (valueClass() != nullptr) {
+      retval += folly::format("(OfClass {})",
+                valueClass()->name()->data()).str();
+    } else if (hasKnownClass()) {
+      retval += folly::format("(Known Class {})",
+                knownClass()->name()->data()).str();
+    }
   }
   if (valueType() == KindOfClass && valueClass() != nullptr) {
-    char buf2[1024];
-    sprintf(buf2, "(Class %s)", valueClass()->preClass()->name()->data());
-    retval += string(buf2);
+    retval += folly::format("(Class {})",
+              valueClass()->name()->data()).str();
+  }
+  if (valueType() == KindOfArray && hasArrayKind()) {
+    retval += folly::format("(Kind {})",
+                            ArrayData::kindToString(arrayKind())).str();
   }
   return retval;
 }

@@ -11,25 +11,45 @@
  *   r9  / x5:  uint8_t* targetCacheBase
  */
 
+#include "hphp/runtime/vm/jit/reserved-stack.h"
+
+#ifndef __APPLE__
+#define CFI(x)         .cfi_##x
+#define CFI2(x, y)     .cfi_##x y
+#define CFI3C(x, y, z) .cfi_##x y##, z
+#define ETCH_ALIGNMENT .align 16
+#define ETCH_SECTION   .section .text
+#define ETCH_NAME(x)   x
+#define ETCH_LABEL(x)  .L##x
+#else
+#define CFI(x)         /* not used on OSX */
+#define CFI2(x, y)     /* not used on OSX */
+#define CFI3C(x, y, z) /* not used on OSX */
+#define ETCH_ALIGNMENT .align 4 // on OSX this is 2^value
+#define ETCH_SECTION   .section .text,
+#define ETCH_NAME(x)   _##x
+#define ETCH_LABEL(x)  .L##_##x
+#endif
+
 ///////////////////////////////////////////////////////////////////////////////
 #if defined(__x86_64__)
   .byte 0
-  .align 16
-  .section .text
-  .globl enterTCHelper
-enterTCHelper:
+  ETCH_ALIGNMENT
+  ETCH_SECTION
+  .globl ETCH_NAME(enterTCHelper)
+ETCH_NAME(enterTCHelper:)
   // Prologue
-  .cfi_startproc
+  CFI(startproc)             // amongst other things, cfa reg is now rsp, and offset is 8
   push %rbp
-  .cfi_adjust_cfa_offset 8  // offset to previous frame relative to %rsp
-  .cfi_offset rbp, -16      // Where to find previous value of rbp
+  CFI2(adjust_cfa_offset, 8) // cfa is now 8 bytes further from rsp than it was before
+  CFI3C(offset, rbp, -16)    // Where to find previous value of rbp, relative to cfa
 
   // Set firstAR->m_savedRbp to point to this frame.
   mov %rsp, (%r8)
 
   // Save infoPtr
   push %rcx
-  .cfi_adjust_cfa_offset 8
+  CFI2(adjust_cfa_offset, 8)
 
   // Set up special registers used for translated code.
   mov %rdi, %rbx          // rVmSp
@@ -45,41 +65,48 @@ enterTCHelper:
    * 16-byte aligned.
    */
 
-  sub $0x280, %rsp // kReservedRSPScratchSpace
+  sub $RESERVED_STACK_TOTAL_SPACE, %rsp
+  CFI2(adjust_cfa_offset, RESERVED_STACK_TOTAL_SPACE)
 
   /*
    * If returning from a BIND_CALL request, push the return IP saved
    * in the ActRec pointed to by r15.  The 0x1 in the cmp instruction
    * must be kept in sync with REQ_BIND_CALL in abi-x64.h.
    */
-  cmp $0x1, 0x0(%rcx)
-  jne .LenterTCHelper$jumpToTC
-  lea .LenterTCHelper$serviceReqLabel(%rip), %rax
+  cmpl $0x1, 0x0(%rcx)
+  jne ETCH_LABEL(enterTCHelper$jumpToTC)
+  lea ETCH_LABEL(enterTCHelper$serviceReqLabel(%rip)), %rax
   push %rax
   push 0x8(%r15)
   jmp *%rdx
-.LenterTCHelper$jumpToTC:
-  // May need cfi_adjust_cfa_offset annotations: Task #1747813
+ETCH_LABEL(enterTCHelper$jumpToTC:)
   call *%rdx
-.LenterTCHelper$serviceReqLabel:
+ETCH_LABEL(enterTCHelper$serviceReqLabel:)
 
-  add $0x280, %rsp // kReservedRSPScratchSpace
+  /*
+   * enterTCServiceReq is never called directly; this exists to give the jit
+   * access to the address of the expected return address while in the TC.
+   */
+  .globl ETCH_NAME(enterTCServiceReq)
+  ETCH_NAME(enterTCServiceReq:)
+  add $RESERVED_STACK_TOTAL_SPACE, %rsp
+  CFI2(adjust_cfa_offset, -RESERVED_STACK_TOTAL_SPACE)
   // Restore infoPtr into %rbx
   pop %rbx
-  .cfi_adjust_cfa_offset -8
+  CFI2(adjust_cfa_offset, -8)
 
   // Copy the values passed from jitted code into *infoPtr
   mov %rdi, 0x0(%rbx)
   test %rdi,%rdi
-  jnz .LenterTCHelper$copyReqArgs
-  .cfi_remember_state
+  jnz ETCH_LABEL(enterTCHelper$copyReqArgs)
+  CFI(remember_state)
   pop %rbp
-  .cfi_restore rbp
-  .cfi_adjust_cfa_offset -8
+  CFI2(restore, rbp)
+  CFI2(adjust_cfa_offset, -8)
   ret
 
-.LenterTCHelper$copyReqArgs:
-  .cfi_restore_state
+ETCH_LABEL(enterTCHelper$copyReqArgs:)
+  CFI(restore_state)
   mov %rsi, 0x8(%rbx)
   mov %rdx, 0x10(%rbx)
   mov %rcx, 0x18(%rbx)
@@ -94,14 +121,16 @@ enterTCHelper:
 
   // Epilogue
   pop %rbp
-  .cfi_restore rbp
-  .cfi_adjust_cfa_offset -8
+  CFI2(restore, rbp)
+  CFI2(adjust_cfa_offset, -8)
   ret
-  .cfi_endproc
+  CFI(endproc)
 ///////////////////////////////////////////////////////////////////////////////
 #elif defined(__AARCH64EL__)
   .globl enterTCHelper
 enterTCHelper:
+  .globl enterTCServiceReq
+enterTCServiceReq:
   brk 0
 
 #endif

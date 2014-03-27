@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 #define incl_HPHP_SIMPLE_FUNCTION_CALL_H_
 
 #include "hphp/compiler/expression/function_call.h"
+#include <map>
 #include "hphp/compiler/analysis/variable_table.h"
 
 namespace HPHP {
@@ -40,9 +41,14 @@ public:
 
   bool isDefineWithoutImpl(AnalysisResultConstPtr ar);
   void setValid() { m_valid = true; }
-  void setFromCompiler() { m_fromCompiler = true; }
   void setThrowFatal() { m_type = FunType::ThrowFatal; }
-  int isFatalFunction() const { return m_type == FunType::ThrowFatal; }
+  void setThrowParseFatal() { m_type = FunType::ThrowParseFatal; }
+  bool isParseFatalFunction() const {
+    return m_type == FunType::ThrowParseFatal;
+  }
+  bool isFatalFunction() const {
+    return isParseFatalFunction() ||  m_type == FunType::ThrowFatal;
+  }
   int isStaticCompact() const { return m_type == FunType::StaticCompact; }
 
   // define(<literal-string>, <scalar>);
@@ -72,8 +78,21 @@ public:
   void updateVtFlags();
   void setLocalThis(const std::string &name) { m_localThis = name; }
   bool isCallToFunction(const char *name) const;
-  bool isCompilerCallToFunction(const char *name) const;
   void resolveNSFallbackFunc(AnalysisResultConstPtr ar, FileScopePtr fs);
+
+  void setOptimizable() {
+    m_optimizable = true;
+  }
+  bool isOptimizable() const {
+    return m_optimizable;
+  }
+  void changeToBytecode() {
+    m_changedToBytecode = true;
+  }
+  virtual bool allowCellByRef() const override {
+    return m_changedToBytecode;
+  }
+
 protected:
   enum class FunType {
     Unknown,
@@ -93,6 +112,7 @@ protected:
     GetDefinedVars,
     FBCallUserFuncSafe,
     ThrowFatal,
+    ThrowParseFatal,
     ClassAlias,
   };
 
@@ -100,11 +120,11 @@ protected:
   FunType m_type;
   unsigned m_dynamicConstant : 1;
   unsigned m_builtinFunction : 1;
-  unsigned m_fromCompiler : 1;
   unsigned m_invokeFewArgsDecision : 1;
   unsigned m_dynamicInvoke : 1;
   unsigned m_transformed : 1;
-  unsigned m_no_volatile_check : 1;
+  unsigned m_changedToBytecode : 1; // true if it morphed into a bytecode
+  unsigned m_optimizable : 1; // true if it can be morphed into a bytecode
 
   int m_safe;
   ExpressionPtr m_safeDef;

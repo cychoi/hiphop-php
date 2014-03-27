@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,24 +16,26 @@
 */
 
 #include "hphp/runtime/ext/ext_xml.h"
-#include "hphp/runtime/base/zend/zend_functions.h"
-#include "hphp/runtime/base/zend/zend_string.h"
+#include "hphp/runtime/base/zend-functions.h"
+#include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include <expat.h>
 
 namespace HPHP {
-IMPLEMENT_DEFAULT_EXTENSION(xml);
+
+IMPLEMENT_DEFAULT_EXTENSION_VERSION(xml, NO_EXTENSION_VERSION_YET);
+
 ///////////////////////////////////////////////////////////////////////////////
 
 class XmlParser : public SweepableResourceData {
 public:
-  DECLARE_OBJECT_ALLOCATION(XmlParser)
+  DECLARE_RESOURCE_ALLOCATION(XmlParser)
   XmlParser();
   virtual ~XmlParser();
   void cleanupImpl();
-  static StaticString s_class_name;
-  virtual CStrRef o_getClassNameHook() const;
+  CLASSNAME_IS("xml");
+  virtual const String& o_getClassNameHook() const;
 
   int case_folding;
   XML_Parser parser;
@@ -65,8 +67,6 @@ public:
   int isparsing;
 };
 
-IMPLEMENT_OBJECT_ALLOCATION_NO_DEFAULT_SWEEP(XmlParser);
-
 XmlParser::XmlParser() : case_folding(0), parser(NULL),
     target_encoding(NULL), level(0), toffset(0), curtag(0),
     ltags(NULL), lastwasopen(0), skipwhite(0), isparsing(0) {
@@ -94,10 +94,8 @@ void XmlParser::sweep() {
   cleanupImpl();
 }
 
-StaticString XmlParser::s_class_name("xml");
-
-CStrRef XmlParser::o_getClassNameHook() const {
-  return s_class_name;
+const String& XmlParser::o_getClassNameHook() const {
+  return classnameof();
 }
 
 typedef struct {
@@ -210,7 +208,7 @@ char *xml_utf8_decode(const XML_Char *s, int len, int *newlen,
   while (pos > 0) {
     c = (unsigned char)(*s);
     if (c >= 0xf0) { /* four bytes encoded, 21 bits */
-      if(pos-4 >= 0) {
+      if (pos-4 >= 0) {
         c = ((s[0]&7)<<18) | ((s[1]&63)<<12) | ((s[2]&63)<<6) | (s[3]&63);
       } else {
         c = '?';
@@ -218,7 +216,7 @@ char *xml_utf8_decode(const XML_Char *s, int len, int *newlen,
       s += 4;
       pos -= 4;
     } else if (c >= 0xe0) { /* three bytes encoded, 16 bits */
-      if(pos-3 >= 0) {
+      if (pos-3 >= 0) {
         c = ((s[0]&63)<<12) | ((s[1]&63)<<6) | (s[2]&63);
       } else {
         c = '?';
@@ -226,7 +224,7 @@ char *xml_utf8_decode(const XML_Char *s, int len, int *newlen,
       s += 3;
       pos -= 3;
     } else if (c >= 0xc0) { /* two bytes encoded, 11 bits */
-      if(pos-2 >= 0) {
+      if (pos-2 >= 0) {
         c = ((s[0]&63)<<6) | (s[1]&63);
       } else {
         c = '?';
@@ -273,8 +271,8 @@ static char *_xml_decode_tag(XmlParser *parser, const char *tag) {
   return newstr;
 }
 
-static Variant php_xml_parser_create_impl(CStrRef encoding_param,
-                                          CStrRef ns_param, int ns_support) {
+static Variant php_xml_parser_create_impl(const String& encoding_param,
+                                          const String& ns_param, int ns_support) {
   XmlParser *parser;
   int auto_detect = 0;
   XML_Char *encoding;
@@ -302,7 +300,7 @@ static Variant php_xml_parser_create_impl(CStrRef encoding_param,
   }
 
   String separator;
-  if (ns_support && ns_param.empty()){
+  if (ns_support && ns_param.empty()) {
     separator = ":";
   } else {
     separator = ns_param;
@@ -315,21 +313,21 @@ static Variant php_xml_parser_create_impl(CStrRef encoding_param,
 
   parser->target_encoding = encoding;
   parser->case_folding = 1;
-  setNull(parser->object);
+  parser->object.asTypedValue()->m_type = KindOfNull;
   parser->isparsing = 0;
 
   XML_SetUserData(parser->parser, parser);
 
-  return Object(parser);
+  return Resource(parser);
 }
 
 static String _xml_string_zval(const char *str) {
   return String(str, CopyString);
 }
 
-static Variant xml_call_handler(XmlParser *parser, CVarRef handler,
-                                CArrRef args) {
-  if (parser && handler) {
+static Variant xml_call_handler(XmlParser *parser, const Variant& handler,
+                                const Array& args) {
+  if (parser && handler.toBoolean()) {
     Variant retval;
     if (handler.isString()) {
       if (!parser->object.isObject()) {
@@ -339,8 +337,9 @@ static Variant xml_call_handler(XmlParser *parser, CVarRef handler,
           o_invoke(handler.toString(), args);
       }
     } else if (handler.isArray() && handler.getArrayData()->size() == 2 &&
-               (handler[0].isString() || handler[0].isObject()) &&
-               handler[1].isString()) {
+               (handler.toCArrRef()[0].isString() ||
+                handler.toCArrRef()[0].isObject()) &&
+               handler.toCArrRef()[1].isString()) {
       vm_call_user_func(handler, args);
     } else {
       raise_warning("Handler is invalid");
@@ -355,22 +354,25 @@ static void _xml_add_to_info(XmlParser *parser, char *name) {
     return;
   }
   String nameStr(name, CopyString);
-  if (!parser->info.toArray().exists(nameStr)) {
-    parser->info.set(nameStr, Array::Create());
+  forceToArray(parser->info);
+  if (!parser->info.toCArrRef().exists(nameStr)) {
+    parser->info.toArrRef().set(nameStr, Array::Create());
   }
-  parser->info.lvalAt(nameStr).append(parser->curtag);
+  auto& inner = parser->info.toArrRef().lvalAt(nameStr);
+  forceToArray(inner).append(parser->curtag);
   parser->curtag++;
 }
 
-static const StaticString s_type("type");
-static const StaticString s_complete("complete");
-static const StaticString s_tag("tag");
-static const StaticString s_close("close");
-static const StaticString s_level("level");
-static const StaticString s_value("value");
-static const StaticString s_cdata("cdata");
-static const StaticString s_open("open");
-static const StaticString s_attributes("attributes");
+const StaticString
+  s_type("type"),
+  s_complete("complete"),
+  s_tag("tag"),
+  s_close("close"),
+  s_level("level"),
+  s_value("value"),
+  s_cdata("cdata"),
+  s_open("open"),
+  s_attributes("attributes");
 
 void _xml_endElementHandler(void *userData, const XML_Char *name) {
   XmlParser *parser = (XmlParser *)userData;
@@ -382,7 +384,7 @@ void _xml_endElementHandler(void *userData, const XML_Char *name) {
 
     tag_name = _xml_decode_tag(parser, (const char*)name);
 
-    if (parser->endElementHandler) {
+    if (parser->endElementHandler.toBoolean()) {
       args.append(parser);
       args.append(_xml_string_zval(tag_name));
       xml_call_handler(parser, parser->endElementHandler, args);
@@ -390,14 +392,14 @@ void _xml_endElementHandler(void *userData, const XML_Char *name) {
 
     if (!parser->data.isNull()) {
       if (parser->lastwasopen) {
-        parser->ctag.set(s_type, s_complete);
+        parser->ctag.toArrRef().set(s_type, s_complete);
       } else {
         ArrayInit tag(3);
         _xml_add_to_info(parser,((char*)tag_name) + parser->toffset);
         tag.set(s_tag, String(((char*)tag_name) + parser->toffset, CopyString));
         tag.set(s_type, s_close);
         tag.set(s_level, parser->level);
-        parser->data.append(tag.create());
+        parser->data.toArrRef().append(tag.create());
       }
       parser->lastwasopen = 0;
     }
@@ -419,7 +421,7 @@ void _xml_characterDataHandler(void *userData, const XML_Char *s, int len) {
     Variant retval;
     Array args = Array::Create();
 
-    if (parser->characterDataHandler) {
+    if (parser->characterDataHandler.toBoolean()) {
       args.append(parser);
       args.append(_xml_xmlchar_zval(s, len, parser->target_encoding));
       xml_call_handler(parser, parser->characterDataHandler, args);
@@ -451,14 +453,15 @@ void _xml_characterDataHandler(void *userData, const XML_Char *s, int len) {
         if (parser->lastwasopen) {
           String myval;
           // check if value exists, if yes append to that
-          if (parser->ctag.toArray().exists(s_value))
-          {
-            myval = parser->ctag.rvalAt(s_value).toString();
+          if (parser->ctag.toArrRef().exists(s_value)) {
+            myval = parser->ctag.toArray().rvalAt(s_value).toString();
             myval += String(decoded_value, decoded_len, AttachString);
-            parser->ctag.set(s_value, myval);
+            parser->ctag.toArrRef().set(s_value, myval);
           } else {
-            parser->ctag.set(s_value,
-                             String(decoded_value,decoded_len,AttachString));
+            parser->ctag.toArrRef().set(
+              s_value,
+              String(decoded_value,decoded_len,AttachString)
+            );
           }
         } else {
           Array tag;
@@ -466,13 +469,13 @@ void _xml_characterDataHandler(void *userData, const XML_Char *s, int len) {
           String myval;
           String mytype;
           curtag.assignRef(parser->data.getArrayData()->endRef());
-          if (curtag.toArray().exists(s_type)) {
-            mytype = curtag.rvalAt(s_type).toString();
+          if (curtag.toArrRef().exists(s_type)) {
+            mytype = curtag.toArrRef().rvalAt(s_type).toString();
             if (!strcmp(mytype.data(), "cdata") &&
-                curtag.toArray().exists(s_value)) {
-              myval = curtag.rvalAt(s_value).toString();
+                curtag.toArrRef().exists(s_value)) {
+              myval = curtag.toArrRef().rvalAt(s_value).toString();
               myval += String(decoded_value, decoded_len, AttachString);
-              curtag.set(s_value, myval);
+              curtag.toArrRef().set(s_value, myval);
               return;
             }
           }
@@ -484,7 +487,7 @@ void _xml_characterDataHandler(void *userData, const XML_Char *s, int len) {
           tag.set(s_value, String(decoded_value, AttachString));
           tag.set(s_type, s_cdata);
           tag.set(s_level, parser->level);
-          parser->data.append(tag);
+          parser->data.toArrRef().append(tag);
         }
       } else {
         free(decoded_value);
@@ -496,8 +499,8 @@ void _xml_characterDataHandler(void *userData, const XML_Char *s, int len) {
 void _xml_defaultHandler(void *userData, const XML_Char *s, int len) {
   XmlParser *parser = (XmlParser *)userData;
 
-  if (parser && parser->defaultHandler) {
-    xml_call_handler(parser, parser->defaultHandler, CREATE_VECTOR2(
+  if (parser && parser->defaultHandler.toBoolean()) {
+    xml_call_handler(parser, parser->defaultHandler, make_packed_array(
         parser, _xml_xmlchar_zval(s, len, parser->target_encoding)));
   }
 }
@@ -513,7 +516,7 @@ void _xml_startElementHandler(void *userData, const XML_Char *name, const XML_Ch
 
     char* tag_name = _xml_decode_tag(parser, (const char*)name);
 
-    if (parser->startElementHandler) {
+    if (parser->startElementHandler.toBoolean()) {
       args.append(parser);
       args.append(_xml_string_zval(tag_name));
       args.append(Array::Create());
@@ -524,8 +527,10 @@ void _xml_startElementHandler(void *userData, const XML_Char *name, const XML_Ch
         char* val = xml_utf8_decode(attributes[1],
                                     strlen((const char*)attributes[1]),
                                     &val_len, parser->target_encoding);
-        args.lvalAt(2).set(String(att, AttachString),
-                           String(val, val_len, AttachString));
+        args.lvalAt(2).toArrRef().set(
+          String(att, AttachString),
+          String(val, val_len, AttachString)
+        );
         attributes += 2;
       }
 
@@ -563,7 +568,7 @@ void _xml_startElementHandler(void *userData, const XML_Char *name, const XML_Ch
       if (atcnt) {
         tag.set(s_attributes,atr);
       }
-      parser->data.append(tag);
+      parser->data.toArrRef().append(tag);
       parser->ctag.assignRef(parser->data.getArrayData()->endRef());
     }
 
@@ -574,7 +579,7 @@ void _xml_startElementHandler(void *userData, const XML_Char *name, const XML_Ch
 void _xml_processingInstructionHandler(void *userData, const XML_Char *target,
                                        const XML_Char *data) {
   XmlParser *parser = (XmlParser *)userData;
-  if (parser && parser->processingInstructionHandler) {
+  if (parser && parser->processingInstructionHandler.toBoolean()) {
     Array args = Array::Create();
     args.append(parser);
     args.append(_xml_xmlchar_zval(target, 0, parser->target_encoding));
@@ -590,7 +595,7 @@ int _xml_externalEntityRefHandler(XML_ParserStruct* /* void* */ parserPtr,
                                   const XML_Char *publicId) {
   XmlParser *parser = (XmlParser*)XML_GetUserData((XML_Parser)parserPtr);
   int ret = 0; /* abort if no handler is set (should be configurable?) */
-  if (parser && parser->externalEntityRefHandler) {
+  if (parser && parser->externalEntityRefHandler.toBoolean()) {
     Array args = Array::Create();
     args.append(parser);
     args.append(_xml_xmlchar_zval(openEntityNames, 0,
@@ -598,7 +603,8 @@ int _xml_externalEntityRefHandler(XML_ParserStruct* /* void* */ parserPtr,
     args.append(_xml_xmlchar_zval(base, 0, parser->target_encoding));
     args.append(_xml_xmlchar_zval(systemId, 0, parser->target_encoding));
     args.append(_xml_xmlchar_zval(publicId, 0, parser->target_encoding));
-    ret = xml_call_handler(parser, parser->externalEntityRefHandler, args);
+    ret = xml_call_handler(parser,
+      parser->externalEntityRefHandler, args).toInt64();
   }
   return ret;
 }
@@ -610,7 +616,7 @@ void _xml_notationDeclHandler(void *userData,
                               const XML_Char *publicId) {
   XmlParser *parser = (XmlParser *)userData;
 
-  if (parser && parser->notationDeclHandler) {
+  if (parser && parser->notationDeclHandler.toBoolean()) {
     Array args = Array::Create();
     args.append(parser);
     args.append(_xml_xmlchar_zval(notationName, 0, parser->target_encoding));
@@ -625,7 +631,7 @@ void _xml_startNamespaceDeclHandler(void *userData,const XML_Char *prefix,
                                     const XML_Char *uri) {
   XmlParser *parser = (XmlParser *)userData;
 
-  if (parser && parser->startNamespaceDeclHandler) {
+  if (parser && parser->startNamespaceDeclHandler.toBoolean()) {
     Array args = Array::Create();
 
     args.append(parser);
@@ -638,7 +644,7 @@ void _xml_startNamespaceDeclHandler(void *userData,const XML_Char *prefix,
 void _xml_endNamespaceDeclHandler(void *userData, const XML_Char *prefix) {
   XmlParser *parser = (XmlParser *)userData;
 
-  if (parser && parser->endNamespaceDeclHandler) {
+  if (parser && parser->endNamespaceDeclHandler.toBoolean()) {
     Array args = Array::Create();
     args.append(parser);
     args.append(_xml_xmlchar_zval(prefix, 0, parser->target_encoding));
@@ -654,7 +660,7 @@ void _xml_unparsedEntityDeclHandler(void *userData,
                                     const XML_Char *notationName) {
   XmlParser *parser = (XmlParser *)userData;
 
-  if (parser && parser->unparsedEntityDeclHandler) {
+  if (parser && parser->unparsedEntityDeclHandler.toBoolean()) {
     Array args = Array::Create();
     args.append(parser);
     args.append(_xml_xmlchar_zval(entityName, 0, parser->target_encoding));
@@ -666,11 +672,11 @@ void _xml_unparsedEntityDeclHandler(void *userData,
   }
 }
 
-static void xml_set_handler(Variant * handler, CVarRef data) {
-  if (same(data, false) || data.isString() ||
+static void xml_set_handler(Variant * handler, const Variant& data) {
+  if (data.isNull() || same(data, false) || data.isString() ||
       (data.isArray() && data.getArrayData()->size() == 2 &&
-       (data[0].isString() || data[0].isObject()) &&
-       data[1].isString())) {
+       (data.toCArrRef()[0].isString() || data.toCArrRef()[0].isObject()) &&
+       data.toCArrRef()[1].isString())) {
     *handler = data;
   } else {
     raise_warning("Handler is invalid");
@@ -679,16 +685,16 @@ static void xml_set_handler(Variant * handler, CVarRef data) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Object f_xml_parser_create(CStrRef encoding /* = null_string */) {
-  return php_xml_parser_create_impl(encoding, null_string, 0);
+Resource f_xml_parser_create(const String& encoding /* = null_string */) {
+  return php_xml_parser_create_impl(encoding, null_string, 0).toResource();
 }
 
-Object f_xml_parser_create_ns(CStrRef encoding /* = null_string */,
-                              CStrRef separator /* = null_string */) {
-  return php_xml_parser_create_impl(encoding, separator, 1);
+Resource f_xml_parser_create_ns(const String& encoding /* = null_string */,
+                              const String& separator /* = null_string */) {
+  return php_xml_parser_create_impl(encoding, separator, 1).toResource();
 }
 
-bool f_xml_parser_free(CObjRef parser) {
+bool f_xml_parser_free(const Resource& parser) {
   XmlParser * p = parser.getTyped<XmlParser>();
   if (p->isparsing == 1) {
     raise_warning("Parser cannot be freed while it is parsing.");
@@ -697,7 +703,7 @@ bool f_xml_parser_free(CObjRef parser) {
   return true;
 }
 
-int64_t f_xml_parse(CObjRef parser, CStrRef data, bool is_final /* = true */) {
+int64_t f_xml_parse(const Resource& parser, const String& data, bool is_final /* = true */) {
   // XML_Parse can reenter the VM, and it will do so after we've lost
   // the frame pointer by calling through the system's copy of XML_Parse
   // in libexpat.so.
@@ -712,7 +718,7 @@ int64_t f_xml_parse(CObjRef parser, CStrRef data, bool is_final /* = true */) {
   return ret;
 }
 
-int64_t f_xml_parse_into_struct(CObjRef parser, CStrRef data, VRefParam values,
+int64_t f_xml_parse_into_struct(const Resource& parser, const String& data, VRefParam values,
                             VRefParam index /* = null */) {
   int ret;
   XmlParser * p = parser.getTyped<XmlParser>();
@@ -735,7 +741,7 @@ int64_t f_xml_parse_into_struct(CObjRef parser, CStrRef data, VRefParam values,
   return ret;
 }
 
-Variant f_xml_parser_get_option(CObjRef parser, int option) {
+Variant f_xml_parser_get_option(const Resource& parser, int option) {
   XmlParser * p = parser.getTyped<XmlParser>();
   switch (option) {
   case PHP_XML_OPTION_CASE_FOLDING:
@@ -749,7 +755,7 @@ Variant f_xml_parser_get_option(CObjRef parser, int option) {
   return false;
 }
 
-bool f_xml_parser_set_option(CObjRef parser, int option, CVarRef value) {
+bool f_xml_parser_set_option(const Resource& parser, int option, const Variant& value) {
   XmlParser * p = parser.getTyped<XmlParser>();
   switch (option) {
   case PHP_XML_OPTION_CASE_FOLDING:
@@ -779,22 +785,22 @@ bool f_xml_parser_set_option(CObjRef parser, int option, CVarRef value) {
   return true;
 }
 
-bool f_xml_set_character_data_handler(CObjRef parser, CVarRef handler) {
+bool f_xml_set_character_data_handler(const Resource& parser, const Variant& handler) {
   XmlParser * p = parser.getTyped<XmlParser>();
   xml_set_handler(&p->characterDataHandler, handler);
   XML_SetCharacterDataHandler(p->parser, _xml_characterDataHandler);
   return true;
 }
 
-bool f_xml_set_default_handler(CObjRef parser, CVarRef handler) {
+bool f_xml_set_default_handler(const Resource& parser, const Variant& handler) {
   XmlParser * p = parser.getTyped<XmlParser>();
   xml_set_handler(&p->defaultHandler, handler);
   XML_SetDefaultHandler(p->parser, _xml_defaultHandler);
   return true;
 }
 
-bool f_xml_set_element_handler(CObjRef parser, CVarRef start_element_handler,
-                               CVarRef end_element_handler) {
+bool f_xml_set_element_handler(const Resource& parser, const Variant& start_element_handler,
+                               const Variant& end_element_handler) {
   XmlParser * p = parser.getTyped<XmlParser>();
   xml_set_handler(&p->startElementHandler, start_element_handler);
   xml_set_handler(&p->endElementHandler, end_element_handler);
@@ -803,7 +809,7 @@ bool f_xml_set_element_handler(CObjRef parser, CVarRef start_element_handler,
   return true;
 }
 
-bool f_xml_set_processing_instruction_handler(CObjRef parser, CVarRef handler){
+bool f_xml_set_processing_instruction_handler(const Resource& parser, const Variant& handler) {
   XmlParser * p = parser.getTyped<XmlParser>();
   xml_set_handler(&p->processingInstructionHandler, handler);
   XML_SetProcessingInstructionHandler(p->parser,
@@ -811,77 +817,77 @@ bool f_xml_set_processing_instruction_handler(CObjRef parser, CVarRef handler){
   return true;
 }
 
-bool f_xml_set_start_namespace_decl_handler(CObjRef parser, CVarRef handler) {
+bool f_xml_set_start_namespace_decl_handler(const Resource& parser, const Variant& handler) {
   XmlParser * p = parser.getTyped<XmlParser>();
   xml_set_handler(&p->startNamespaceDeclHandler, handler);
   XML_SetStartNamespaceDeclHandler(p->parser, _xml_startNamespaceDeclHandler);
   return true;
 }
 
-bool f_xml_set_end_namespace_decl_handler(CObjRef parser, CVarRef handler) {
+bool f_xml_set_end_namespace_decl_handler(const Resource& parser, const Variant& handler) {
   XmlParser * p = parser.getTyped<XmlParser>();
   xml_set_handler(&p->endNamespaceDeclHandler, handler);
   XML_SetEndNamespaceDeclHandler(p->parser, _xml_endNamespaceDeclHandler);
   return true;
 }
 
-bool f_xml_set_unparsed_entity_decl_handler(CObjRef parser, CVarRef handler) {
+bool f_xml_set_unparsed_entity_decl_handler(const Resource& parser, const Variant& handler) {
   XmlParser * p = parser.getTyped<XmlParser>();
   xml_set_handler(&p->unparsedEntityDeclHandler, handler);
   XML_SetUnparsedEntityDeclHandler(p->parser, _xml_unparsedEntityDeclHandler);
   return true;
 }
 
-bool f_xml_set_external_entity_ref_handler(CObjRef parser, CVarRef handler) {
+bool f_xml_set_external_entity_ref_handler(const Resource& parser, const Variant& handler) {
   XmlParser * p = parser.getTyped<XmlParser>();
   xml_set_handler(&p->externalEntityRefHandler, handler);
   XML_SetExternalEntityRefHandler(p->parser, _xml_externalEntityRefHandler);
   return true;
 }
 
-bool f_xml_set_notation_decl_handler(CObjRef parser, CVarRef handler) {
+bool f_xml_set_notation_decl_handler(const Resource& parser, const Variant& handler) {
   XmlParser * p = parser.getTyped<XmlParser>();
   xml_set_handler(&p->notationDeclHandler, handler);
   XML_SetNotationDeclHandler(p->parser, _xml_notationDeclHandler);
   return true;
 }
 
-bool f_xml_set_object(CObjRef parser, VRefParam object) {
+bool f_xml_set_object(const Resource& parser, VRefParam object) {
   XmlParser * p = parser.getTyped<XmlParser>();
   p->object.assignRef(object);
   return true;
 }
 
-int64_t f_xml_get_current_byte_index(CObjRef parser) {
+int64_t f_xml_get_current_byte_index(const Resource& parser) {
   XmlParser * p = parser.getTyped<XmlParser>();
   return XML_GetCurrentByteIndex(p->parser);
 }
 
-int64_t f_xml_get_current_column_number(CObjRef parser) {
+int64_t f_xml_get_current_column_number(const Resource& parser) {
   XmlParser * p = parser.getTyped<XmlParser>();
   return XML_GetCurrentColumnNumber(p->parser);
 }
 
-int64_t f_xml_get_current_line_number(CObjRef parser) {
+int64_t f_xml_get_current_line_number(const Resource& parser) {
   XmlParser * p = parser.getTyped<XmlParser>();
   return XML_GetCurrentLineNumber(p->parser);
 }
 
-int64_t f_xml_get_error_code(CObjRef parser) {
+int64_t f_xml_get_error_code(const Resource& parser) {
   XmlParser * p = parser.getTyped<XmlParser>();
   return XML_GetErrorCode(p->parser);
 }
 
 String f_xml_error_string(int code) {
   char * str = (char *)XML_ErrorString((XML_Error)/*(int)*/code);
-  return String(str, AttachLiteral);
+  return String(str, CopyString);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-String f_utf8_decode(CStrRef data) {
+String f_utf8_decode(const String& data) {
   String str = String(data.size(), ReserveString);
-  char *newbuf = str.mutableSlice().ptr;
+  char *newbuf = str.bufferSlice().ptr;
   int newlen = 0;
   const char *s = data.data();
   for (int pos = data.size(); pos > 0; ) {
@@ -920,9 +926,9 @@ String f_utf8_decode(CStrRef data) {
   return str.setSize(newlen);
 }
 
-String f_utf8_encode(CStrRef data) {
+String f_utf8_encode(const String& data) {
   String str = String(data.size() * 4, ReserveString);
-  char *newbuf = str.mutableSlice().ptr;
+  char *newbuf = str.bufferSlice().ptr;
   int newlen = 0;
   const char *s = data.data();
   for (int pos = data.size(); pos > 0; pos--, s++) {

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -55,8 +55,8 @@ void CmdInternalTesting::help(DebuggerClient &client) {
   );
 }
 
-void CmdInternalTesting::onClientImpl(DebuggerClient &client) {
-  TRACE(2, "CmdInternalTesting::onClientImpl\n");
+void CmdInternalTesting::onClient(DebuggerClient &client) {
+  TRACE(2, "CmdInternalTesting::onClient\n");
   if (DebuggerCommand::displayedHelp(client)) return;
   if (client.argCount() == 0) {
     help(client);
@@ -71,6 +71,15 @@ void CmdInternalTesting::onClientImpl(DebuggerClient &client) {
     // disconnect from us.
     m_type = KindOfInternalTestingBad;
     client.sendToServer(this);
+    // Spin here and wait for the client to be marked as stopped
+    // before going back to the event loop. This will give the local
+    // proxy time to recgonize the bad cmd, terminate, and wait for
+    // the client to stop. This will ensure that we always exit on the
+    // same path on both proxy and client threads, and remove any
+    // spurious output form ths test case.
+    while (!client.internalTestingIsClientStopped()) {
+      sleep(1);
+    }
     throw DebuggerConsoleExitException(); // Expect no response
   } else if (client.arg(1, "badcmdtypereceive")) {
     client.xend<CmdInternalTesting>(this);
@@ -78,6 +87,10 @@ void CmdInternalTesting::onClientImpl(DebuggerClient &client) {
   } else if (client.arg(1, "shortcmdsend")) {
     m_arg = "shortcmd"; // Force send to drop a field.
     client.sendToServer(this);
+    // See note above about this wait.
+    while (!client.internalTestingIsClientStopped()) {
+      sleep(1);
+    }
     throw DebuggerConsoleExitException(); // Expect no response
   } else if (client.arg(1, "shortcmdreceive")) {
     client.xend<CmdInternalTesting>(this);

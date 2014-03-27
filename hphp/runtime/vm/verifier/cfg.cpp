@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -57,12 +57,12 @@ void GraphBuilder::createBlocks() {
   for (InstrRange i = funcInstrs(m_func); !i.empty(); ) {
     PC pc = i.popFront();
     if (isCF(pc) && !i.empty()) createBlock(i.front());
-    if (isSwitch(*pc)) {
-      foreachSwitchTarget((Opcode*)pc, [&](Offset& o) {
+    if (isSwitch(*reinterpret_cast<const Op*>(pc))) {
+      foreachSwitchTarget(reinterpret_cast<const Op*>(pc), [&](Offset& o) {
         createBlock(pc + o);
       });
     } else {
-      Offset target = instrJumpTarget(bc, pc - bc);
+      Offset target = instrJumpTarget((Op*)bc, pc - bc);
       if (target != InvalidAbsoluteOffset) createBlock(target);
     }
   }
@@ -80,13 +80,13 @@ void GraphBuilder::linkBlocks() {
     PC pc = i.popFront();
     block->last = pc;
     if (isCF(pc)) {
-      if (isSwitch(*pc)) {
+      if (isSwitch(*reinterpret_cast<const Op*>(pc))) {
         int i = 0;
-        foreachSwitchTarget((Opcode*)pc, [&](Offset& o) {
+        foreachSwitchTarget((Op*)pc, [&](Offset& o) {
           succs(block)[i++] = at(pc + o);
         });
       } else {
-        Offset target = instrJumpTarget(bc, pc - bc);
+        Offset target = instrJumpTarget((Op*)bc, pc - bc);
         if (target != InvalidAbsoluteOffset) {
           assert(numSuccBlocks(block) > 0);
           succs(block)[numSuccBlocks(block) - 1] = at(target);
@@ -119,8 +119,10 @@ void GraphBuilder::createExBlocks() {
   for (Range<Func::EHEntVec> i(m_func->ehtab()); !i.empty(); ) {
     const EHEnt& handler = i.popFront();
     createBlock(handler.m_base);
-    createBlock(handler.m_past);
-    if (handler.m_ehtype == EHEnt::EHType_Catch) {
+    if (handler.m_past != m_func->past()) {
+      createBlock(handler.m_past);
+    }
+    if (handler.m_type == EHEnt::Type::Catch) {
       m_graph->exn_cap += handler.m_catches.size() - 1;
       for (Range<EHEnt::CatchVec> c(handler.m_catches); !c.empty(); ) {
         createBlock(c.popFront().second);
@@ -140,7 +142,7 @@ const EHEnt* findFunclet(const Func::EHEntVec& ehtab, Offset off) {
   const EHEnt* nearest = 0;
   for (Range<Func::EHEntVec> i(ehtab); !i.empty(); ) {
     const EHEnt* eh = &i.popFront();
-    if (eh->m_ehtype != EHEnt::EHType_Fault) continue;
+    if (eh->m_type != EHEnt::Type::Fault) continue;
     if (eh->m_fault <= off && (!nearest || eh->m_fault > nearest->m_fault)) {
       nearest = eh;
     }
@@ -180,7 +182,7 @@ void GraphBuilder::linkExBlocks() {
     int exn_index = 0;
     for (const EHEnt* eh = m_func->findEH(off); eh != 0; ) {
       assert(eh->m_base <= off && off < eh->m_past);
-      if (eh->m_ehtype == EHEnt::EHType_Catch) {
+      if (eh->m_type == EHEnt::Type::Catch) {
         // each catch block is reachable from b
         for (Range<EHEnt::CatchVec> j(eh->m_catches); !j.empty(); ) {
           exns(b)[exn_index++] = at(j.popFront().second);
@@ -198,7 +200,7 @@ void GraphBuilder::linkExBlocks() {
       const EHEnt* eh = findFunclet(ehtab, offset(b->last));
       eh = nextOuter(ehtab, eh);
       while (eh) {
-        if (eh->m_ehtype == EHEnt::EHType_Catch) {
+        if (eh->m_type == EHEnt::Type::Catch) {
           // each catch target for eh is reachable from b
           for (Range<EHEnt::CatchVec> j(eh->m_catches); !j.empty(); ) {
             exns(b)[exn_index++] = at(j.popFront().second);
@@ -234,6 +236,10 @@ Block** GraphBuilder::exns(Block* b) {
 Block* GraphBuilder::createBlock(PC pc) {
   BlockMap::iterator i = m_blocks.find(pc);
   if (i != m_blocks.end()) return i->second;
+
+  // TODO(#2464197): Continuation bug in repo mode.
+  if (pc < m_unit->entry()) return nullptr;
+
   Block* b = new (m_arena) Block(pc);
   m_blocks.insert(std::pair<PC,Block*>(pc, b));
   return b;
@@ -262,7 +268,7 @@ void GraphBuilder::addEdge(Block* from, EdgeKind k, Block* target) {
  */
 class RpoSort {
  public:
-  RpoSort(Graph* g);
+  explicit RpoSort(Graph* g);
  private:
   void visit(Block* b);
  private:

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,9 @@
 */
 
 #include "hphp/util/hdf.h"
+
+#include <boost/algorithm/string/predicate.hpp>
+
 #include "hphp/util/lock.h"
 
 namespace HPHP {
@@ -128,6 +131,10 @@ void Hdf::open(const char *filename) {
 
 void Hdf::append(const char *filename) {
   assert(filename && *filename);
+  if (!(boost::contains(filename, ".hdf")
+    || boost::ends_with(filename, ".hphp"))) {
+    return;
+  }
   CheckNeoError(hdf_read_file(getRaw(), (char*)filename));
 }
 
@@ -153,7 +160,7 @@ static bool match(const std::string &name, const std::string &pattern) {
   char last = pattern[len - 1];
   if (first == '*') {
     if (last == '*') {
-      return name.find(pattern.substr(1, len - 2)) != string::npos;
+      return name.find(pattern.substr(1, len - 2)) != std::string::npos;
     }
     return name.size() >= len - 1 &&
       name.substr(name.size() - len + 1) == pattern.substr(1);
@@ -176,7 +183,7 @@ bool Hdf::lintImpl(std::vector<std::string> &names,
   }
   bool meVisited = childVisited || hdf_is_visited(getRaw());
 
-  string fullname = getFullPath();
+  std::string fullname = getFullPath();
   if (!fullname.empty()) {
     if (meVisited == visited) {
       bool excluded = false;
@@ -205,7 +212,7 @@ void Hdf::lint(std::vector<std::string> &names,
   if (excludePatternNode && *excludePatternNode) {
     for (Hdf hdf = operator[](excludePatternNode).firstChild();
          hdf.exists(); hdf = hdf.next()) {
-      string value = hdf.getString();
+      std::string value = hdf.getString();
       if (!value.empty()) {
         patterns.push_back(value);
       }
@@ -289,7 +296,7 @@ uint64_t Hdf::getUInt(uint64_t defValue, const char *type, uint64_t mask) const 
   return n;
 }
 
-uchar Hdf::getUByte(uchar defValue /* = 0 */) const {
+unsigned char Hdf::getUByte(unsigned char defValue /* = 0 */) const {
   return getUInt(defValue, "unsigned byte", ~0xFFUL);
 }
 
@@ -332,6 +339,13 @@ void Hdf::get(std::set<std::string> &values) const {
   }
 }
 
+void Hdf::get(boost::container::flat_set<std::string> &values) const {
+  values.clear();
+  for (Hdf hdf = firstChild(); hdf.exists(); hdf = hdf.next()) {
+    values.insert(hdf.getString(""));
+  }
+}
+
 void Hdf::get(std::set<std::string, stdltistr> &values) const {
   values.clear();
   for (Hdf hdf = firstChild(); hdf.exists(); hdf = hdf.next()) {
@@ -362,7 +376,7 @@ int Hdf::compare(const char *v2) const {
 }
 
 int Hdf::compare(const std::string &v2) const {
-  string v1 = getString();
+  std::string v1 = getString();
   return strcmp(v1.c_str(), v2.c_str());
 }
 
@@ -372,8 +386,8 @@ int Hdf::compare(char v2) const {
   return v1 > v2 ? 1 : -1;
 }
 
-int Hdf::compare(uchar v2) const {
-  uchar v1 = getUByte();
+int Hdf::compare(unsigned char v2) const {
+  unsigned char v1 = getUByte();
   if (v1 == v2) return 0;
   return v1 > v2 ? 1 : -1;
 }
@@ -480,7 +494,7 @@ std::string Hdf::getName(bool markVisited /* = true */) const {
 }
 
 std::string Hdf::getFullPath() const {
-  string fullpath;
+  std::string fullpath;
   if (m_path.empty()) {
     fullpath = m_name;
   } else {
@@ -500,7 +514,7 @@ Hdf Hdf::parentImpl() const {
       throw HdfInvalidOperation("calling parent() on topmost node");
     }
     size_t pos = m_path.rfind('.');
-    if (pos == string::npos) {
+    if (pos == std::string::npos) {
       hdf.m_name = m_path;
       hdf.m_path.clear();
     } else {
@@ -554,7 +568,7 @@ bool Hdf::exists() const {
     return m_hdf != nullptr;
   }
 
-  string fullpath = getFullPath();
+  std::string fullpath = getFullPath();
   if (fullpath.empty()) {
     return true;
   }
@@ -570,7 +584,7 @@ bool Hdf::exists(int name) const {
 bool Hdf::exists(const char *name) const {
   HDF *hdf = m_hdf;
   if (m_rawp) {
-    string fullpath = getFullPath();
+    std::string fullpath = getFullPath();
     hdf = m_rawp->m_hdf;
     if (!fullpath.empty()) {
       hdf = hdf_get_obj(hdf, fullpath.c_str());
@@ -650,7 +664,7 @@ HDF *Hdf::getRaw() const {
   }
 
   HDF *ret = nullptr;
-  string fullpath = getFullPath();
+  std::string fullpath = getFullPath();
   if (fullpath.empty()) {
     ret = m_rawp->m_hdf;
   } else {
@@ -665,8 +679,15 @@ void Hdf::CheckNeoError(NEOERR *err) {
     NEOSTRING str;
     string_init(&str);
     nerr_error_string(err, &str);
-    throw HdfException(str.buf);
+    throw HdfException("%s", str.buf);
   }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// exceptions
+
+HdfException::HdfException(const char *fmt, ...) {
+  va_list ap; va_start(ap, fmt); format(fmt, ap); va_end(ap);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

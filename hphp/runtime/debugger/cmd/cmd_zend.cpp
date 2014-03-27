@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,23 +31,28 @@ void CmdZend::help(DebuggerClient &client) {
   client.helpBody(
     "This is mainly for comparing results from PHP vs. HipHop. After you type "
     "in some PHP code, it will be evaluated immediately in HipHop. Then you "
-    "can type '[z]end' command to re-run the same script in Zend PHP. Please "
-    "note that only the most recent block of code you manually typed in was "
-    "evaluated, not any earlier ones, nor the ones from a PHP file."
+    "can type '[z]end' command to re-run the same script with your "
+    "system-default PHP. Please note that only the most recent block of code "
+    "you manually typed in is evaluated, not any earlier ones, nor the ones "
+    "from a PHP file."
   );
 }
 
-void CmdZend::onClientImpl(DebuggerClient &client) {
+void CmdZend::onClient(DebuggerClient &client) {
   if (DebuggerCommand::displayedHelp(client)) return;
 
   if (client.argCount() == 0) {
     const std::string &code = client.getCode();
-    string out;
-    Process::Exec("php", nullptr, code.c_str(), out, &out, true);
-    client.print(out);
-  } else {
-    help(client);
+    if (!code.empty()) {
+      const std::string zendExe = client.getZendExecutable();
+      client.info("Executing last PHP block with \"%s\"...", zendExe.c_str());
+      std::string out;
+      Process::Exec(zendExe.c_str(), nullptr, code.c_str(), out, &out, true);
+      client.print(out);
+      return;
+    }
   }
+  help(client);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

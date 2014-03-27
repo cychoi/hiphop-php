@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,7 +31,7 @@ class DebugInfo {
 
   void recordTracelet(TCRange range,
                       const Func* func,
-                      const Opcode *instr, bool exit,
+                      const Op* instr, bool exit,
                       bool inPrologue);
   void recordStub(TCRange range,
                   const char* name);
@@ -41,8 +41,13 @@ class DebugInfo {
 
   void debugSync();
   static DebugInfo* Get();
-
+  static void setPidMapOverlay(void* from, void* to) {
+    pidMapOverlayStart = from;
+    pidMapOverlayEnd = to;
+  }
  private:
+  void generatePidMapOverlay();
+
   /* maintain separate dwarf info for a and astubs, so that we
    * don't emit dwarf info for the two in the same ELF file.
    * gdb tends to get confused when it sees dwarf info for
@@ -56,6 +61,9 @@ class DebugInfo {
    */
   FILE* m_perfMap;
   char m_perfMapName[64];
+
+  static void* pidMapOverlayStart;
+  static void* pidMapOverlayEnd;
 };
 
 /*

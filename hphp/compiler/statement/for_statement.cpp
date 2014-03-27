@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -90,16 +90,16 @@ int ForStatement::getKidCount() const {
 void ForStatement::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_exp1 = boost::dynamic_pointer_cast<Expression>(cp);
+      m_exp1 = dynamic_pointer_cast<Expression>(cp);
       break;
     case 1:
-      m_exp2 = boost::dynamic_pointer_cast<Expression>(cp);
+      m_exp2 = dynamic_pointer_cast<Expression>(cp);
       break;
     case 2:
-      m_stmt = boost::dynamic_pointer_cast<Statement>(cp);
+      m_stmt = dynamic_pointer_cast<Statement>(cp);
       break;
     case 3:
-      m_exp3 = boost::dynamic_pointer_cast<Expression>(cp);
+      m_exp3 = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       assert(false);
@@ -118,6 +118,33 @@ void ForStatement::inferTypes(AnalysisResultPtr ar) {
   } else {
     if (m_exp3) m_exp3->inferAndCheck(ar, Type::Any, false);
   }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void ForStatement::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = 2;
+  if (m_exp1 != nullptr) numProps++;
+  if (m_exp2 != nullptr) numProps++;
+  if (m_exp3 != nullptr) numProps++;
+  cg.printObjectHeader("ForStatement", numProps);
+  if (m_exp1 != nullptr) {
+    cg.printPropertyHeader("initializers");
+    cg.printExpressionVector(m_exp1);
+  }
+  if (m_exp2 != nullptr) {
+    cg.printPropertyHeader("conditions");
+    cg.printExpressionVector(m_exp2);
+  }
+  if (m_exp3 != nullptr) {
+    cg.printPropertyHeader("increments");
+    cg.printExpressionVector(m_exp3);
+  }
+  cg.printPropertyHeader("block");
+  cg.printAsBlock(m_stmt);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

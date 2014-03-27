@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,13 +16,14 @@
 #ifndef incl_HPHP_HHIR_OPT_H_
 #define incl_HPHP_HHIR_OPT_H_
 
+#include "hphp/runtime/vm/jit/types.h"
+
 namespace HPHP {  namespace JIT {
 
 //////////////////////////////////////////////////////////////////////
 
-class IRTrace;
-class TraceBuilder;
-class IRFactory;
+class IRBuilder;
+class IRUnit;
 class IRInstruction;
 
 //////////////////////////////////////////////////////////////////////
@@ -30,15 +31,15 @@ class IRInstruction;
 /*
  * The main optimization passes, in the order they run.
  */
-void optimizeMemoryAccesses(IRTrace*, IRFactory*);
-void optimizePredictions(IRTrace*, IRFactory*);
-void eliminateDeadCode(IRTrace*, IRFactory*);
-void optimizeJumps(IRTrace*, IRFactory*);
+void optimizeRefcounts(IRUnit&) noexcept;
+void optimizePredictions(IRUnit&);
+void optimizeJumps(IRUnit&);
+void eliminateDeadCode(IRUnit&);
 
 /*
  * Run all the optimization passes.
  */
-void optimizeTrace(IRTrace*, TraceBuilder*);
+void optimize(IRUnit& unit, IRBuilder& builder, TransKind kind);
 
 //////////////////////////////////////////////////////////////////////
 

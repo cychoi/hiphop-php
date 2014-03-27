@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -68,10 +68,10 @@ int DoStatement::getKidCount() const {
 void DoStatement::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_stmt = boost::dynamic_pointer_cast<Statement>(cp);
+      m_stmt = dynamic_pointer_cast<Statement>(cp);
       break;
     case 1:
-      m_condition = boost::dynamic_pointer_cast<Expression>(cp);
+      m_condition = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       assert(false);
@@ -88,6 +88,19 @@ void DoStatement::inferTypes(AnalysisResultPtr ar) {
   } else {
     m_condition->inferAndCheck(ar, Type::Boolean, false);
   }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void DoStatement::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("DoStatement", 3);
+  cg.printPropertyHeader("block");
+  cg.printAsBlock(m_stmt);
+  cg.printPropertyHeader("condition");
+  m_condition->outputCodeModel(cg);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

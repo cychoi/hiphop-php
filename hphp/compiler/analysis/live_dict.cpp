@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,9 +14,15 @@
    +----------------------------------------------------------------------+
 */
 
+#include "hphp/compiler/analysis/live_dict.h"
+#include <algorithm>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
+
 #include "hphp/compiler/analysis/alias_manager.h"
 #include "hphp/compiler/analysis/function_scope.h"
-#include "hphp/compiler/analysis/live_dict.h"
 #include "hphp/compiler/analysis/variable_table.h"
 
 #include "hphp/compiler/expression/expression.h"
@@ -465,7 +471,6 @@ bool LiveDict::color(TypePtr type) {
         if (sym &&
             !sym->isGlobal() &&
             !sym->isParameter() &&
-            !sym->isGeneratorParameter() &&
             !sym->isClosureVar() &&
             !sym->isStatic() &&
             !e->isThis()) {
@@ -610,7 +615,7 @@ public:
       SimpleVariablePtr sv(static_pointer_cast<SimpleVariable>(e));
       Symbol *sym = sv->getSymbol();
       if (!sym || sym->isGlobal() || sym->isStatic() || sym->isParameter() ||
-          sym->isGeneratorParameter() || sym->isClosureVar() || sv->isThis()) {
+          sym->isClosureVar() || sv->isThis()) {
         continue;
       }
 
@@ -623,7 +628,8 @@ public:
       e->setLocation(sub->getLocation());
       e->setBlockScope(sub->getScope());
       ExpStatementPtr exp(
-          new ExpStatement(sub->getScope(), sub->getLocation(), e));
+          new ExpStatement(sub->getScope(), sub->getLabelScope(),
+                           sub->getLocation(), e));
       sl->insertElement(exp, ix);
     }
   }

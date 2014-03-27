@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,7 @@
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/analysis/file_scope.h"
+#include "hphp/compiler/code_model_enums.h"
 
 using namespace HPHP;
 
@@ -66,7 +67,7 @@ int DynamicVariable::getKidCount() const {
 void DynamicVariable::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_exp = boost::dynamic_pointer_cast<Expression>(cp);
+      m_exp = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       assert(false);
@@ -85,6 +86,19 @@ TypePtr DynamicVariable::inferTypes(AnalysisResultPtr ar, TypePtr type,
 
   m_exp->inferAndCheck(ar, Type::String, false);
   return m_implementedType = Type::Variant;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void DynamicVariable::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("UnaryOpExpression", 3);
+  cg.printPropertyHeader("expression");
+  m_exp->outputCodeModel(cg);
+  cg.printPropertyHeader("operation");
+  cg.printValue(PHP_DYNAMIC_VARIABLE_OP) ;
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

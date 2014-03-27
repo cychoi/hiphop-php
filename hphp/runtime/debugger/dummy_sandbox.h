@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_EVAL_DUMMY_SANDBOX_H_
 #define incl_HPHP_EVAL_DUMMY_SANDBOX_H_
 
-#include "hphp/util/async_func.h"
+#include "hphp/util/async-func.h"
 #include "hphp/util/synchronizable.h"
 #include "hphp/runtime/debugger/debugger_base.h"
 
@@ -29,14 +29,12 @@ namespace HPHP { namespace Eval {
  * request.
  */
 class DebuggerProxy;
-DECLARE_BOOST_TYPES(DummySandbox);
 class DummySandbox : public Synchronizable {
 public:
   DummySandbox(DebuggerProxy *proxy, const std::string &defaultPath,
                const std::string &startupFile);
-  bool waitForEnd(int seconds);
   void start();
-  void stop();
+  bool stop(int timeout);
 
   // execution thread
   void run();
@@ -48,7 +46,7 @@ private:
   std::string m_defaultPath;
   std::string m_startupFile;
 
-  AsyncFunc<DummySandbox>* m_thread;
+  AsyncFunc<DummySandbox> m_thread;
   bool m_stopped;
   int m_signum;
 

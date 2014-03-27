@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,7 +26,7 @@
 #include "hphp/compiler/statement/function_statement.h"
 #include "hphp/compiler/statement/return_statement.h"
 #include "hphp/compiler/statement/block_statement.h"
-#include "hphp/util/parser/hphp.tab.hpp"
+#include "hphp/parser/hphp.tab.hpp"
 #include "hphp/compiler/expression/binary_op_expression.h"
 #include "hphp/compiler/expression/assignment_expression.h"
 #include "hphp/compiler/expression/simple_variable.h"
@@ -51,6 +51,15 @@ StatementPtr StatementList::clone() {
   stmt->m_stmts.clear();
   for (unsigned int i = 0; i < m_stmts.size(); i++) {
     stmt->m_stmts.push_back(Clone(m_stmts[i]));
+  }
+  return stmt;
+}
+
+StatementListPtr StatementList::shallowClone() {
+  StatementListPtr stmt(new StatementList(*this));
+  stmt->m_stmts.clear();
+  for (unsigned int i = 0; i < m_stmts.size(); i++) {
+    stmt->m_stmts.push_back(m_stmts[i]);
   }
   return stmt;
 }
@@ -262,7 +271,8 @@ bool StatementList::mergeConcatAssign() {
                                     var, exp1, T_CONCAT_EQUAL));
         }
         expStmt = ExpStatementPtr
-          (new ExpStatement(getScope(), getLocation(), exp));
+          (new ExpStatement(getScope(), getLabelScope(),
+                            getLocation(), exp));
 
         m_stmts[i - length] = expStmt;
         for (j = i - (length - 1); i > j; i--) removeElement(j);
@@ -291,7 +301,7 @@ void StatementList::setNthKid(int n, ConstructPtr cp) {
   if (n >= s) {
     assert(false);
   } else {
-    m_stmts[n] = boost::dynamic_pointer_cast<Statement>(cp);
+    m_stmts[n] = dynamic_pointer_cast<Statement>(cp);
   }
 }
 
@@ -410,6 +420,14 @@ StatementPtr StatementList::postOptimize(AnalysisResultConstPtr ar) {
 void StatementList::inferTypes(AnalysisResultPtr ar) {
   for (unsigned int i = 0; i < m_stmts.size(); i++) {
     m_stmts[i]->inferTypes(ar);
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void StatementList::outputCodeModel(CodeGenerator &cg) {
+  for (unsigned int i = 0; i < m_stmts.size(); i++) {
+    m_stmts[i]->outputCodeModel(cg);
   }
 }
 

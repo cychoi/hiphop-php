@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,11 +22,10 @@
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdPrint);
 class CmdPrint : public DebuggerCommand {
 public:
   static const char *Formats[];
-  static std::string FormatResult(const char *format, CVarRef ret);
+  static std::string FormatResult(const char *format, const Variant& ret);
 
 public:
   CmdPrint() : DebuggerCommand(KindOfPrint), m_bypassAccessCheck(false),
@@ -35,8 +34,8 @@ public:
   virtual void list(DebuggerClient &client);
   virtual void help(DebuggerClient &client);
 
-  virtual void setClientOutput(DebuggerClient &client);
   virtual bool onServer(DebuggerProxy &proxy);
+  virtual void onClient(DebuggerClient &client);
 
   Variant processWatch(DebuggerClient &client, const char *format,
                     const std::string &php);
@@ -44,7 +43,6 @@ public:
   virtual void handleReply(DebuggerClient &client);
 
 protected:
-  virtual void onClientImpl(DebuggerClient &client);
   virtual void sendImpl(DebuggerThriftBuffer &thrift);
   virtual void recvImpl(DebuggerThriftBuffer &thrift);
 

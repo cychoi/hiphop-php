@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -113,7 +113,7 @@ TypePtr NewObjectExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
       getScope()->getVariables()->
         setAttribute(VariableTable::NeedGlobalPointer);
     }
-    m_dynamic = cls->derivesFromRedeclaring();
+    m_dynamic = cls->derivesFromRedeclaring() == Derivation::Redeclaring;
     bool valid = true;
     FunctionScopePtr func = cls->findConstructor(ar, true);
     if (!func) {
@@ -122,7 +122,6 @@ TypePtr NewObjectExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
           if (getScope()->isFirstPass()) {
             Compiler::Error(Compiler::BadConstructorCall, self);
           }
-          m_params->setOutputCount(0);
         }
         m_params->inferAndCheck(ar, Type::Some, false);
       }
@@ -151,6 +150,26 @@ TypePtr NewObjectExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
   m_nameExp->inferAndCheck(ar, Type::String, false);
   if (m_params) m_params->inferAndCheck(ar, Type::Any, false);
   return Type::Object;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void NewObjectExpression::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("NewObjectExpression", m_params == nullptr ? 2 : 3);
+  if (m_nameExp->is(Expression::KindOfScalarExpression)) {
+    cg.printPropertyHeader("class");
+    cg.printTypeExpression(this->getOriginalName());
+  } else {
+    cg.printPropertyHeader("classExpression");
+    m_nameExp->outputCodeModel(cg);
+  }
+  if (m_params != nullptr) {
+    cg.printPropertyHeader("arguments");
+    cg.printExpressionVector(m_params);
+  }
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

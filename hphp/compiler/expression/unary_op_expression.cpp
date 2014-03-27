@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,10 +16,11 @@
 
 #include "hphp/compiler/expression/unary_op_expression.h"
 #include "hphp/compiler/expression/object_property_expression.h"
-#include "hphp/util/parser/hphp.tab.hpp"
+#include "hphp/parser/hphp.tab.hpp"
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/statement/statement_list.h"
+#include "hphp/compiler/code_model_enums.h"
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/analysis/function_scope.h"
@@ -29,8 +30,8 @@
 #include "hphp/compiler/expression/constant_expression.h"
 #include "hphp/compiler/expression/binary_op_expression.h"
 #include "hphp/compiler/expression/encaps_list_expression.h"
-#include "hphp/runtime/base/type_conversions.h"
-#include "hphp/runtime/base/builtin_functions.h"
+#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/compiler/parser/parser.h"
 
 using namespace HPHP;
@@ -221,33 +222,49 @@ void UnaryOpExpression::analyzeProgram(AnalysisResultPtr ar) {
   }
 }
 
-bool UnaryOpExpression::preCompute(CVarRef value, Variant &result) {
+bool UnaryOpExpression::preCompute(const Variant& value, Variant &result) {
   bool ret = true;
   try {
     g_context->setThrowAllErrors(true);
+    auto add = RuntimeOption::IntsOverflowToInts ? cellAdd : cellAddO;
+    auto sub = RuntimeOption::IntsOverflowToInts ? cellSub : cellSubO;
+
     switch(m_op) {
       case '!':
         result = (!toBoolean(value)); break;
       case '+':
-        result = value.unary_plus(); break;
+        cellSet(add(make_tv<KindOfInt64>(0), *value.asCell()),
+                *result.asCell());
+        break;
       case '-':
-        result = value.negate(); break;
+        cellSet(sub(make_tv<KindOfInt64>(0), *value.asCell()),
+                *result.asCell());
+        break;
       case '~':
-        result = value.bitNot(); break;
+        tvSet(*value.asCell(), *result.asTypedValue());
+        cellBitNot(*result.asCell());
+        break;
       case '@':
-        result = value; break;
+        result = value;
+        break;
       case T_INT_CAST:
-        result = value.toInt64(); break;
+        result = value.toInt64();
+        break;
       case T_DOUBLE_CAST:
-        result = toDouble(value); break;
+        result = toDouble(value);
+        break;
       case T_STRING_CAST:
-        result = toString(value); break;
+        result = toString(value);
+        break;
       case T_BOOL_CAST:
-        result = toBoolean(value); break;
+        result = toBoolean(value);
+        break;
       case T_EMPTY:
-        result = empty(value); break;
+        result = !toBoolean(value);
+        break;
       case T_ISSET:
-        result = isset(value); break;
+        result = is_not_null(value);
+        break;
       case T_INC:
       case T_DEC:
         assert(false);
@@ -280,7 +297,7 @@ int UnaryOpExpression::getKidCount() const {
 void UnaryOpExpression::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_exp = boost::dynamic_pointer_cast<Expression>(cp);
+      m_exp = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       assert(false);
@@ -322,7 +339,7 @@ ExpressionPtr UnaryOpExpression::preOptimize(AnalysisResultConstPtr ar) {
     for (; i < n; i++) {
       ExpressionPtr e((*el)[i]);
       if (!e || !e->isScalar() || !e->getScalarValue(value)) break;
-      if (!isset(value)) {
+      if (value.isNull()) {
         result = false;
       }
     }
@@ -552,6 +569,111 @@ ExpressionPtr UnaryOpExpression::unneededHelper() {
   }
 
   return static_pointer_cast<Expression>(shared_from_this());
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void UnaryOpExpression::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = m_exp == nullptr ? 2 : 3;
+  switch (m_op) {
+    case T_UNSET:
+    case T_EXIT:
+    case T_ARRAY:
+    case T_ISSET:
+    case T_EMPTY:
+    case T_EVAL: {
+      cg.printObjectHeader("SimpleFunctionCallExpression", numProps);
+      std::string funcName;
+      switch (m_op) {
+        case T_UNSET: funcName = "unset"; break;
+        case T_EXIT: funcName = "exit"; break;
+        case T_ARRAY: funcName = "array"; break;
+        case T_ISSET: funcName = "isset"; break;
+        case T_EMPTY: funcName = "empty"; break;
+        case T_EVAL: funcName = "eval"; break;
+        default: break;
+      }
+      cg.printPropertyHeader("functionName");
+      cg.printValue(funcName);
+      if (m_exp != nullptr) {
+        cg.printPropertyHeader("arguments");
+        cg.printExpressionVector(m_exp);
+      }
+      cg.printPropertyHeader("sourceLocation");
+      cg.printLocation(this->getLocation());
+      cg.printObjectFooter();
+      return;
+    }
+    default:
+      break;
+  }
+
+  switch (m_op) {
+    case T_FILE:
+    case T_DIR:
+    case T_CLASS:
+    case T_FUNCTION: {
+      cg.printObjectHeader("SimpleConstantExpression", 2);
+      std::string varName;
+      switch (m_op) {
+        case T_FILE: varName = "__FILE__"; break;
+        case T_DIR: varName = "__DIR__"; break;
+        //case T_CLASS: varName = "class"; break;
+        //case T_FUNCTION: varName = "function"; break;
+        default:
+          assert(false); //fishing expedition. Are these cases dead?
+          break;
+      }
+      cg.printPropertyHeader("constantName");
+      cg.printValue(varName);
+      cg.printPropertyHeader("sourceLocation");
+      cg.printLocation(this->getLocation());
+      cg.printObjectFooter();
+      return;
+    }
+    default:
+      break;
+  }
+
+  cg.printObjectHeader("UnaryOpExpression", numProps);
+  if (m_exp != nullptr) {
+    cg.printPropertyHeader("expression");
+    m_exp->outputCodeModel(cg);
+  }
+  cg.printPropertyHeader("operation");
+  int op = 0;
+  switch (m_op) {
+    case T_CLONE: op = PHP_CLONE_OP; break;
+    case T_INC:
+      op = m_front ? PHP_PRE_INCREMENT_OP : PHP_POST_INCREMENT_OP;
+      break;
+    case T_DEC:
+      op = m_front ? PHP_PRE_DECREMENT_OP : PHP_POST_DECREMENT_OP;
+      break;
+    case '+': op = PHP_PLUS_OP; break;
+    case '-': op = PHP_MINUS_OP; break;
+    case '!': op = PHP_NOT_OP;  break;
+    case '~': op = PHP_BITWISE_NOT_OP; break;
+    case T_INT_CAST: op = PHP_INT_CAST_OP; break;
+    case T_DOUBLE_CAST: op = PHP_FLOAT_CAST_OP; break;
+    case T_STRING_CAST: op = PHP_STRING_CAST_OP; break;
+    case T_ARRAY_CAST: op = PHP_ARRAY_CAST_OP; break;
+    case T_OBJECT_CAST: op = PHP_OBJECT_CAST_OP; break;
+    case T_BOOL_CAST: op = PHP_BOOL_CAST_OP; break;
+    case T_UNSET_CAST: op = PHP_UNSET_CAST_OP; break;
+    case '@': op = PHP_ERROR_CONTROL_OP; break;
+    case T_PRINT: op = PHP_PRINT_OP; break;
+    case T_INCLUDE: op = PHP_INCLUDE_OP; break;
+    case T_INCLUDE_ONCE: op = PHP_INCLUDE_ONCE_OP; break;
+    case T_REQUIRE: op = PHP_REQUIRE_OP; break;
+    case T_REQUIRE_ONCE: op = PHP_REQUIRE_ONCE_OP; break;
+    default:
+      assert(false);
+  }
+  cg.printValue(op);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

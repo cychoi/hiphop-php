@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,13 +14,13 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/compiler/statement/statement.h"
 #include "hphp/compiler/statement/unset_statement.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/expression/simple_variable.h"
+#include "hphp/compiler/statement/statement.h"
 #include "hphp/compiler/statement/block_statement.h"
 #include "hphp/compiler/analysis/block_scope.h"
 #include "hphp/compiler/expression/array_element_expression.h"
@@ -72,7 +72,7 @@ int UnsetStatement::getKidCount() const {
 void UnsetStatement::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_exp = boost::dynamic_pointer_cast<ExpressionList>(cp);
+      m_exp = dynamic_pointer_cast<ExpressionList>(cp);
       break;
     default:
       assert(false);
@@ -92,6 +92,17 @@ StatementPtr UnsetStatement::postOptimize(AnalysisResultConstPtr ar) {
 
 void UnsetStatement::inferTypes(AnalysisResultPtr ar) {
   m_exp->inferAndCheck(ar, Type::Variant, true);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void UnsetStatement::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("UnsetStatement", 2);
+  cg.printPropertyHeader("expressions");
+  cg.printExpressionVector(m_exp);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

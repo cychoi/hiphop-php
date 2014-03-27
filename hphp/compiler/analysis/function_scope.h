@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,11 +18,16 @@
 #define incl_HPHP_FUNCTION_SCOPE_H_
 
 #include "hphp/compiler/expression/user_attribute.h"
+#include <list>
+#include <set>
+#include <utility>
+#include <vector>
 #include "hphp/compiler/analysis/block_scope.h"
 #include "hphp/compiler/option.h"
+#include "hphp/compiler/json.h"
 
-#include "hphp/util/json.h"
-#include "hphp/util/parser/parser.h"
+#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/parser/parser.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -73,7 +78,7 @@ public:
 
   FunctionScope(FunctionScopePtr orig, AnalysisResultConstPtr ar,
                 const std::string &name, const std::string &originalName,
-                StatementPtr stmt, ModifierExpressionPtr modifiers);
+                StatementPtr stmt, ModifierExpressionPtr modifiers, bool user);
 
   /**
    * System functions.
@@ -84,24 +89,28 @@ public:
   void setParamName(int index, const std::string &name);
   void setParamDefault(int index, const char* value, int64_t len,
                        const std::string &text);
-  CStrRef getParamDefault(int index);
   void setRefParam(int index);
   bool hasRefParam(int max) const;
 
   void addModifier(int mod);
 
+  bool hasUserAttr(const char *attr) const;
+
   /**
    * What kind of function this is.
    */
-  bool isUserFunction() const { return !m_system;}
+  bool isUserFunction() const { return !m_system && !isNative(); }
+  bool isSystem() const { return m_system; }
   bool isDynamic() const { return m_dynamic; }
   bool isPublic() const;
   bool isProtected() const;
   bool isPrivate() const;
   bool isStatic() const;
   bool isAbstract() const;
+  bool isNative() const;
   bool isFinal() const;
   bool isMagic() const;
+  bool isBuiltin() const override { return !getStmt() || isNative(); }
   bool isRefParam(int index) const;
   bool isRefReturn() const { return m_refReturn;}
   bool isDynamicInvoke() const { return m_dynamicInvoke; }
@@ -109,20 +118,14 @@ public:
   bool hasImpl() const;
   void setDirectInvoke() { m_directInvoke = true; }
   bool hasDirectInvoke() const { return m_directInvoke; }
+  bool isZendParamMode() const;
   bool mayContainThis();
   bool isClosure() const;
-  bool isGenerator() const;
-  bool isGeneratorFromClosure() const;
-  int allocYieldLabel() { return ++m_yieldLabelCount; }
-  int getYieldLabelCount() const { return m_yieldLabelCount; }
-  bool hasGeneratorAsBody() const;
-  MethodStatementRawPtr getOrigGenStmt() const;
-  FunctionScopeRawPtr getOrigGenFS() const;
-  void setClosureGenerator() { m_closureGenerator = true; }
-  bool isClosureGenerator() const {
-    assert(!m_closureGenerator || isClosure());
-    return m_closureGenerator;
-  }
+  bool isGenerator() const { return m_generator; }
+  void setGenerator(bool f) { m_generator = f; }
+  bool isAsync() const { return m_async; }
+  void setAsync(bool f) { m_async = f; }
+
   bool needsClassParam();
 
   void setInlineSameContext(bool f) { m_inlineSameContext = f; }
@@ -156,9 +159,6 @@ public:
   const std::string &name() const {
     return getName();
   }
-
-  virtual std::string getId() const;
-  std::string getInjectionId() const;
 
   int getRedeclaringId() const {
     return m_redeclaring;
@@ -218,14 +218,16 @@ public:
   /*
    * If this is a builtin function and does not need an ActRec
    */
-  bool needsActRec() const;
-  void setNeedsActRec();
+  bool noFCallBuiltin() const;
+  void setNoFCallBuiltin();
 
   /*
    * If this is a builtin (C++ or PHP) and can be redefined
    */
   bool allowOverride() const;
   void setAllowOverride();
+
+  bool needsFinallyLocals() const;
 
   /**
    * Whether this function is a runtime helper function
@@ -254,6 +256,8 @@ public:
 
   /**
    * What is the inferred type of this function's return.
+   * Note that for generators and async functions, this is different
+   * from what caller actually gets when calling the function.
    */
   void pushReturnType();
   void setReturnType(AnalysisResultConstPtr ar, TypePtr type);
@@ -308,10 +312,6 @@ public:
   bool isInlined() const { return m_inlineable; }
   void disableInline() { m_inlineable = false; }
 
-  /* Whether this function is brought in by a separable extension */
-  void setSepExtension() { m_sep = true;}
-  bool isSepExtension() const { return m_sep;}
-
   /* Whether we need to worry about the named return value optimization
      for this function */
   void setNRVOFix(bool flag) { m_nrvoFix = flag; }
@@ -342,6 +342,8 @@ public:
     string_eqstri> UserAttributeMap;
 
   UserAttributeMap& userAttributes() { return m_userAttributes;}
+
+  std::vector<std::string> getUserAttributeStringParams(const std::string& key);
 
   /**
    * Override BlockScope::outputPHP() to generate return type.
@@ -379,16 +381,12 @@ public:
   void getClosureUseVars(ParameterExpressionPtrIdxPairVec &useVars,
                          bool filterUsed = true);
 
-  bool needsAnonClosureClass(ParameterExpressionPtrVec &useVars);
-
-  bool needsAnonClosureClass(ParameterExpressionPtrIdxPairVec &useVars);
-
   void addCaller(BlockScopePtr caller, bool careAboutReturn = true);
   void addNewObjCaller(BlockScopePtr caller);
 
   ReadWriteMutex &getInlineMutex() { return m_inlineMutex; }
 
-  DECLARE_BOOST_TYPES(FunctionInfo);
+  DECLARE_EXTENDED_BOOST_TYPES(FunctionInfo);
 
   static void RecordFunctionInfo(std::string fname, FunctionScopePtr func);
 
@@ -440,7 +438,7 @@ private:
   std::vector<std::string> m_paramNames;
   TypePtrVec m_paramTypes;
   TypePtrVec m_paramTypeSpecs;
-  std::vector<String> m_paramDefaults;
+  std::vector<std::string> m_paramDefaults;
   std::vector<std::string> m_paramDefaultTexts;
   std::vector<bool> m_refs;
   TypePtr m_returnType;
@@ -463,7 +461,6 @@ private:
   unsigned m_magicMethod : 1;
   unsigned m_system : 1;
   unsigned m_inlineable : 1;
-  unsigned m_sep : 1;
   unsigned m_containsThis : 1; // contains a usage of $this?
   unsigned m_containsBareThis : 2; // $this outside object-context,
                                    // 2 if in reference context
@@ -472,7 +469,8 @@ private:
   unsigned m_inlineSameContext : 1;
   unsigned m_contextSensitive : 1;
   unsigned m_directInvoke : 1;
-  unsigned m_closureGenerator : 1;
+  unsigned m_generator : 1;
+  unsigned m_async : 1;
   unsigned m_noLSB : 1;
   unsigned m_nextLSB : 1;
   unsigned m_hasTry : 1;
@@ -488,7 +486,6 @@ private:
   ExpressionListPtr m_closureValues;
   ReadWriteMutex m_inlineMutex;
   unsigned m_nextID; // used when cloning generators for traits
-  int m_yieldLabelCount; // number of allocated yield labels
   std::list<FunctionScopeRawPtr> m_clonedTraitOuterScope;
 };
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,38 +20,16 @@
 #include <atomic>
 #include <string>
 #include <stdarg.h>
-#include "hphp/util/thread_local.h"
+
+#include "hphp/util/thread-local.h"
 #include "hphp/util/cronolog.h"
+#include "hphp/util/log-file-flusher.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 class StackTrace;
 class Exception;
-
-class LogFileData {
-public:
-  LogFileData() : log(nullptr), bytesWritten(0), prevBytesWritten(0) {}
-  explicit LogFileData(FILE *f)
-    : log(f)
-    , bytesWritten(0)
-    , prevBytesWritten(0)
-  {}
-  LogFileData(const LogFileData& rhs) :
-      log(rhs.log), prevBytesWritten(rhs.prevBytesWritten) {
-    bytesWritten.store(rhs.bytesWritten.load());
-  }
-  LogFileData& operator=(const LogFileData& rhs) {
-    log = rhs.log;
-    prevBytesWritten = rhs.prevBytesWritten;
-    bytesWritten.store(rhs.bytesWritten.load());
-    return *this;
-  }
-
-  FILE *log;
-  std::atomic<int> bytesWritten;
-  int prevBytesWritten;
-};
 
 class Logger {
 public:
@@ -63,16 +41,17 @@ public:
     LogVerbose
   };
 
+  Logger(): m_standardOut(stderr) {}
+
   static bool UseSyslog;
   static bool UseLogFile;
+  static bool UseRequestLog;
   static bool IsPipeOutput;
   static bool UseCronolog;
-  static int DropCacheChunkSize;
   static FILE *Output;
   static Cronolog cronOutput;
   static LogLevelType LogLevel;
-  static std::atomic<int> bytesWritten;
-  static int prevBytesWritten;
+  static LogFileFlusher flusher;
   static bool LogHeader;
   static bool LogNativeStackTrace;
   static std::string ExtraHeader;
@@ -84,10 +63,10 @@ public:
   static void Info(const std::string &msg);
   static void Verbose(const std::string &msg);
 
-  static void Error(const char *fmt, ...);
-  static void Warning(const char *fmt, ...);
-  static void Info(const char *fmt, ...);
-  static void Verbose(const char *fmt, ...);
+  static void Error(const char *fmt, ...) ATTRIBUTE_PRINTF(1,2);
+  static void Warning(const char *fmt, ...) ATTRIBUTE_PRINTF(1,2);
+  static void Info(const char *fmt, ...) ATTRIBUTE_PRINTF(1,2);
+  static void Verbose(const char *fmt, ...) ATTRIBUTE_PRINTF(1,2);
 
   static void Log(LogLevelType level, const char *type, const Exception &e,
                   const char *file = nullptr, int line = 0);
@@ -109,29 +88,30 @@ public:
     }
   }
 
-  static int checkDropCache(int bytesWritten, int prevBytesWritten,
-                            FILE *f);
   static char *EscapeString(const std::string &msg);
+
+  static FILE *GetStandardOut(LogLevelType level);
+  static void SetStandardOut(FILE*);
 
   virtual ~Logger() { }
 
 protected:
   class ThreadData {
   public:
-    ThreadData() : request(0), message(0), bytesWritten(0), prevBytesWritten(0),
-                   log(nullptr), hook(nullptr) {}
+    ThreadData() : request(0), message(0), log(nullptr), hook(nullptr) {}
     int request;
     int message;
-    int bytesWritten;
-    int prevBytesWritten;
+    LogFileFlusher flusher;
     FILE *log;
     PFUNC_LOG hook;
     void *hookData;
   };
   static DECLARE_THREAD_LOCAL(ThreadData, s_threadData);
 
-  static void Log(LogLevelType level, const char *fmt, va_list ap);
-  static void LogEscapeMore(LogLevelType level, const char *fmt, va_list ap);
+  static void Log(LogLevelType level, const char *fmt, va_list ap)
+    ATTRIBUTE_PRINTF(2,0);
+  static void LogEscapeMore(LogLevelType level, const char *fmt, va_list ap)
+    ATTRIBUTE_PRINTF(2,0);
   static void Log(LogLevelType level, const std::string &msg,
                   const StackTrace *stackTrace,
                   bool escape = false, bool escapeMore = false);
@@ -140,7 +120,6 @@ protected:
     return Logger::UseLogFile || Logger::UseSyslog;
   }
 
-  static FILE *GetStandardOut(LogLevelType level);
   static int GetSyslogLevel(LogLevelType level);
 
   /**
@@ -160,6 +139,7 @@ protected:
 private:
   static Logger *s_logger;
 
+  FILE* m_standardOut;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,8 @@
 */
 
 #include "hphp/compiler/expression/expression_list.h"
+#include <set>
+#include <vector>
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/compiler/expression/unary_op_expression.h"
@@ -22,7 +24,7 @@
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/expression/array_pair_expression.h"
 #include "hphp/compiler/analysis/function_scope.h"
-#include "hphp/runtime/base/array/array_init.h"
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/compiler/parser/parser.h"
 
 using namespace HPHP;
@@ -33,7 +35,6 @@ using namespace HPHP;
 ExpressionList::ExpressionList(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                                ListKind kind)
   : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ExpressionList)),
-    m_outputCount(-1),
     m_arrayElements(false), m_collectionType(0), m_kind(kind) {
 }
 
@@ -231,35 +232,24 @@ void ExpressionList::stripConcat() {
   for (int i = 0; i < el.getCount(); ) {
     ExpressionPtr &e = el[i];
     if (e->is(Expression::KindOfUnaryOpExpression)) {
-      UnaryOpExpressionPtr u(boost::static_pointer_cast<UnaryOpExpression>(e));
+      UnaryOpExpressionPtr u(static_pointer_cast<UnaryOpExpression>(e));
       if (u->getOp() == '(') {
         e = u->getExpression();
       }
     }
     if (e->is(Expression::KindOfBinaryOpExpression)) {
       BinaryOpExpressionPtr b
-        (boost::static_pointer_cast<BinaryOpExpression>(e));
+        (static_pointer_cast<BinaryOpExpression>(e));
       if (b->getOp() == '.') {
-        e = b->getExp1();
-        el.insertElement(b->getExp2(), i + 1);
-        continue;
+        if (!b->getExp1()->isArray() && !b->getExp2()->isArray()) {
+          e = b->getExp1();
+          el.insertElement(b->getExp2(), i + 1);
+          continue;
+        }
       }
     }
     i++;
   }
-}
-
-void ExpressionList::setOutputCount(int count) {
-  assert(count >= 0 && count <= (int)m_exps.size());
-  m_outputCount = count;
-}
-
-int ExpressionList::getOutputCount() const {
-  return m_outputCount < 0 ? m_exps.size() : m_outputCount;
-}
-
-void ExpressionList::resetOutputCount() {
-  m_outputCount = -1;
 }
 
 void ExpressionList::markParam(int p, bool noRefWrapper) {
@@ -286,7 +276,7 @@ void ExpressionList::markParams(bool noRefWrapper) {
   }
 }
 
-void ExpressionList::setCollectionType(int cType) {
+void ExpressionList::setCollectionType(Collection::Type cType) {
   m_arrayElements = true;
   m_collectionType = cType;
 }
@@ -335,7 +325,7 @@ void ExpressionList::setNthKid(int n, ConstructPtr cp) {
   if (n >= m) {
     assert(false);
   } else {
-    m_exps[n] = boost::dynamic_pointer_cast<Expression>(cp);
+    m_exps[n] = dynamic_pointer_cast<Expression>(cp);
   }
 }
 
@@ -479,6 +469,19 @@ bool ExpressionList::canonCompare(ExpressionPtr e) const {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
+void ExpressionList::outputCodeModel(CodeGenerator &cg) {
+  for (unsigned int i = 0; i < m_exps.size(); i++) {
+    ExpressionPtr exp = m_exps[i];
+    if (exp) {
+      cg.printExpression(exp, exp->hasContext(RefParameter));
+    } else {
+      cg.printNull();
+    }
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 
 void ExpressionList::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
@@ -507,10 +510,9 @@ unsigned int ExpressionList::checkLitstrKeys() const {
     if (!ret) return 0;
     if (!value.isString()) return 0;
     String str = value.toString();
-    if (str->isInteger()) return 0;
+    if (str.isInteger()) return 0;
     string s(str.data(), str.size());
     keys.insert(s);
   }
   return keys.size();
 }
-

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,7 @@
 
 #include <string>
 #include <assert.h>
+#include <exception>
 #include "hphp/compiler/hphp.h"
 #include "hphp/runtime/base/types.h"
 #include "hphp/test/ext/test.h"
@@ -46,10 +47,10 @@ class TestBase {
   bool CountSkip();
 
   bool VerifySame(const char *exp1, const char *exp2,
-                  CVarRef v1, CVarRef v2);
+                  const Variant& v1, const Variant& v2);
   bool VerifyClose(const char *exp1, const char *exp2,
                    double v1, double v2);
-  bool array_value_exists(CVarRef var, CVarRef value);
+  bool array_value_exists(const Variant& var, const Variant& value);
 
   static char error_buffer[];
 
@@ -86,7 +87,7 @@ class TestBase {
 template <bool value>
 class WithOption {
 public:
-  WithOption(bool &option) :
+  explicit WithOption(bool& option) :
     m_option(&option), m_save(option) {
     option = value;
   }
@@ -117,7 +118,7 @@ typedef WithOption<false> WithNoOpt;
   return CountSkip();                                                   \
 
 #define VERIFY(exp)                                                     \
-  if (!(exp)) {                                                         \
+  if (!toBoolean(exp)) {                                                \
     LOG_TEST_ERROR("%s:%d: [%s] is false", __FILE__, __LINE__, #exp);   \
     return Count(false);                                                \
   }                                                                     \

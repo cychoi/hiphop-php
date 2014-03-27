@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,12 +18,12 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_INTERRUPT_H_
 
 #include "hphp/runtime/debugger/debugger_command.h"
+#include <vector>
 #include "hphp/util/process.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdInterrupt);
 class CmdInterrupt : public DebuggerCommand {
 public:
   CmdInterrupt()
@@ -44,16 +44,17 @@ public:
   std::string desc() const;
   std::string error() const { return m_errorMsg;}
 
-  virtual void setClientOutput(DebuggerClient &client);
   virtual bool onServer(DebuggerProxy &proxy);
+  virtual void onClient(DebuggerClient &client);
 
-  bool shouldBreak(const BreakPointInfoPtrVec &bps, int stackDepth);
+  bool shouldBreak(DebuggerProxy &proxy,
+                   const std::vector<BreakPointInfoPtr> &bps,
+                   int stackDepth);
   std::string getFileLine() const;
 
   InterruptSite *getSite() { return m_site;}
 
 protected:
-  virtual void onClientImpl(DebuggerClient &client);
   virtual void sendImpl(DebuggerThriftBuffer &thrift);
   virtual void recvImpl(DebuggerThriftBuffer &thrift);
 
@@ -64,7 +65,7 @@ private:
   int64_t m_threadId;
   InterruptSite *m_site;   // server side
   BreakPointInfoPtr m_bpi; // client side
-  BreakPointInfoPtrVec m_matched;
+  std::vector<BreakPointInfoPtr> m_matched;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

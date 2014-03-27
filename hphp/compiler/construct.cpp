@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,7 @@
 
 #include "hphp/compiler/construct.h"
 #include "hphp/compiler/parser/parser.h"
-#include "hphp/util/util.h"
+#include "hphp/util/string-vsnprintf.h"
 
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/function_scope.h"
@@ -44,7 +44,7 @@ void Construct::resetScope(BlockScopeRawPtr scope, bool resetOrigScope) {
   setBlockScope(scope);
   if (resetOrigScope) {
     ExpressionPtr expr =
-      boost::dynamic_pointer_cast<Expression>(shared_from_this());
+      dynamic_pointer_cast<Expression>(shared_from_this());
     if (expr) {
       expr->setOriginalScope(scope);
     }
@@ -302,7 +302,7 @@ void Construct::dumpNode(int spc) {
       type_info = "{" + type_info + "} ";
     }
   } else {
-    assert(FALSE);
+    not_reached();
   }
 
   int s = spc;
@@ -439,7 +439,7 @@ public:
     // HACK: dump the closure function as a "child" of the
     // closure expression
     ClosureExpressionPtr c =
-      boost::dynamic_pointer_cast<ClosureExpression>(cp);
+      dynamic_pointer_cast<ClosureExpression>(cp);
     if (c) {
       c->getClosureFunction()->dump(m_spc, m_ar);
     }
@@ -469,9 +469,23 @@ void Construct::parseTimeFatal(Compiler::ErrorType err, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   string msg;
-  Util::string_vsnprintf(msg, fmt, ap);
+  string_vsnprintf(msg, fmt, ap);
   va_end(ap);
 
   if (err != Compiler::NoError) Compiler::Error(err, shared_from_this());
   throw ParseTimeFatalException(m_loc->file, m_loc->line0, "%s", msg.c_str());
+}
+
+void Construct::analysisTimeFatal(Compiler::ErrorType err,
+                                  const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  string msg;
+  string_vsnprintf(msg, fmt, ap);
+  va_end(ap);
+
+  assert(err != Compiler::NoError);
+  Compiler::Error(err, shared_from_this());
+  throw AnalysisTimeFatalException(m_loc->file, m_loc->line0,
+                                   "%s [analysis]", msg.c_str());
 }

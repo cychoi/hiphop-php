@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,11 +15,16 @@
 */
 
 #include "hphp/compiler/analysis/function_scope.h"
+#include <utility>
+#include <vector>
 #include "hphp/compiler/analysis/analysis_result.h"
+#include "hphp/compiler/expression/array_pair_expression.h"
 #include "hphp/compiler/expression/constant_expression.h"
 #include "hphp/compiler/expression/modifier_expression.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/expression/function_call.h"
+#include "hphp/compiler/expression/scalar_expression.h"
+#include "hphp/compiler/expression/unary_op_expression.h"
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/statement/statement_list.h"
 #include "hphp/compiler/analysis/file_scope.h"
@@ -32,13 +37,12 @@
 #include "hphp/compiler/expression/parameter_expression.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/util/atomic.h"
-#include "hphp/util/util.h"
-#include "hphp/runtime/base/class_info.h"
-#include "hphp/runtime/base/type_conversions.h"
-#include "hphp/runtime/base/builtin_functions.h"
-#include "hphp/util/parser/hphp.tab.hpp"
-#include "hphp/runtime/base/variable_serializer.h"
-#include "hphp/runtime/base/zend/zend_string.h"
+#include "hphp/runtime/base/class-info.h"
+#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/parser/hphp.tab.hpp"
+#include "hphp/runtime/base/variable-serializer.h"
+#include "hphp/runtime/base/zend-string.h"
 
 using namespace HPHP;
 
@@ -58,15 +62,16 @@ FunctionScope::FunctionScope(AnalysisResultConstPtr ar, bool method,
       m_method(method), m_refReturn(reference), m_virtual(false),
       m_hasOverride(false), m_perfectVirtual(false), m_overriding(false),
       m_volatile(false), m_persistent(false), m_pseudoMain(inPseudoMain),
-      m_magicMethod(false), m_system(false), m_inlineable(false), m_sep(false),
+      m_magicMethod(false), m_system(false), m_inlineable(false),
       m_containsThis(false), m_containsBareThis(0), m_nrvoFix(true),
       m_inlineAsExpr(false), m_inlineSameContext(false),
       m_contextSensitive(false),
       m_directInvoke(false),
-      m_closureGenerator(false), m_noLSB(false), m_nextLSB(false),
+      m_generator(false),
+      m_async(false),
+      m_noLSB(false), m_nextLSB(false),
       m_hasTry(false), m_hasGoto(false), m_localRedeclaring(false),
-      m_redeclaring(-1), m_inlineIndex(0), m_optFunction(0), m_nextID(0),
-      m_yieldLabelCount(0) {
+      m_redeclaring(-1), m_inlineIndex(0), m_optFunction(0), m_nextID(0) {
   init(ar);
   for (unsigned i = 0; i < attrs.size(); ++i) {
     if (m_userAttributes.find(attrs[i]->getName()) != m_userAttributes.end()) {
@@ -82,6 +87,15 @@ FunctionScope::FunctionScope(AnalysisResultConstPtr ar, bool method,
       m_userAttributes.find("__Overridable") != m_userAttributes.end()) {
     setAllowOverride();
   }
+
+  // Try to find if the function have __Native("VariadicByRef")
+  auto params = getUserAttributeStringParams("__native");
+  for (auto &param : params) {
+    if (param.compare("VariadicByRef") == 0) {
+      setVariableArgument(1);
+      break;
+    }
+  }
 }
 
 FunctionScope::FunctionScope(FunctionScopePtr orig,
@@ -89,7 +103,8 @@ FunctionScope::FunctionScope(FunctionScopePtr orig,
                              const string &name,
                              const string &originalName,
                              StatementPtr stmt,
-                             ModifierExpressionPtr modifiers)
+                             ModifierExpressionPtr modifiers,
+                             bool user)
     : BlockScope(name, orig->m_docComment, stmt,
                  BlockScope::FunctionScope),
       m_minParam(orig->m_minParam), m_maxParam(orig->m_maxParam),
@@ -101,19 +116,21 @@ FunctionScope::FunctionScope(FunctionScopePtr orig,
       m_overriding(orig->m_overriding), m_volatile(orig->m_volatile),
       m_persistent(orig->m_persistent),
       m_pseudoMain(orig->m_pseudoMain), m_magicMethod(orig->m_magicMethod),
-      m_system(orig->m_system), m_inlineable(orig->m_inlineable),
-      m_sep(orig->m_sep), m_containsThis(orig->m_containsThis),
+      m_system(!user), m_inlineable(orig->m_inlineable),
+      m_containsThis(orig->m_containsThis),
       m_containsBareThis(orig->m_containsBareThis), m_nrvoFix(orig->m_nrvoFix),
       m_inlineAsExpr(orig->m_inlineAsExpr),
       m_inlineSameContext(orig->m_inlineSameContext),
       m_contextSensitive(orig->m_contextSensitive),
       m_directInvoke(orig->m_directInvoke),
-      m_closureGenerator(orig->m_closureGenerator), m_noLSB(orig->m_noLSB),
+      m_generator(orig->m_generator),
+      m_async(orig->m_async),
+      m_noLSB(orig->m_noLSB),
       m_nextLSB(orig->m_nextLSB), m_hasTry(orig->m_hasTry),
       m_hasGoto(orig->m_hasGoto), m_localRedeclaring(orig->m_localRedeclaring),
       m_redeclaring(orig->m_redeclaring),
       m_inlineIndex(orig->m_inlineIndex), m_optFunction(orig->m_optFunction),
-      m_nextID(0), m_yieldLabelCount(orig->m_yieldLabelCount) {
+      m_nextID(0) {
   init(ar);
   m_originalName = originalName;
   setParamCounts(ar, m_minParam, m_maxParam);
@@ -202,12 +219,14 @@ FunctionScope::FunctionScope(bool method, const std::string &name,
       m_method(method), m_refReturn(reference), m_virtual(false),
       m_hasOverride(false), m_perfectVirtual(false), m_overriding(false),
       m_volatile(false), m_persistent(false), m_pseudoMain(false),
-      m_magicMethod(false), m_system(true), m_inlineable(false), m_sep(false),
+      m_magicMethod(false), m_system(true), m_inlineable(false),
       m_containsThis(false), m_containsBareThis(0), m_nrvoFix(true),
       m_inlineAsExpr(false), m_inlineSameContext(false),
       m_contextSensitive(false),
       m_directInvoke(false),
-      m_closureGenerator(false), m_noLSB(false), m_nextLSB(false),
+      m_generator(false),
+      m_async(false),
+      m_noLSB(false), m_nextLSB(false),
       m_hasTry(false), m_hasGoto(false), m_localRedeclaring(false),
       m_redeclaring(-1), m_inlineIndex(0),
       m_optFunction(0) {
@@ -279,6 +298,15 @@ void FunctionScope::setParamSpecs(AnalysisResultPtr ar) {
   }
 }
 
+bool FunctionScope::hasUserAttr(const char *attr) const {
+  return m_userAttributes.find(attr) != m_userAttributes.end();
+}
+
+bool FunctionScope::isZendParamMode() const {
+  return m_attributeClassInfo &
+    (ClassInfo::ZendParamModeNull | ClassInfo::ZendParamModeFalse);
+}
+
 bool FunctionScope::isPublic() const {
   return m_modifiers && m_modifiers->isPublic();
 }
@@ -297,6 +325,10 @@ bool FunctionScope::isStatic() const {
 
 bool FunctionScope::isAbstract() const {
   return m_modifiers && m_modifiers->isAbstract();
+}
+
+bool FunctionScope::isNative() const {
+  return hasUserAttr("__native");
 }
 
 bool FunctionScope::isFinal() const {
@@ -329,8 +361,13 @@ bool FunctionScope::isMixedVariableArgument() const {
   return res;
 }
 
-bool FunctionScope::needsActRec() const {
-  bool res = (m_attribute & FileScope::NeedsActRec);
+bool FunctionScope::noFCallBuiltin() const {
+  bool res = (m_attribute & FileScope::NoFCallBuiltin);
+  return res;
+}
+
+bool FunctionScope::needsFinallyLocals() const {
+  bool res = (m_attribute & FileScope::NeedsFinallyLocals);
   return res;
 }
 
@@ -341,37 +378,6 @@ bool FunctionScope::mayContainThis() {
 
 bool FunctionScope::isClosure() const {
   return ParserBase::IsClosureName(name());
-}
-
-bool FunctionScope::isGenerator() const {
-  assert(!getOrigGenStmt() ||
-         (ParserBase::IsContinuationName(name()) &&
-          m_paramNames.size() == 1 &&
-          m_paramNames[0] == CONTINUATION_OBJECT_NAME));
-  return !!getOrigGenStmt();
-}
-
-bool FunctionScope::hasGeneratorAsBody() const {
-  MethodStatementPtr stmt = dynamic_pointer_cast<MethodStatement>(getStmt());
-  return stmt ? !!stmt->getGeneratorFunc() : false;
-}
-
-bool FunctionScope::isGeneratorFromClosure() const {
-  bool res = isGenerator() && getOrigGenFS()->isClosure();
-  assert(!res || getOrigGenFS()->isClosureGenerator());
-  return res;
-}
-
-MethodStatementRawPtr FunctionScope::getOrigGenStmt() const {
-  if (!getStmt()) return MethodStatementRawPtr();
-  MethodStatementPtr m =
-    dynamic_pointer_cast<MethodStatement>(getStmt());
-  return m ? m->getOrigGeneratorFunc() : MethodStatementRawPtr();
-}
-
-FunctionScopeRawPtr FunctionScope::getOrigGenFS() const {
-  MethodStatementRawPtr origStmt = getOrigGenStmt();
-  return origStmt ? origStmt->getFunctionScope() : FunctionScopeRawPtr();
 }
 
 void FunctionScope::setVariableArgument(int reference) {
@@ -399,15 +405,21 @@ void FunctionScope::setNoEffect() {
 }
 
 bool FunctionScope::isFoldable() const {
-  return m_attribute & FileScope::IsFoldable;
+  if (m_attribute & FileScope::IsFoldable) {
+    // IDL based builtins
+    return true;
+  }
+  // Systemlib (PHP&HNI) builtins
+  auto f = Unit::lookupFunc(String(getName()).get());
+  return f && f->isFoldable();
 }
 
 void FunctionScope::setIsFoldable() {
   m_attribute |= FileScope::IsFoldable;
 }
 
-void FunctionScope::setNeedsActRec() {
-  m_attribute |= FileScope::NeedsActRec;
+void FunctionScope::setNoFCallBuiltin() {
+  m_attribute |= FileScope::NoFCallBuiltin;
 }
 
 void FunctionScope::setHelperFunction() {
@@ -530,6 +542,7 @@ bool FunctionScope::mayUseVV() const {
   return (inPseudoMain() ||
           isVariableArgument() ||
           isGenerator() ||
+          isAsync() ||
           variables->getAttribute(VariableTable::ContainsDynamicVariable) ||
           variables->getAttribute(VariableTable::ContainsExtract) ||
           variables->getAttribute(VariableTable::ContainsCompact) ||
@@ -655,7 +668,8 @@ int FunctionScope::inferParamTypes(AnalysisResultPtr ar, ConstructPtr exp,
     /**
      * Duplicate the logic of getParamType(i), w/o the mutation
      */
-    TypePtr paramType(i < m_maxParam ? m_paramTypes[i] : TypePtr());
+    TypePtr paramType(i < m_maxParam && !isZendParamMode() ?
+                      m_paramTypes[i] : TypePtr());
     if (!paramType) paramType = Type::Some;
     if (valid && !canSetParamType && i < m_maxParam &&
         (!Option::HardTypeHints || !m_paramTypeSpecs[i])) {
@@ -667,8 +681,8 @@ int FunctionScope::inferParamTypes(AnalysisResultPtr ar, ConstructPtr exp,
        * expression since it'll just get converted anyways. Doing it this way
        * allows us to generate less temporaries along the way.
        */
-      TypePtr optParamType(
-          paramType->is(Type::KindOfVariant) ? Type::Some : paramType);
+      TypePtr optParamType(paramType->is(Type::KindOfVariant) ?
+                           Type::Some : paramType);
       expType = param->inferAndCheck(ar, optParamType, false);
     } else {
       expType = param->inferAndCheck(ar, Type::Some, false);
@@ -775,14 +789,8 @@ void FunctionScope::setParamName(int index, const std::string &name) {
 void FunctionScope::setParamDefault(int index, const char* value, int64_t len,
                                     const std::string &text) {
   assert(index >= 0 && index < (int)m_paramNames.size());
-  StringData* sd = new StringData(value, len, AttachLiteral);
-  sd->setStatic();
-  m_paramDefaults[index] = String(sd);
+  m_paramDefaults[index] = std::string(value, len);
   m_paramDefaultTexts[index] = text;
-}
-
-CStrRef FunctionScope::getParamDefault(int index) {
-  return m_paramDefaults[index];
 }
 
 void FunctionScope::addModifier(int mod) {
@@ -837,11 +845,14 @@ bool FunctionScope::popReturnType() {
         m_prevReturn.reset();
         return false;
       }
-      if (!isFirstPass()) {
-        Logger::Verbose("Corrected function return type %s -> %s",
-                        m_prevReturn->toString().c_str(),
-                        m_returnType->toString().c_str());
-      }
+      Logger::Verbose("Corrected %s's return type %s -> %s",
+                      getFullName().c_str(),
+                      m_prevReturn->toString().c_str(),
+                      m_returnType->toString().c_str());
+    } else {
+      Logger::Verbose("Set %s's return type %s",
+                      getFullName().c_str(),
+                      m_returnType->toString().c_str());
     }
   } else if (!m_prevReturn) {
     return false;
@@ -850,7 +861,7 @@ bool FunctionScope::popReturnType() {
   m_prevReturn.reset();
   addUpdates(UseKindCallerReturn);
 #ifdef HPHP_INSTRUMENT_TYPE_INF
-  atomic_inc(RescheduleException::s_NumRetTypesChanged);
+  ++RescheduleException::s_NumRetTypesChanged;
 #endif /* HPHP_INSTRUMENT_TYPE_INF */
   return true;
 }
@@ -897,13 +908,35 @@ void FunctionScope::setOverriding(TypePtr returnType,
   }
 }
 
-std::string FunctionScope::getId() const {
-  string name = CodeGenerator::FormatLabel(getOriginalName());
-  if (m_redeclaring < 0) {
-    return name;
+std::vector<std::string> FunctionScope::getUserAttributeStringParams(
+    const std::string& key) {
+  std::vector<std::string> ret;
+  auto native = m_userAttributes.find(key);
+  if (native == m_userAttributes.end()) {
+    return ret;
   }
-  return name + Option::IdPrefix +
-    boost::lexical_cast<std::string>(m_redeclaring);
+
+  auto arrayExp = static_pointer_cast<UnaryOpExpression>(native->second);
+  if (!arrayExp->getExpression()) {
+    return ret;
+  }
+
+  auto memberExp = static_pointer_cast<ExpressionList>(
+                     arrayExp->getExpression());
+
+  for (int i = 0; i < memberExp->getCount(); i++) {
+    auto pairExp = dynamic_pointer_cast<ArrayPairExpression>((*memberExp)[i]);
+    if (!pairExp) {
+      continue;
+    }
+
+    auto value = dynamic_pointer_cast<ScalarExpression>(pairExp->getValue());
+    if (value) {
+      ret.push_back(value->getString());
+    }
+  }
+
+  return ret;
 }
 
 std::string FunctionScope::getDocName() const {
@@ -922,28 +955,6 @@ std::string FunctionScope::getDocFullName() const {
     return cls->getDocName() + string("::") + docName;
   }
   return docName;
-}
-
-std::string FunctionScope::getInjectionId() const {
-  string injectionName = CodeGenerator::FormatLabel(getOriginalName());
-  MethodStatementPtr stmt =
-    dynamic_pointer_cast<MethodStatement>(getStmt());
-  assert(stmt);
-  if (stmt->getGeneratorFunc()) {
-    injectionName = isClosureGenerator() ?
-      injectionName :
-      injectionName + "{continuation}";
-  } else if (stmt->getOrigGeneratorFunc() &&
-             !getOrigGenFS()->isClosure()) {
-    injectionName = CodeGenerator::FormatLabel(
-      stmt->getOrigGeneratorFunc()->getOriginalName());
-  }
-  if (m_redeclaring < 0) {
-    return injectionName;
-  }
-  const string &redecSuffix = string(Option::IdPrefix) +
-    boost::lexical_cast<std::string>(m_redeclaring);
-  return injectionName + redecSuffix;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1062,31 +1073,6 @@ void FunctionScope::getClosureUseVars(
       useVars.push_back(ParameterExpressionPtrIdxPair(param, i));
     }
   }
-}
-
-template <class U, class V>
-static U pair_first_elem(std::pair<U, V> p) { return p.first; }
-
-bool FunctionScope::needsAnonClosureClass(ParameterExpressionPtrVec &useVars) {
-  useVars.clear();
-  if (!isClosure()) return false;
-  ParameterExpressionPtrIdxPairVec useVars0;
-  getClosureUseVars(useVars0, !m_closureGenerator);
-  useVars.resize(useVars0.size());
-  // C++ seems to be unable to infer the type here on pair_first_elem
-  transform(useVars0.begin(),
-            useVars0.end(),
-            useVars.begin(),
-            pair_first_elem<ParameterExpressionPtr, int>);
-  return useVars.size() > 0 || getVariables()->hasStaticLocals();
-}
-
-bool FunctionScope::needsAnonClosureClass(
-    ParameterExpressionPtrIdxPairVec &useVars) {
-  useVars.clear();
-  if (!isClosure()) return false;
-  getClosureUseVars(useVars, !m_closureGenerator);
-  return useVars.size() > 0 || getVariables()->hasStaticLocals();
 }
 
 FunctionScope::StringToFunctionInfoPtrMap FunctionScope::s_refParamInfo;

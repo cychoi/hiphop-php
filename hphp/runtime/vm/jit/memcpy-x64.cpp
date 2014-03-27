@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,17 +14,18 @@
    +----------------------------------------------------------------------+
 */
 
-#ifdef __x86_64__
+#include "folly/Portability.h"
+
+// ASan is less precise than valgrind and believes this function overruns reads
+#if defined(__x86_64__) && !defined(FOLLY_SANITIZE_ADDRESS)
 
 #include <emmintrin.h>
 #include <stdint.h>
 
-#include "hphp/util/util.h"
 #include "hphp/util/assertions.h"
 
 extern "C" {
 
-HOT_FUNC
 void*
 memcpy(void* vdest, const void* vsrc, size_t len) {
   auto src  = (const char*)vsrc;

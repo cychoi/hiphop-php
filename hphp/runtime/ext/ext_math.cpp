@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,8 +16,9 @@
 */
 
 #include "hphp/runtime/ext/ext_math.h"
-#include "hphp/runtime/base/zend/zend_math.h"
-#include "hphp/runtime/base/zend/zend_multiply.h"
+#include "hphp/runtime/base/zend-math.h"
+#include "hphp/runtime/base/zend-multiply.h"
+#include "hphp/runtime/base/container-functions.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -29,82 +30,101 @@ const int64_t k_PHP_ROUND_HALF_ODD =  PHP_ROUND_HALF_ODD;
 
 double f_pi() { return k_M_PI;}
 
-Variant f_min(int _argc, CVarRef value, CArrRef _argv /* = null_array */) {
-  Variant ret;
-  if (_argv.empty() && value.is(KindOfArray)) {
-    Array v = value.toArray();
-    if (!v.empty()) {
-      ssize_t pos = v->iter_begin();
-      if (pos != ArrayData::invalid_index) {
-        ret = v->getValue(pos);
-        while (true) {
-          pos = v->iter_advance(pos);
-          if (pos == ArrayData::invalid_index) break;
-          Variant tmp = v->getValue(pos);
-          if (less(tmp, ret)) {
-            ret = tmp;
-          }
-        }
+Variant f_min(int _argc, const Variant& value, const Array& _argv /* = null_array */) {
+  if (_argv.empty()) {
+    const auto& cell_value = *value.asCell();
+    if (UNLIKELY(!isContainer(cell_value))) {
+      return value;
+    }
+
+    ArrayIter iter(cell_value);
+    if (!iter) {
+      return uninit_null();
+    }
+    Variant ret = iter.secondRefPlus();
+    ++iter;
+    for (; iter; ++iter) {
+      Variant currVal = iter.secondRefPlus();
+      if (less(currVal, ret)) {
+        ret = currVal;
       }
     }
-  } else {
-    ret = value;
-    if (!_argv.empty()) {
-      for (ssize_t pos = _argv->iter_begin(); pos != ArrayData::invalid_index;
-           pos = _argv->iter_advance(pos)) {
-        Variant tmp = _argv->getValue(pos);
-        if (less(tmp, ret)) {
-          ret = tmp;
-        }
-      }
+    return ret;
+  }
+
+  Variant ret = value;
+  for (ArrayIter iter(_argv); iter; ++iter) {
+    Variant currVal = iter.secondRef();
+    if (less(currVal, ret)) {
+      ret = currVal;
     }
   }
   return ret;
 }
 
-Variant f_max(int _argc, CVarRef value, CArrRef _argv /* = null_array */) {
-  Variant ret;
-  if (_argv.empty() && value.is(KindOfArray)) {
-    Array v = value.toArray();
-    if (!v.empty()) {
-      ssize_t pos = v->iter_begin();
-      if (pos != ArrayData::invalid_index) {
-        ret = v->getValue(pos);
-        while (true) {
-          pos = v->iter_advance(pos);
-          if (pos == ArrayData::invalid_index) break;
-          Variant tmp = v->getValue(pos);
-          if (more(tmp, ret)) {
-            ret = tmp;
-          }
-        }
+Variant f_max(int _argc, const Variant& value, const Array& _argv /* = null_array */) {
+  if (_argv.empty()) {
+    const auto& cell_value = *value.asCell();
+    if (UNLIKELY(!isContainer(cell_value))) {
+      return value;
+    }
+
+    ArrayIter iter(cell_value);
+    if (!iter) {
+      return uninit_null();
+    }
+    Variant ret = iter.secondRefPlus();
+    ++iter;
+    for (; iter; ++iter) {
+      Variant currVal = iter.secondRefPlus();
+      if (more(currVal, ret)) {
+        ret = currVal;
       }
     }
-  } else {
-    ret = value;
-    if (!_argv.empty()) {
-      for (ssize_t pos = _argv->iter_begin(); pos != ArrayData::invalid_index;
-           pos = _argv->iter_advance(pos)) {
-        Variant tmp = _argv->getValue(pos);
-        if (more(tmp, ret)) {
-          ret = tmp;
-        }
-      }
+    return ret;
+  }
+
+  Variant ret = value;
+  for (ArrayIter iter(_argv); iter; ++iter) {
+    Variant currVal = iter.secondRef();
+    if (more(currVal, ret)) {
+      ret = currVal;
     }
   }
   return ret;
 }
 
-Variant f_abs(CVarRef number) {
+/* Logic based on zend_operators.c::convert_scalar_to_number() */
+static DataType zend_convert_scalar_to_number(const Variant& num,
+                                              int64_t &ival,
+                                              double &dval) {
+  DataType dt = num.toNumeric(ival, dval, true);
+  if ((dt == KindOfDouble) || (dt == KindOfInt64)) {
+    return dt;
+  }
+
+  if (num.isBoolean() || num.isNull() || num.isObject() || num.isResource() ||
+      num.isString()) {
+    ival = num.toInt64();
+    return KindOfInt64;
+  }
+
+  // Fallback, callers will handle this as an error
+  ival = 0;
+  dval = 0.0;
+  return num.getType();
+}
+
+Variant f_abs(const Variant& number) {
   int64_t ival;
   double dval;
-  DataType k = number.toNumeric(ival, dval, true);
+  DataType k = zend_convert_scalar_to_number(number, ival, dval);
   if (k == KindOfDouble) {
     return fabs(dval);
   } else if (k == KindOfInt64) {
     return ival >= 0 ? ival : -ival;
   } else {
-    return 0;
+    return false;
   }
 }
 
@@ -112,22 +132,43 @@ bool f_is_finite(double val) { return finite(val);}
 bool f_is_infinite(double val) { return isinf(val);}
 bool f_is_nan(double val) { return isnan(val);}
 
-double f_ceil(double value) { return ceil(value);}
-double f_floor(double value) { return floor(value);}
-
-double f_round(CVarRef val, int64_t precision /* = 0 */,
-               int64_t mode /* = PHP_ROUND_HALF_UP */) {
+Variant f_ceil(const Variant& number) {
   int64_t ival;
   double dval;
-  DataType k = val.toNumeric(ival, dval, true);
+  DataType k = zend_convert_scalar_to_number(number, ival, dval);
+  if (k == KindOfInt64) {
+    dval = (double)ival;
+  } else if (k != KindOfDouble) {
+    return false;
+  }
+  return ceil(dval);
+}
+
+Variant f_floor(const Variant& number) {
+  int64_t ival;
+  double dval;
+  DataType k = zend_convert_scalar_to_number(number, ival, dval);
+  if (k == KindOfInt64) {
+    dval = (double)ival;
+  } else if (k != KindOfDouble) {
+    return false;
+  }
+  return floor(dval);
+}
+
+Variant f_round(const Variant& val, int64_t precision /* = 0 */,
+                int64_t mode /* = PHP_ROUND_HALF_UP */) {
+  int64_t ival;
+  double dval;
+  DataType k = zend_convert_scalar_to_number(val, ival, dval);
   if (k == KindOfInt64) {
     if (precision >= 0) {
-     return ival;
+     return (double)ival;
     } else {
       dval = ival;
     }
   } else if (k != KindOfDouble) {
-    dval = val.toDouble();
+    return false;
   }
   dval = php_math_round(dval, precision, mode);
   return dval;
@@ -145,30 +186,30 @@ String f_dechex(int64_t number) {
 String f_decoct(int64_t number) {
   return String(string_long_to_base(number, 8), AttachString);
 }
-Variant f_bindec(CStrRef binary_string) {
+Variant f_bindec(const String& binary_string) {
   return string_base_to_numeric(binary_string.data(), binary_string.size(), 2);
 }
-Variant f_hexdec(CStrRef hex_string) {
+Variant f_hexdec(const String& hex_string) {
   return string_base_to_numeric(hex_string.data(), hex_string.size(), 16);
 }
-Variant f_octdec(CStrRef octal_string) {
+Variant f_octdec(const String& octal_string) {
   return string_base_to_numeric(octal_string.data(), octal_string.size(), 8);
 }
 
-Variant f_base_convert(CStrRef number, int64_t frombase, int64_t tobase) {
+Variant f_base_convert(const String& number, int64_t frombase, int64_t tobase) {
   if (!string_validate_base(frombase)) {
-    throw_invalid_argument("Invalid frombase: %d", frombase);
+    throw_invalid_argument("Invalid frombase: %" PRId64, frombase);
     return false;
   }
   if (!string_validate_base(tobase)) {
-    throw_invalid_argument("Invalid tobase: %d", tobase);
+    throw_invalid_argument("Invalid tobase: %" PRId64, tobase);
     return false;
   }
   Variant v = string_base_to_numeric(number.data(), number.size(), frombase);
   return String(string_numeric_to_base(v, tobase), AttachString);
 }
 
-Numeric f_pow(CVarRef base, CVarRef exp) {
+Variant f_pow(const Variant& base, const Variant& exp) {
   int64_t bint, eint;
   double bdbl, edbl;
   DataType bt = base.toNumeric(bint, bdbl, true);
@@ -237,7 +278,7 @@ int64_t f_getrandmax() { return RAND_MAX;}
 
 static bool s_rand_is_seeded = false;
 
-void f_srand(CVarRef seed /* = null_variant */) {
+void f_srand(const Variant& seed /* = null_variant */) {
   s_rand_is_seeded = true;
   if (seed.isNull()) {
     return srand(math_generate_seed());
@@ -264,7 +305,7 @@ int64_t f_rand(int64_t min /* = 0 */, int64_t max /* = RAND_MAX */) {
 
 int64_t f_mt_getrandmax() { return MT_RAND_MAX;}
 
-void f_mt_srand(CVarRef seed /* = null_variant */) {
+void f_mt_srand(const Variant& seed /* = null_variant */) {
   if (seed.isNull()) {
     return math_mt_srand(math_generate_seed());
   }

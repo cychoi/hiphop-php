@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,7 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_constant.h"
-#include "hphp/runtime/base/class_info.h"
+#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/ext/ext_array.h"
 
 namespace HPHP { namespace Eval {
@@ -48,7 +48,7 @@ void CmdConstant::help(DebuggerClient &client) {
   );
 }
 
-void CmdConstant::onClientImpl(DebuggerClient &client) {
+void CmdConstant::onClient(DebuggerClient &client) {
   if (DebuggerCommand::displayedHelp(client)) return;
 
   String text;
@@ -59,14 +59,20 @@ void CmdConstant::onClientImpl(DebuggerClient &client) {
     return;
   }
 
-  CmdConstantPtr cmd = client.xend<CmdConstant>(this);
+  auto cmd = client.xend<CmdConstant>(this);
   if (cmd->m_constants.empty()) {
     client.info("(no constant was defined)");
   } else {
     int i = 0;
     bool found = false;
-    m_constants = cmd->m_constants;
-    f_ksort(ref(m_constants));
+
+    {
+      Variant forSort(cmd->m_constants);
+      f_ksort(ref(forSort));
+      assert(forSort.is(KindOfArray));
+      m_constants = forSort.asCell()->m_data.parr;
+    }
+
     for (ArrayIter iter(m_constants); iter; ++iter) {
       String name = iter.first().toString();
       String value = DebuggerClient::FormatVariable(iter.second(), 200);
@@ -80,9 +86,8 @@ void CmdConstant::onClientImpl(DebuggerClient &client) {
       } else {
         client.print("%s = %s", name.data(), value.data());
         ++i;
-        if (!client.isApiMode() &&
-            i % DebuggerClient::ScrollBlockSize == 0 &&
-            client.ask("There are %d more constants. Continue? [Y/n]",
+        if (i % DebuggerClient::ScrollBlockSize == 0 &&
+            client.ask("There are %zd more constants. Continue? [Y/n]",
                         m_constants.size() - i) == 'n') {
           break;
         }
@@ -95,24 +100,9 @@ void CmdConstant::onClientImpl(DebuggerClient &client) {
   }
 }
 
-void CmdConstant::setClientOutput(DebuggerClient &client) {
-  client.setOutputType(DebuggerClient::OTValues);
-  Array values;
-  for (ArrayIter iter(m_constants); iter; ++iter) {
-    String name = iter.first().toString();
-    if (client.getDebuggerClientApiModeSerialize()) {
-      values.set(name,
-                 DebuggerClient::FormatVariable(iter.second(), 200));
-    } else {
-      values.set(name, iter.second());
-    }
-  }
-  client.setOTValues(values);
-}
-
 bool CmdConstant::onServer(DebuggerProxy &proxy) {
   try {
-    m_constants = ClassInfo::GetConstants();
+    m_constants = lookupDefinedConstants();
   } catch (...) {}
   return proxy.sendToClient(this);
 }

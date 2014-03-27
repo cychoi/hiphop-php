@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,14 +18,20 @@
 #define incl_HPHP_CLASS_SCOPE_H_
 
 #include "hphp/compiler/analysis/block_scope.h"
+#include <list>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
 #include "hphp/compiler/analysis/function_container.h"
 #include "hphp/compiler/statement/class_statement.h"
 #include "hphp/compiler/statement/method_statement.h"
 #include "hphp/compiler/statement/trait_prec_statement.h"
 #include "hphp/compiler/statement/trait_alias_statement.h"
 #include "hphp/compiler/expression/user_attribute.h"
-#include "hphp/util/json.h"
-#include "hphp/util/case_insensitive.h"
+#include "hphp/compiler/json.h"
+#include "hphp/util/functional.h"
+#include "hphp/util/hash-map-typedefs.h"
 #include "hphp/compiler/option.h"
 
 namespace HPHP {
@@ -37,6 +43,11 @@ DECLARE_BOOST_TYPES(ClassScope);
 DECLARE_BOOST_TYPES(FileScope);
 
 class Symbol;
+
+enum class Derivation {
+  Normal,
+  Redeclaring,    // At least one ancestor class or interface is redeclared.
+};
 
 /**
  * A class scope corresponds to a class declaration. We store all
@@ -89,11 +100,6 @@ public:
     Abstract = 16,
     Final = 32
   };
-  enum Derivation {
-    FromNormal = 0,
-    DirectFromRedeclared,
-    IndirectFromRedeclared
-  };
 
   enum JumpTableName {
     JumpTableCallInfo
@@ -120,8 +126,6 @@ public:
   const std::string &getOriginalName() const;
   std::string getDocName() const;
 
-  virtual std::string getId() const;
-
   void checkDerivation(AnalysisResultPtr ar, hphp_string_iset &seen);
   const std::string &getOriginalParent() const { return m_parent; }
 
@@ -140,6 +144,7 @@ public:
   bool isExtensionClass() const { return getAttribute(Extension); }
   bool isDynamic() const { return m_dynamic; }
   bool isBaseClass() const { return m_bases.empty(); }
+  bool isBuiltin() const { return !getStmt(); }
 
   /**
    * Whether this class name was declared twice or more.
@@ -169,14 +174,11 @@ public:
     return m_derivedByDynamic;
   }
 
-  /* Whether this class is brought in by a separable extension */
-  void setSepExtension() { m_sep = true;}
-  bool isSepExtension() const { return m_sep;}
-
   /**
    * Get/set attributes.
    */
   void setSystem();
+  bool isSystem() const { return m_attribute & System; }
   void setAttribute(Attribute attr) { m_attribute |= attr;}
   void clearAttribute(Attribute attr) { m_attribute &= ~attr;}
   bool getAttribute(Attribute attr) const {
@@ -207,8 +209,7 @@ public:
    */
   void collectMethods(AnalysisResultPtr ar,
                       StringToFunctionScopePtrMap &func,
-                      bool collectPrivate = true,
-                      bool forInvoke = false);
+                      bool collectPrivate);
 
   /**
    * Whether or not we can directly call ObjectData::o_invoke() when lookup
@@ -305,16 +306,28 @@ public:
     }
   }
 
+  const boost::container::flat_set<std::string>& getTraitRequiredExtends()
+    const {
+    return m_traitRequiredExtends;
+  }
+
+  const boost::container::flat_set<std::string>& getTraitRequiredImplements()
+    const {
+    return m_traitRequiredImplements;
+  }
+
   const std::vector<std::string> &getUsedTraitNames() const {
     return m_usedTraitNames;
   }
 
-  const std::vector<std::pair<std::string, std::string> > &getTraitAliases()
+  const std::vector<std::pair<std::string, std::string>>& getTraitAliases()
     const {
     return m_traitAliases;
   }
 
   void addTraitAlias(TraitAliasStatementPtr aliasStmt);
+
+  void addTraitRequirement(const std::string &requiredName, bool isExtends);
 
   void importUsedTraits(AnalysisResultPtr ar);
 
@@ -373,6 +386,16 @@ public:
   bool canSkipCreateMethod(AnalysisResultConstPtr ar) const;
   bool checkHasPropTable(AnalysisResultConstPtr ar);
 
+  const StringData* getFatalMessage() const {
+    return m_fatal_error_msg;
+  }
+
+  void setFatal(const AnalysisTimeFatalException& fatal) {
+    assert(m_fatal_error_msg == nullptr);
+    m_fatal_error_msg = makeStaticString(fatal.getMessage());
+    assert(m_fatal_error_msg != nullptr);
+  }
+
 private:
   // need to maintain declaration order for ClassInfo map
   FunctionScopePtrVec m_functionsVec;
@@ -382,6 +405,8 @@ private:
   UserAttributeMap m_userAttributes;
 
   std::vector<std::string> m_usedTraitNames;
+  boost::container::flat_set<std::string> m_traitRequiredExtends;
+  boost::container::flat_set<std::string> m_traitRequiredImplements;
   // m_traitAliases is used to support ReflectionClass::getTraitAliases
   std::vector<std::pair<std::string, std::string> > m_traitAliases;
 
@@ -407,7 +432,6 @@ private:
 
   typedef std::list<TraitMethod> TraitMethodList;
   typedef std::map<std::string, TraitMethodList> MethodToTraitListMap;
-  typedef std::map<std::string, std::string> GeneratorRenameMap;
   MethodToTraitListMap m_importMethToTraitMap;
   typedef std::map<std::string, MethodStatementPtr> ImportedMethodMap;
 
@@ -424,7 +448,6 @@ private:
   unsigned m_volatile:1; // for class_exists
   unsigned m_persistent:1;
   unsigned m_derivedByDynamic:1;
-  unsigned m_sep:1;
   unsigned m_needsCppCtor:1;
   unsigned m_needsInit:1;
   // m_knownBases has a bit for each base class saying whether
@@ -432,6 +455,9 @@ private:
   // for classes with more than 31 bases, bit 31 is set iff
   // bases 32 through n are all known.
   unsigned m_knownBases;
+
+  // holds the fact that accessing this class declaration is a fatal error
+  const StringData* m_fatal_error_msg = nullptr;
 
   void addImportTraitMethod(const TraitMethod &traitMethod,
                             const std::string &methName);
@@ -446,16 +472,14 @@ private:
   MethodStatementPtr importTraitMethod(const TraitMethod&  traitMethod,
                                        AnalysisResultPtr   ar,
                                        std::string         methName,
-                                       GeneratorRenameMap& genRenameMap,
                                        const ImportedMethodMap &
                                        importedTraitMethods);
 
   void importTraitProperties(AnalysisResultPtr ar);
 
-  void relinkGeneratorMethods(AnalysisResultPtr ar,
-                              ImportedMethodMap& importedMethods);
-
   void findTraitMethodsToImport(AnalysisResultPtr ar, ClassScopePtr trait);
+
+  void importTraitRequirements(AnalysisResultPtr ar, ClassScopePtr trait);
 
   MethodStatementPtr findTraitMethod(AnalysisResultPtr ar,
                                      ClassScopePtr trait,
@@ -476,12 +500,6 @@ private:
   bool usesTrait(const std::string &traitName) const;
 
   bool hasMethod(const std::string &methodName) const;
-
-  const std::string& getNewGeneratorName(FunctionScopePtr    genFuncScope,
-                                         GeneratorRenameMap& genRenameMap);
-
-  void renameCreateContinuationCalls(AnalysisResultPtr ar, ConstructPtr c,
-                                     ImportedMethodMap &importedMethods);
 
 };
 

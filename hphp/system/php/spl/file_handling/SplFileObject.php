@@ -91,12 +91,12 @@ class SplFileObject extends SplFileInfo
    * Gets a character from the file.
    *
    * @return     mixed   Returns a string containing a single character read
-   *                     from the file or FALSE on EOF. WarningThis function
-   *                     may return Boolean FALSE, but may also return a
-   *                     non-Boolean value which evaluates to FALSE. Please
-   *                     read the section on Booleans for more information.
-   *                     Use the === operator for testing the return value of
-   *                     this function.
+   *                     from the file or FALSE on EOF. Warning: This
+   *                     function may return Boolean FALSE, but may also
+   *                     return a non-Boolean value which evaluates to FALSE.
+   *                     Please read the section on Booleans for more
+   *                     information. Use the === operator for testing the
+   *                     return value of this function.
    */
   public function fgetc() {
     return fgetc($this->rsrc);
@@ -132,15 +132,21 @@ class SplFileObject extends SplFileInfo
       $delimiter = null,
       $enclosure = null,
       $escape = null) {
-
-    if (!$delimiter) {
-      $delimiter = $this->delimiter;
-    }
-    if (!$enclosure) {
-      $enclosure = $this->enclosure;
-    }
-    if (!$escape) {
+    $num_args = func_num_args();
+    if ($num_args < 3) {
       $escape = $this->escape;
+
+      if ($num_args < 2) {
+        $enclosure = $this->enclosure;
+
+        if ($num_args < 1) {
+          $delimiter = $this->delimiter;
+        }
+      }
+    }
+
+    if (!$this->checkCsvControl($delimiter, $enclosure, $escape)) {
+      return false;
     }
 
     return fgetcsv(
@@ -148,7 +154,7 @@ class SplFileObject extends SplFileInfo
       $this->maxLineLen,
       $delimiter,
       $enclosure,
-      $escape
+      $escape,
     );
   }
 
@@ -209,7 +215,7 @@ class SplFileObject extends SplFileInfo
    *
    * @return     mixed   Returns TRUE on success or FALSE on failure.
    */
-  public function flock($operation, &$wouldblock) {
+  public function flock($operation, &$wouldblock = false) {
     return flock($this->rsrc, $operation, $wouldblock);
   }
 
@@ -251,11 +257,17 @@ class SplFileObject extends SplFileInfo
    *                     not a single character.
    */
   public function fputcsv($fields, $delimiter = null, $enclosure = null) {
-    if (!$delimiter) {
-      $delimiter = $this->delimiter;
-    }
-    if (!$enclosure) {
+    $num_args = func_num_args();
+    if ($num_args < 3) {
       $enclosure = $this->enclosure;
+
+      if ($num_args < 2) {
+        $delimiter = $this->delimiter;
+      }
+    }
+
+    if (!$this->checkCsvControl($delimiter, $enclosure)) {
+      return false;
     }
 
     return fputcsv(
@@ -382,7 +394,7 @@ class SplFileObject extends SplFileInfo
    * @return     mixed   Returns the number of bytes written, or NULL on
    *                     error.
    */
-  public function fwrite($str, $length) {
+  public function fwrite($str, $length = 0) {
     return fwrite($this->rsrc, $str, $length);
   }
 
@@ -468,6 +480,9 @@ class SplFileObject extends SplFileInfo
       $delimiter = ",",
       $enclosure = "\"",
       $escape = "\\") {
+    if (!$this->checkCsvControl($delimiter, $enclosure, $escape)) {
+      return;
+    }
 
     $this->delimiter = $delimiter;
     $this->enclosure = $enclosure;
@@ -522,7 +537,15 @@ class SplFileObject extends SplFileInfo
    */
   public function current() {
     if ($this->currentLine === false) {
-      $this->currentLine = $this->fgets();
+      if (($this->flags & SplFileObject::READ_CSV) == SplFileObject::READ_CSV) {
+        $this->currentLine = $this->fgetcsv(
+          $this->delimiter,
+          $this->enclosure,
+          $this->escape
+        );
+      } else {
+        $this->currentLine = $this->fgets();
+      }
     }
     return $this->currentLine;
   }
@@ -605,5 +628,23 @@ class SplFileObject extends SplFileInfo
       return $this->current() !== false;
     }
     return !$this->eof();
+  }
+
+  private function checkCsvParameter($value, $name) {
+    if (!is_string($value) || strlen($value) != 1) {
+      error_log("\nWarning: ".$name.' must be a character');
+      return false;
+    }
+    return true;
+  }
+
+  private function checkCsvControl($delimiter, $enclosure, $escape = null) {
+    if (!$this->checkCsvParameter($delimiter, 'delimiter') ||
+        !$this->checkCsvParameter($enclosure, 'enclosure') ||
+        func_num_args() > 2 && !$this->checkCsvParameter($escape, 'escape')) {
+      return false;
+    }
+
+    return true;
   }
 }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,13 +19,13 @@
 #include <vector>
 #include <string>
 #include <boost/scoped_ptr.hpp>
-#include "unicode/rbbi.h"
-#include "unicode/translit.h"
-#include "unicode/uregex.h"
-#include "unicode/ustring.h"
-#include "icu/LifeEventTokenizer.h"
-#include "icu/ICUMatcher.h"
-#include "icu/ICUTransliterator.h"
+#include <unicode/rbbi.h>
+#include <unicode/translit.h>
+#include <unicode/uregex.h>
+#include <unicode/ustring.h>
+#include "icu/LifeEventTokenizer.h" // nolint
+#include "icu/ICUMatcher.h" // nolint
+#include "icu/ICUTransliterator.h" // nolint
 
 using namespace U_ICU_NAMESPACE;
 
@@ -45,13 +45,15 @@ typedef tbb::concurrent_hash_map<const StringData*,const RegexPattern*,
 
 static PatternStringMap s_patternCacheMap;
 
-Variant f_icu_match(CStrRef pattern, CStrRef subject,
+Variant f_icu_match(const String& pattern, const String& subject,
                     VRefParam matches /* = null */, int64_t flags /* = 0 */) {
   UErrorCode status = U_ZERO_ERROR;
 
+  Array matchesArr;
   if (matches.isReferenced()) {
-    matches = Array();
+    matchesArr = Array::Create();
   }
+  SCOPE_EXIT { if (matches.isReferenced()) matches = matchesArr; };
 
   // Create hash map key by concatenating pattern and flags.
   StringBuffer bpattern;
@@ -74,7 +76,7 @@ Variant f_icu_match(CStrRef pattern, CStrRef subject,
     }
 
     if (s_patternCacheMap.insert(
-      accessor, StringData::GetStaticString(spattern.get()))) {
+      accessor, makeStaticString(spattern.get()))) {
       accessor->second = rpattern;
     } else {
       delete rpattern;
@@ -119,9 +121,9 @@ Variant f_icu_match(CStrRef pattern, CStrRef subject,
           }
 
           start = usubject.countChar32(0, start);
-          matches->append(CREATE_VECTOR2(match, start));
+          matchesArr.append(make_packed_array(match, start));
         } else {
-          matches->append(match);
+          matchesArr.append(match);
         }
       }
     }
@@ -147,7 +149,7 @@ public:
       Transliterator::createInstance(basicIDAccent, UTRANS_FORWARD, status);
 
     if (U_FAILURE(status)) {
-      raise_warning(string(u_errorName(status)));
+      raise_warning(std::string(u_errorName(status)));
       //m_tl should be NULL if createInstance fails but better safe than sorry.
       m_tl = NULL;
       m_tl_accent = NULL;
@@ -177,7 +179,7 @@ private:
 
 IMPLEMENT_THREAD_LOCAL(TransliteratorWrapper, s_transliterator);
 
-String f_icu_transliterate(CStrRef str, bool remove_accents) {
+String f_icu_transliterate(const String& str, bool remove_accents) {
   UnicodeString u_str = UnicodeString::fromUTF8(str.data());
   if (remove_accents) {
     s_transliterator->transliterate(u_str);
@@ -300,7 +302,7 @@ void normalizeToken(struct Token& token) {
  * Other: replaced with empty string
  *
  */
-Array f_icu_tokenize(CStrRef text) {
+Array f_icu_tokenize(const String& text) {
   // Boundary markers that indicate the beginning and end of a token stream.
   const String BEGIN_MARKER("_B_");
   const String END_MARKER("_E_");
@@ -317,7 +319,7 @@ Array f_icu_tokenize(CStrRef text) {
     normalizeToken(*iter);
     const UnicodeString& word = iter->value;
     // Ignore spaces and empty strings.
-    if(!s_spaceMatcher->matches(word) && word.length() > 0) {
+    if (!s_spaceMatcher->matches(word) && word.length() > 0) {
       ret.set(i++, String(icuStringToUTF8(word)));
     }
   }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,31 +13,42 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
-#include "hphp/compiler/type_annotation.h"
 #include "hphp/compiler/expression/parameter_expression.h"
+#include "hphp/compiler/type_annotation.h"
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/compiler/analysis/code_error.h"
-#include "hphp/util/util.h"
+#include "hphp/util/text-util.h"
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/expression/constant_expression.h"
+#include "hphp/runtime/vm/runtime.h"
 
 using namespace HPHP;
 
 ///////////////////////////////////////////////////////////////////////////////
 // constructors/destructors
 
-ParameterExpression::ParameterExpression
-(EXPRESSION_CONSTRUCTOR_PARAMETERS,
- TypeAnnotationPtr type, bool hhType, const std::string &name, bool ref,
- ExpressionPtr defaultValue, ExpressionPtr attributeList)
-  : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ParameterExpression)),
-    m_originalType(type), m_name(name), m_hhType(hhType), m_ref(ref),
-    m_defaultValue(defaultValue), m_attributeList(attributeList) {
-  m_type = Util::toLower(type ? type->simpleName() : "");
+ParameterExpression::ParameterExpression(
+     EXPRESSION_CONSTRUCTOR_PARAMETERS,
+     TypeAnnotationPtr type,
+     bool hhType,
+     const std::string &name,
+     bool ref,
+     TokenID modifier,
+     ExpressionPtr defaultValue,
+     ExpressionPtr attributeList)
+  : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ParameterExpression))
+  , m_originalType(type)
+  , m_name(name)
+  , m_hhType(hhType)
+  , m_ref(ref)
+  , m_modifier(modifier)
+  , m_defaultValue(defaultValue)
+  , m_attributeList(attributeList)
+{
+  m_type = toLower(type ? type->vanillaName() : "");
   if (m_defaultValue) {
     m_defaultValue->setContext(InParameterExpression);
   }
@@ -51,14 +62,41 @@ ExpressionPtr ParameterExpression::clone() {
   return exp;
 }
 
-const std::string ParameterExpression::getOriginalTypeHint() const  {
+const std::string ParameterExpression::getOriginalTypeHint() const {
   assert(hasTypeHint());
-  return m_originalType->simpleName();
+  return m_originalType->vanillaName();
 }
 
-const std::string ParameterExpression::getUserTypeHint() const  {
+const std::string ParameterExpression::getUserTypeHint() const {
   assert(hasUserType());
   return m_originalType->fullName();
+}
+
+const std::string ParameterExpression::getTypeHintDisplayName() const {
+  auto name = m_originalType->vanillaName();
+  const char* str = name.c_str();
+  auto len = name.size();
+  if (len > 3 && tolower(str[0]) == 'h' && tolower(str[1]) == 'h' &&
+      str[2] == '\\') {
+    bool strip = false;
+    const char* stripped = str + 3;
+    switch (len - 3) {
+      case 3:
+        strip = (!strcasecmp(stripped, "int") ||
+                 !strcasecmp(stripped, "num"));
+        break;
+      case 4: strip = !strcasecmp(stripped, "bool"); break;
+      case 5: strip = !strcasecmp(stripped, "float"); break;
+      case 6: strip = !strcasecmp(stripped, "string"); break;
+      case 8: strip = !strcasecmp(stripped, "resource"); break;
+      default:
+        break;
+    }
+    if (strip) {
+      return stripped;
+    }
+  }
+  return name;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -80,7 +118,7 @@ void ParameterExpression::fixupSelfAndParentTypehints(ClassScopePtr cls) {
     m_type = cls->getName();
   } else if (m_type == "parent") {
     if (!cls->getOriginalParent().empty()) {
-      m_type = Util::toLower(cls->getOriginalParent());
+      m_type = toLower(cls->getOriginalParent());
     }
   }
 }
@@ -121,7 +159,7 @@ int ParameterExpression::getKidCount() const {
 void ParameterExpression::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_defaultValue = boost::dynamic_pointer_cast<Expression>(cp);
+      m_defaultValue = dynamic_pointer_cast<Expression>(cp);
       break;
     default:
       break;
@@ -134,15 +172,22 @@ TypePtr ParameterExpression::getTypeSpecForClass(AnalysisResultPtr ar,
   if (forInference) {
     ClassScopePtr cls = ar->findClass(m_type);
     if (!cls || cls->isRedeclaring() || cls->derivedByDynamic()) {
-      if (!cls && getScope()->isFirstPass()) {
+      if (!cls && getScope()->isFirstPass() && !ar->isTypeAliasName(m_type)) {
         ConstructPtr self = shared_from_this();
         Compiler::Error(Compiler::UnknownClass, self);
       }
       ret = Type::Variant;
     }
+    if (cls) {
+      // Classes must be redeclaring if there are also type aliases
+      // with the same name.
+      assert(!ar->isTypeAliasName(m_type) || cls->isRedeclaring());
+    }
   }
   if (!ret) {
-    ret = Type::CreateObjectType(m_type);
+    ret = ar->isTypeAliasName(m_type) || !Option::WholeProgram
+      ? Type::Variant
+      : Type::CreateObjectType(m_type);
   }
   always_assert(ret);
   return ret;
@@ -238,34 +283,53 @@ void ParameterExpression::compatibleDefault() {
     const char* hint = getTypeHint().c_str();
     switch(defaultType) {
     case KindOfBoolean:
-      compat = (!strcmp(hint, "bool") || !strcmp(hint, "boolean")); break;
+      compat = !strcasecmp(hint, "HH\\bool");
+      break;
     case KindOfInt64:
-      compat = (!strcmp(hint, "int") || !strcmp(hint, "integer")); break;
+      compat = (!strcasecmp(hint, "HH\\int") ||
+                !strcasecmp(hint, "HH\\num") ||
+                interface_supports_int(hint));
+      break;
     case KindOfDouble:
-      compat = (!strcmp(hint, "float") || !strcmp(hint, "double")); break;
+      compat = (!strcasecmp(hint, "HH\\float") ||
+                !strcasecmp(hint, "HH\\num") ||
+                interface_supports_double(hint));
+      break;
     case KindOfString:  /* fall through */
     case KindOfStaticString:
-      compat = !strcmp(hint, "string"); break;
+      compat = (!strcasecmp(hint, "HH\\string") ||
+                interface_supports_string(hint));
+      break;
     case KindOfArray:
-      compat = !strcmp(hint, "array"); break;
+      compat = (!strcasecmp(hint, "array") ||
+                interface_supports_array(hint));
+      break;
     case KindOfUninit:  /* fall through */
-    case KindOfNull:    compat = true; break;
-    /* KindOfClass is an hhvm internal type, can not occur here */
+    case KindOfNull:
+      compat = true;
+      break;
+    /* KindOfClass is an hhvm internal type, cannot occur here */
     case KindOfObject:  /* fall through */
-    case KindOfRef: assert(false /* likely parser bug */);
-    default:            compat = false; break;
+    case KindOfResource: /* fall through */
+    case KindOfRef:
+      assert(false /* likely parser bug */);
+    default:
+      compat = false;
+      break;
     }
   } else {
     msg = "Default value for parameter %s with a class type hint "
           "can only be NULL";
     switch(defaultType) {
     case KindOfNull:
-      compat = true; break;
+      compat = true;
+      break;
     case KindOfArray:
-      compat = strcmp(getTypeHint().c_str(), "array") == 0; break;
+      compat = !strcasecmp(getTypeHint().c_str(), "array");
+      break;
     default:
       compat = false;
-      if (strcmp(getTypeHint().c_str(), "array") == 0) {
+      if (!strcasecmp(getTypeHint().c_str(), "array")) {
         msg = "Default value for parameter %s with array type hint "
               "can only be an array or NULL";
       }
@@ -278,15 +342,62 @@ void ParameterExpression::compatibleDefault() {
     string tdefault = HPHP::tname(defaultType);
     parseTimeFatal(Compiler::BadDefaultValueType, msg,
                    name.c_str(), tdefault.c_str(),
-                   getOriginalTypeHint().c_str());
+                   getTypeHintDisplayName().c_str());
   }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void ParameterExpression::outputCodeModel(CodeGenerator &cg) {
+  auto propCount = 2;
+  if (m_attributeList) propCount++;
+  if (m_modifier != 0) propCount++;
+  if (m_originalType) propCount++;
+  if (m_ref) propCount++;
+  if (m_defaultValue != nullptr) propCount++;
+  cg.printObjectHeader("ParameterDeclaration", propCount);
+  if (m_attributeList) {
+    cg.printPropertyHeader("attributes");
+    cg.printExpressionVector(m_attributeList);
+  }
+  if (m_modifier != 0) {
+    cg.printPropertyHeader("modifiers");
+    cg.printf("V:9:\"HH\\Vector\":1:{");
+    cg.printObjectHeader("Modifier", 1);
+    cg.printPropertyHeader("name");
+    switch (m_modifier) {
+      case T_PUBLIC: cg.printValue("public"); break;
+      case T_PROTECTED: cg.printValue("protected"); break;
+      case T_PRIVATE: cg.printValue("private"); break;
+      default: assert(false);
+    }
+    cg.printObjectFooter();
+    cg.printf("}");
+  }
+  if (m_originalType) {
+    cg.printPropertyHeader("typeAnnotation");
+    m_originalType->outputCodeModel(cg);
+  }
+  if (m_ref) {
+    cg.printPropertyHeader("isPassedByReference");
+    cg.printBool(true);
+  }
+  cg.printPropertyHeader("name");
+  cg.printValue(m_name);
+  if (m_defaultValue) {
+    cg.printPropertyHeader("expression");
+    m_defaultValue->outputCodeModel(cg);
+  }
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 
 void ParameterExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
-  if (!m_type.empty()) cg_printf("%s ", m_originalType->simpleName().c_str());
+  if (!m_type.empty()) cg_printf("%s ", m_originalType->vanillaName().c_str());
   if (m_ref) cg_printf("&");
   cg_printf("$%s", m_name.c_str());
   if (m_defaultValue) {

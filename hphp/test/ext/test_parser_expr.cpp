@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,7 @@
 
 #include "hphp/test/ext/test_parser_expr.h"
 #include "hphp/compiler/option.h"
-#include "hphp/util/parser/scanner.h"
+#include "hphp/parser/scanner.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -46,6 +46,7 @@ bool TestParserExpr::RunTests(const std::string &which) {
   RUN_TEST(TestConstant);
   RUN_TEST(TestEncapsListExpression);
   RUN_TEST(TestClosure);
+  RUN_TEST(TestAwaitExpression);
 
   RUN_TEST(TestXHP);
 
@@ -386,54 +387,86 @@ bool TestParserExpr::TestClosure() {
   return true;
 }
 
+bool TestParserExpr::TestAwaitExpression() {
+  V("<?hh async function foo() { await goo(); await $hoo; return; }",
+    "async function foo() {\n"
+    "await goo();\n"
+    "await $hoo;\n"
+    "return;\n"
+    "}\n");
+
+  V("<?hh async function foo() { $a = await b(); return; }",
+    "async function foo() {\n"
+    "$a = await b();\n"
+    "return;\n"
+    "}\n");
+
+  V("<?hh async function foo() { return await $a; }",
+    "async function foo() {\n"
+    "return await $a;\n"
+    "}\n");
+
+  V("<?hh $a = async function($a) { return await $a; }; ",
+    "$a = async function ($a) {\nreturn await $a;\n}\n;\n");
+
+  V("<?hh class A { "
+    "static async function foo() { return 1; } "
+    "private async function goo() { return 2; } }",
+    "class A {\n"
+    "public static async function foo() {\nreturn 1;\n}\n"
+    "private async function goo() {\nreturn 2;\n}\n}\n");
+
+  return true;
+}
+
 bool TestParserExpr::TestXHP() {
   // basics
-  V("<?php $x = <thing />;",
-    "$x = new xhp_thing(array(), array());\n");
+  V("<?hh $x = <thing />;",
+    "$x = new xhp_thing(array(), array(), __FILE__, __LINE__);\n");
 
   // white spaces
-  V("<?php $x = <x> a{ 'b' }c </x>;",
-    "$x = new xhp_x(array(), array(' a', 'b', 'c '));\n");
-  V("<?php $x = <x> a { 'b' } c </x>;",
-    "$x = new xhp_x(array(), array(' a ', 'b', ' c '));\n");
-  V("<?php $x = <x>\n    foo\n   </x>;",
-    "$x = new xhp_x(array(), array(' foo '));\n");
-  V("<?php $x = <x>\n    foo\n   bar\n   </x>;",
-    "$x = new xhp_x(array(), array(' foo bar '));\n");
+  V("<?hh $x = <x> a{ 'b' }c </x>;",
+    "$x = new xhp_x(array(), array(' a', 'b', 'c '), __FILE__, __LINE__);\n");
+  V("<?hh $x = <x> a { 'b' } c </x>;",
+    "$x = new xhp_x(array(), array(' a ', 'b', ' c '), __FILE__, __LINE__);\n");
+  V("<?hh $x = <x>\n    foo\n   </x>;",
+    "$x = new xhp_x(array(), array(' foo '), __FILE__, __LINE__);\n");
+  V("<?hh $x = <x>\n    foo\n   bar\n   </x>;",
+    "$x = new xhp_x(array(), array(' foo bar '), __FILE__, __LINE__);\n");
 
   // attributes
-  V("<?php $x = <x:y attr={:tag::CONSTANT} />;",
-    "$x = new xhp_x__y(array('attr' => xhp_tag::CONSTANT), array());\n");
-  V("<?php $x = <a b=\"&nbsp;\">c</a>;",
-    "$x = new xhp_a(array('b' => '\xC2\xA0'), array('c'));\n");
-  V("<?php $x = <a b=\"\" />;",
-    "$x = new xhp_a(array('b' => ''), array());\n");
+  V("<?hh $x = <x:y attr={:tag::CONSTANT} />;",
+    "$x = new xhp_x__y(array('attr' => xhp_tag::CONSTANT), array(), __FILE__, __LINE__);\n");
+  V("<?hh $x = <a b=\"&nbsp;\">c</a>;",
+    "$x = new xhp_a(array('b' => '\xC2\xA0'), array('c'), __FILE__, __LINE__);\n");
+  V("<?hh $x = <a b=\"\" />;",
+    "$x = new xhp_a(array('b' => ''), array(), __FILE__, __LINE__);\n");
 
   // children
-  V("<?php $x = <x> <x /> {'a'} </x>;",
-    "$x = new xhp_x(array(), array(new xhp_x(array(), array()), 'a'));\n");
-  V("<?php $x = <x> {'a'}<x /></x>;",
-    "$x = new xhp_x(array(), array('a', new xhp_x(array(), array())));");
-  V("<?php $x = <x>\n<x>\n</x>.\n</x>;",
-    "$x = new xhp_x(array(), array(new xhp_x(array(), array()), '. '));\n");
-  V("<?php <div><a />=<a /></div>;",
-    "new xhp_div(array(), array(new xhp_a(array(), array()), '=', "
-    "new xhp_a(array(), array())));\n");
+  V("<?hh $x = <x> <x /> {'a'} </x>;",
+    "$x = new xhp_x(array(), array(new xhp_x(array(), array(), __FILE__, __LINE__), 'a'), __FILE__, __LINE__);\n");
+  V("<?hh $x = <x> {'a'}<x /></x>;",
+    "$x = new xhp_x(array(), array('a', new xhp_x(array(), array(), __FILE__, __LINE__)), __FILE__, __LINE__);");
+  V("<?hh $x = <x>\n<x>\n</x>.\n</x>;",
+    "$x = new xhp_x(array(), array(new xhp_x(array(), array(), __FILE__, __LINE__), '. '), __FILE__, __LINE__);\n");
+  V("<?hh <div><a />=<a /></div>;",
+    "new xhp_div(array(), array(new xhp_a(array(), array(), __FILE__, __LINE__), '=', "
+    "new xhp_a(array(), array(), __FILE__, __LINE__)), __FILE__, __LINE__);\n");
 
   // closing tag
-  V("<?php $x = <a><a><a>hi</a></></a>;",
+  V("<?hh $x = <a><a><a>hi</a></></a>;",
     "$x = new xhp_a(array(), array(new xhp_a(array(), "
-    "array(new xhp_a(array(), array('hi'))))));\n");
+    "array(new xhp_a(array(), array('hi'), __FILE__, __LINE__)), __FILE__, __LINE__)), __FILE__, __LINE__);\n");
 
   // class name with PHP keyword
-  V("<?php class :a:b:switch-links { }",
+  V("<?hh class :a:b:switch-links { }",
     "class xhp_a__b__switch_links {\n}\n");
 
-  V("<?php if ($obj instanceof :a:b:switch-links) { }",
+  V("<?hh if ($obj instanceof :a:b:switch-links) { }",
     "if ($obj instanceof xhp_a__b__switch_links) {\n}\n");
 
   // class attributes
-  V("<?php class :thing { attribute Thing a, Thing b; }",
+  V("<?hh class :thing { attribute Thing a, Thing b; }",
 
     "class xhp_thing {\n"
     "protected static function &__xhpAttributeDeclaration() {\n"
@@ -448,7 +481,7 @@ bool TestParserExpr::TestXHP() {
     "}\n");
 
   // enum attributes
-  V("<?php class :thing { attribute enum { 123, 456 } a; }",
+  V("<?hh class :thing { attribute enum { 123, 456 } a; }",
 
     "class xhp_thing {\n"
     "protected static function &__xhpAttributeDeclaration() {\n"
@@ -462,7 +495,7 @@ bool TestParserExpr::TestXHP() {
     "}\n");
 
   // base attributes
-  V("<?php class :foo { attribute string foo; }"
+  V("<?hh class :foo { attribute string foo; }"
     " class :bar { attribute :foo, :foo, string bar; }",
 
     "class xhp_foo {\n"
@@ -489,7 +522,7 @@ bool TestParserExpr::TestXHP() {
     "}\n");
 
   // attribute default and required
-  V("<?php class :thing { attribute int a = 123 @required, var b; }",
+  V("<?hh class :thing { attribute int a = 123 @required, var b; }",
 
     "class xhp_thing {\n"
     "protected static function &__xhpAttributeDeclaration() {\n"
@@ -503,7 +536,7 @@ bool TestParserExpr::TestXHP() {
     "}\n");
 
   // categories
-  V("<?php class :thing { category %a:foo, %b; }",
+  V("<?hh class :thing { category %a:foo, %b; }",
 
     "class xhp_thing {\n"
     "protected function &__xhpCategoryDeclaration() {\n"
@@ -513,7 +546,7 @@ bool TestParserExpr::TestXHP() {
     "}\n");
 
   // children
-  V("<?php class :thing { children(any,any); }",
+  V("<?hh class :thing { children(any,any); }",
 
     "class xhp_thing {\n"
     "protected function &__xhpChildrenDeclaration() {\n"
@@ -523,7 +556,7 @@ bool TestParserExpr::TestXHP() {
     "}\n"
     "}\n");
 
-  V("<?php class :thing { children any; }",
+  V("<?hh class :thing { children any; }",
 
     "class xhp_thing {\n"
     "protected function &__xhpChildrenDeclaration() {\n"
@@ -532,7 +565,7 @@ bool TestParserExpr::TestXHP() {
     "}\n"
     "}\n");
 
-  V("<?php class :thing { children ((:a:foo | %b:bar)+, pcdata); }",
+  V("<?hh class :thing { children ((:a:foo | %b:bar)+, pcdata); }",
 
     "class xhp_thing {\n"
     "protected function &__xhpChildrenDeclaration() {\n"
@@ -544,7 +577,7 @@ bool TestParserExpr::TestXHP() {
     "}\n");
 
   // comments
-  V("<?php class :thing {\n"
+  V("<?hh class :thing {\n"
     "  category %a:foo, %b; // comments\n"
     "  children any; }",
 
@@ -560,7 +593,7 @@ bool TestParserExpr::TestXHP() {
     "}\n");
 
   // multiple interleaved
-  V("<?php "
+  V("<?hh "
     "class :thing { "
     "  attribute Thing a; category %a; children any; "
     "  function foo() {}"

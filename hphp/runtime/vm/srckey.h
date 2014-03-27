@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,11 +16,12 @@
 #ifndef incl_HPHP_SRCKEY_H_
 #define incl_HPHP_SRCKEY_H_
 
-#include <tuple>
-#include <boost/operators.hpp>
+#include "hphp/runtime/base/types.h"
 
 #include "hphp/runtime/vm/func.h"
-#include "hphp/runtime/vm/core_types.h"
+
+#include <boost/operators.hpp>
+#include <tuple>
 
 namespace HPHP {
 
@@ -44,7 +45,7 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
     , m_offset(off)
   {}
 
-  SrcKey(const Func* f, const Opcode* i)
+  SrcKey(const Func* f, PC i)
     : m_funcId(f->getFuncId())
     , m_offset(f->unit()->offsetOf(i))
   {}
@@ -53,6 +54,10 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
     : m_funcId{funcId}
     , m_offset{off}
   {}
+
+  bool valid() const {
+    return m_funcId != InvalidFuncId;
+  }
 
   // Packed representation of SrcKeys for use in contexts where we
   // want atomicity.  (SrcDB.)
@@ -73,6 +78,24 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
     return m_funcId;
   }
 
+  const Func* func() const {
+    return Func::fromFuncId(m_funcId);
+  }
+
+  const Unit* unit() const {
+    return func()->unit();
+  }
+
+  Op op() const {
+    return unit()->getOpcode(offset());
+  }
+
+  PC pc() const {
+    return unit()->at(offset());
+  }
+
+  std::string showInst() const;
+
   void setOffset(Offset o) {
     m_offset = o;
   }
@@ -88,15 +111,15 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
    * will advance past the end of the function, and potentially
    * contain an invalid bytecode offset.
    */
-  void advance(const Unit* u) {
-    m_offset += instrLen(u->at(offset()));
+  void advance(const Unit* u = nullptr) {
+    m_offset += instrLen((Op*)(u ? u : unit())->at(offset()));
   }
 
   /*
    * Return a SrcKey representing the next instruction, without
    * mutating this SrcKey.
    */
-  SrcKey advanced(const Unit* u) const {
+  SrcKey advanced(const Unit* u = nullptr) const {
     auto tmp = *this;
     tmp.advance(u);
     return tmp;
@@ -108,9 +131,11 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
   }
 
   bool operator<(const SrcKey& r) const {
-    return std::make_tuple(offset(), getFuncId()) <
-           std::make_tuple(r.offset(), r.getFuncId());
+    return std::make_tuple(getFuncId(), offset()) <
+           std::make_tuple(r.getFuncId(), r.offset());
   }
+
+  std::string getSymbol() const;
 
 private:
   FuncId m_funcId;
@@ -123,7 +148,16 @@ struct SrcKey::Hasher {
   }
 };
 
+typedef hphp_hash_set<SrcKey,SrcKey::Hasher> SrcKeySet;
+
 //////////////////////////////////////////////////////////////////////
+
+std::string show(SrcKey sk);
+std::string showShort(SrcKey sk);
+
+void sktrace(SrcKey sk, const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
+#define SKTRACE(level, sk, ...) \
+  ONTRACE(level, sktrace(sk, __VA_ARGS__))
 
 }
 

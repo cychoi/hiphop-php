@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,8 +13,12 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/vm/jit/mutation.h"
-#include "hphp/runtime/vm/jit/state_vector.h"
+
+#include "hphp/runtime/vm/jit/guard-relaxation.h"
+#include "hphp/runtime/vm/jit/simplifier.h"
+#include "hphp/runtime/vm/jit/state-vector.h"
 
 namespace HPHP { namespace JIT {
 
@@ -23,13 +27,11 @@ TRACE_SET_MOD(hhir);
 //////////////////////////////////////////////////////////////////////
 
 void cloneToBlock(const BlockList& rpoBlocks,
-                  IRFactory* const irFactory,
+                  IRUnit& unit,
                   Block::iterator const first,
                   Block::iterator const last,
                   Block* const target) {
-  assert(isRPOSorted(rpoBlocks));
-
-  StateVector<SSATmp,SSATmp*> rewriteMap(irFactory, nullptr);
+  StateVector<SSATmp,SSATmp*> rewriteMap(unit, nullptr);
 
   auto rewriteSources = [&] (IRInstruction* inst) {
     for (int i = 0; i < inst->numSrcs(); ++i) {
@@ -47,7 +49,7 @@ void cloneToBlock(const BlockList& rpoBlocks,
     assert(!it->isControlFlow());
 
     FTRACE(5, "cloneToBlock({}): {}\n", target->id(), it->toString());
-    auto const newInst = irFactory->cloneInstruction(&*it);
+    auto const newInst = unit.cloneInstruction(&*it);
 
     if (auto const numDests = newInst->numDsts()) {
       for (int i = 0; i < numDests; ++i) {
@@ -62,14 +64,17 @@ void cloneToBlock(const BlockList& rpoBlocks,
     targetIt = ++target->iteratorTo(newInst);
   }
 
-  auto it = rpoIteratorTo(rpoBlocks, target);
-  for (; it != rpoBlocks.end(); ++it) {
-    FTRACE(5, "cloneToBlock: rewriting block {}\n", (*it)->id());
-    for (auto& inst : **it) {
-      FTRACE(5, " rewriting {}\n", inst.toString());
-      rewriteSources(&inst);
-    }
-  }
+  postorderWalk(
+    unit,
+    [&](Block* block) {
+      FTRACE(5, "cloneToBlock: rewriting block {}\n", block->id());
+      for (auto& inst : *block) {
+        FTRACE(5, " rewriting {}\n", inst.toString());
+        rewriteSources(&inst);
+      }
+    },
+    target
+  );
 }
 
 void moveToBlock(Block::iterator const first,
@@ -94,45 +99,45 @@ void moveToBlock(Block::iterator const first,
   }
 }
 
-void reflowTypes(Block* const changed, const BlockList& blocks) {
-  assert(isRPOSorted(blocks));
+namespace {
+void retypeDst(IRInstruction* inst, int num) {
+  auto ssa = inst->dst(num);
 
-  auto retypeDst = [&] (IRInstruction* inst, int num) {
-    auto ssa = inst->dst(num);
-
-    /*
-     * The type of a tmp defined by DefLabel is the union of the
-     * types of the tmps at each incoming Jmp.
-     */
-    if (inst->op() == DefLabel) {
-      Type type = Type::Bottom;
-      inst->block()->forEachSrc(num, [&](IRInstruction*, SSATmp* tmp) {
+  /*
+   * The type of a tmp defined by DefLabel is the union of the types of the
+   * tmps at each incoming Jmp.
+   */
+  if (inst->op() == DefLabel) {
+    Type type = Type::Bottom;
+    inst->block()->forEachSrc(num, [&](IRInstruction*, SSATmp* tmp) {
         type = Type::unionOf(type, tmp->type());
       });
-      ssa->setType(type);
-      return;
+    ssa->setType(type);
+    return;
+  }
+
+  ssa->setType(outputType(inst, num));
+}
+}
+
+void retypeDests(IRInstruction* inst) {
+  for (int i = 0; i < inst->numDsts(); ++i) {
+    auto const ssa = inst->dst(i);
+    auto const oldType = ssa->type();
+    retypeDst(inst, i);
+    if (!ssa->type().equals(oldType)) {
+      FTRACE(5, "reflowTypes: retyped {} in {}\n", oldType.toString(),
+             inst->toString());
     }
+  }
 
-    ssa->setType(outputType(inst, num));
-  };
+  assertOperandTypes(inst);
+}
 
-  auto visit = [&] (IRInstruction* inst) {
-    for (int i = 0; i < inst->numDsts(); ++i) {
-      auto const ssa = inst->dst(i);
-      auto const oldType = ssa->type();
-      retypeDst(inst, i);
-      if (ssa->type() != oldType) {
-        FTRACE(5, "reflowTypes: retyped {} in {}\n", oldType.toString(),
-               inst->toString());
-      }
-    }
-  };
-
-  auto it = rpoIteratorTo(blocks, changed);
-  assert(it != blocks.end());
-  for (; it != blocks.end(); ++it) {
-    FTRACE(5, "reflowTypes: visiting block {}\n", (*it)->id());
-    for (auto& inst : **it) visit(&inst);
+void reflowTypes(IRUnit& unit) {
+  for (auto* block : rpoSortCfg(unit)) {
+    FTRACE(5, "reflowTypes: visiting block {}\n", block->id());
+    for (auto& inst : *block) retypeDests(&inst);
   }
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,6 +19,7 @@
 #include "hphp/runtime/ext/ext_closure.h"
 #include "hphp/runtime/ext/asio/asio_context.h"
 #include "hphp/runtime/ext/asio/asio_session.h"
+#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
@@ -49,19 +50,6 @@ Object f_asio_get_running_in_context(int ctx_idx) {
 
 Object f_asio_get_running() {
   return AsioSession::Get()->getCurrentWaitHandle();
-}
-
-void f_asio_set_on_failed_callback(CVarRef on_failed_cb) {
-  if (!on_failed_cb.isNull() && !on_failed_cb.instanceof(c_Closure::s_cls)) {
-    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
-      "Unable to set asio on failed callback: on_failed_cb not a closure"));
-    throw e;
-  }
-  AsioSession::Get()->setOnFailedCallback(on_failed_cb.getObjectDataOrNull());
-}
-
-void f_asio_set_on_started_callback(CVarRef on_started_cb) {
-  c_ContinuationWaitHandle::ti_setoncreatecallback(on_started_cb);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

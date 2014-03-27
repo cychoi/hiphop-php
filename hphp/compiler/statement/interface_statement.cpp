@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,16 +15,19 @@
 */
 
 #include "hphp/compiler/statement/interface_statement.h"
+#include <vector>
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/expression_list.h"
+#include "hphp/compiler/expression/parameter_expression.h"
 #include "hphp/compiler/analysis/class_scope.h"
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/compiler/statement/statement_list.h"
 #include "hphp/compiler/analysis/variable_table.h"
-#include "hphp/util/util.h"
+#include "hphp/util/text-util.h"
 #include "hphp/compiler/option.h"
+#include "hphp/compiler/code_model_enums.h"
 #include "hphp/compiler/parser/parser.h"
 
 using namespace HPHP;
@@ -40,7 +43,7 @@ InterfaceStatement::InterfaceStatement
   : Statement(STATEMENT_CONSTRUCTOR_BASE_PARAMETER_VALUES),
     m_originalName(name), m_base(base),
     m_docComment(docComment), m_stmt(stmt), m_attrList(attrList) {
-  m_name = Util::toLower(name);
+  m_name = toLower(name);
   if (m_base) m_base->toLower();
 }
 
@@ -52,7 +55,7 @@ InterfaceStatement::InterfaceStatement
   : Statement(STATEMENT_CONSTRUCTOR_PARAMETER_VALUES(InterfaceStatement)),
     m_originalName(name), m_base(base),
     m_docComment(docComment), m_stmt(stmt), m_attrList(attrList) {
-  m_name = Util::toLower(name);
+  m_name = toLower(name);
   if (m_base) m_base->toLower();
 }
 
@@ -79,7 +82,7 @@ void InterfaceStatement::onParse(AnalysisResultConstPtr ar,
   if (m_base) m_base->getOriginalStrings(bases);
 
   for (auto &b : bases) {
-    ar->parseOnDemandByClass(Util::toLower(b));
+    ar->parseOnDemandByClass(toLower(b));
   }
 
   StatementPtr stmt = dynamic_pointer_cast<Statement>(shared_from_this());
@@ -107,6 +110,38 @@ void InterfaceStatement::onParse(AnalysisResultConstPtr ar,
     for (int i = 0; i < m_stmt->getCount(); i++) {
       IParseHandlerPtr ph = dynamic_pointer_cast<IParseHandler>((*m_stmt)[i]);
       ph->onParseRecur(ar, classScope);
+    }
+    checkArgumentsToPromote(ExpressionListPtr(), T_INTERFACE);
+  }
+}
+
+void InterfaceStatement::checkArgumentsToPromote(
+    ExpressionListPtr promotedParams, int type) {
+  if (!m_stmt) {
+    return;
+  }
+  for (int i = 0; i < m_stmt->getCount(); i++) {
+    MethodStatementPtr meth =
+      dynamic_pointer_cast<MethodStatement>((*m_stmt)[i]);
+    if (meth && meth->getName() == "__construct") {
+      ExpressionListPtr params = meth->getParams();
+      if (params) {
+        for (int i = 0; i < params->getCount(); i++) {
+          ParameterExpressionPtr param =
+            dynamic_pointer_cast<ParameterExpression>((*params)[i]);
+          if (param->getModifier() != 0) {
+            if (type == T_TRAIT || type == T_INTERFACE) {
+              param->parseTimeFatal(Compiler::InvalidAttribute,
+                                    "Constructor parameter promotion "
+                                    "not allowed on traits or interfaces");
+            }
+            if (promotedParams) {
+              promotedParams->addElement(param);
+            }
+          }
+        }
+      }
+      return; // nothing else to look at
     }
   }
 }
@@ -198,10 +233,10 @@ int InterfaceStatement::getKidCount() const {
 void InterfaceStatement::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_stmt = boost::dynamic_pointer_cast<StatementList>(cp);
+      m_stmt = dynamic_pointer_cast<StatementList>(cp);
       break;
     case 1:
-      m_base = boost::dynamic_pointer_cast<ExpressionList>(cp);
+      m_base = dynamic_pointer_cast<ExpressionList>(cp);
       break;
     default:
       assert(false);
@@ -217,6 +252,39 @@ StatementPtr InterfaceStatement::preOptimize(AnalysisResultConstPtr ar) {
 }
 
 void InterfaceStatement::inferTypes(AnalysisResultPtr ar) {
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void InterfaceStatement::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = 4;
+  if (m_attrList != nullptr) numProps++;
+  if (m_base != nullptr) numProps++;
+  if (!m_docComment.empty()) numProps++;
+
+  cg.printObjectHeader("TypeStatement", numProps);
+  if (m_attrList != nullptr) {
+    cg.printPropertyHeader("attributes");
+    cg.printExpressionVector(m_attrList);
+  }
+  cg.printPropertyHeader("kind");
+  cg.printValue(PHP_INTERFACE);
+  cg.printPropertyHeader("name");
+  cg.printValue(m_originalName);
+  //TODO: type parameters (task 3262469)
+  if (m_base != nullptr) {
+    cg.printPropertyHeader("interfaces");
+    cg.printExpressionVector(m_base);
+  }
+  cg.printPropertyHeader("block");
+  cg.printAsEnclosedBlock(m_stmt);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  if (!m_docComment.empty()) {
+    cg.printPropertyHeader("comments");
+    cg.printValue(m_docComment);
+  }
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

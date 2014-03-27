@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,14 +22,13 @@
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-DECLARE_BOOST_TYPES(CmdNext);
 class CmdNext : public CmdFlowControl {
 public:
-  CmdNext() : CmdFlowControl(KindOfNext),
-              m_stepContUnit(nullptr),
-              m_stepContOffset(InvalidAbsoluteOffset),
-              m_stepContTag(nullptr) {}
-  virtual ~CmdNext();
+  CmdNext() :
+      CmdFlowControl(KindOfNext)
+      , m_stepContTag(nullptr)
+      , m_skippingAsyncESuspend(false)
+    {}
 
   virtual void help(DebuggerClient& client);
   virtual void onSetup(DebuggerProxy& proxy, CmdInterrupt& interrupt);
@@ -37,15 +36,16 @@ public:
 
 private:
   void stepCurrentLine(CmdInterrupt& interrupt, ActRec* fp, PC pc);
+  void stepAfterAsyncESuspend();
   bool hasStepCont();
   bool atStepContOffset(Unit* unit, Offset o);
   void setupStepCont(ActRec* fp, PC pc);
   void cleanupStepCont();
   void* getContinuationTag(ActRec* fp);
 
-  HPHP::Unit* m_stepContUnit;
-  Offset m_stepContOffset;
+  StepDestination m_stepCont;
   void* m_stepContTag; // Unique identifier for the continuation we're stepping
+  bool m_skippingAsyncESuspend;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

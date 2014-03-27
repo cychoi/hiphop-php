@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,7 +16,15 @@
 */
 
 #include "hphp/runtime/ext/asio/asio_session.h"
-#include "hphp/runtime/ext/ext_asio.h"
+#include <limits>
+
+#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
+#include "hphp/runtime/ext/asio/gen_array_wait_handle.h"
+#include "hphp/runtime/ext/asio/gen_map_wait_handle.h"
+#include "hphp/runtime/ext/asio/gen_vector_wait_handle.h"
+#include "hphp/runtime/ext/asio/set_result_to_ref_wait_handle.h"
+#include "hphp/runtime/ext/asio/sleep_wait_handle.h"
+#include "hphp/runtime/ext/asio/wait_handle.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
@@ -74,57 +82,47 @@ void AsioSession::initAbruptInterruptException() {
     "The request was abruptly interrupted.");
 }
 
-void AsioSession::onFailed(CObjRef exception) {
-  if (m_onFailedCallback.get()) {
-    try {
-      vm_call_user_func(m_onFailedCallback, Array::Create(exception));
-    } catch (const Object& callback_exception) {
-      raise_warning("[asio] Ignoring exception thrown by onFailed callback");
-    }
+void AsioSession::onAsyncFunctionCreate(c_AsyncFunctionWaitHandle* cont, c_WaitableWaitHandle* child) {
+  assert(m_onAsyncFunctionCreateCallback.get());
+  try {
+    vm_call_user_func(
+      m_onAsyncFunctionCreateCallback,
+     make_packed_array(cont, child));
+  } catch (const Object& callback_exception) {
+    raise_warning("[asio] Ignoring exception thrown by AsyncFunctionWaitHandle::onCreate callback");
   }
 }
 
-void AsioSession::onContinuationCreate(c_ContinuationWaitHandle* cont) {
-  assert(m_onContinuationCreateCallback.get());
+void AsioSession::onAsyncFunctionAwait(c_AsyncFunctionWaitHandle* cont, c_WaitHandle* child) {
+  assert(m_onAsyncFunctionAwaitCallback.get());
   try {
     vm_call_user_func(
-      m_onContinuationCreateCallback,
-      Array::Create(cont));
+      m_onAsyncFunctionAwaitCallback,
+      make_packed_array(cont, child));
   } catch (const Object& callback_exception) {
-    raise_warning("[asio] Ignoring exception thrown by ContinuationWaitHandle::onCreate callback");
+    raise_warning("[asio] Ignoring exception thrown by AsyncFunctionWaitHandle::onAwait callback");
   }
 }
 
-void AsioSession::onContinuationYield(c_ContinuationWaitHandle* cont, c_WaitHandle* child) {
-  assert(m_onContinuationYieldCallback.get());
+void AsioSession::onAsyncFunctionSuccess(c_AsyncFunctionWaitHandle* cont, const Variant& result) {
+  assert(m_onAsyncFunctionSuccessCallback.get());
   try {
     vm_call_user_func(
-      m_onContinuationYieldCallback,
-      CREATE_VECTOR2(cont, child));
+      m_onAsyncFunctionSuccessCallback,
+      make_packed_array(cont, result));
   } catch (const Object& callback_exception) {
-    raise_warning("[asio] Ignoring exception thrown by ContinuationWaitHandle::onYield callback");
+    raise_warning("[asio] Ignoring exception thrown by AsyncFunctionWaitHandle::onSuccess callback");
   }
 }
 
-void AsioSession::onContinuationSuccess(c_ContinuationWaitHandle* cont, CVarRef result) {
-  assert(m_onContinuationSuccessCallback.get());
+void AsioSession::onAsyncFunctionFail(c_AsyncFunctionWaitHandle* cont, const Object& exception) {
+  assert(m_onAsyncFunctionFailCallback.get());
   try {
     vm_call_user_func(
-      m_onContinuationSuccessCallback,
-      CREATE_VECTOR2(cont, result));
+      m_onAsyncFunctionFailCallback,
+      make_packed_array(cont, exception));
   } catch (const Object& callback_exception) {
-    raise_warning("[asio] Ignoring exception thrown by ContinuationWaitHandle::onSuccess callback");
-  }
-}
-
-void AsioSession::onContinuationFail(c_ContinuationWaitHandle* cont, CObjRef exception) {
-  assert(m_onContinuationFailCallback.get());
-  try {
-    vm_call_user_func(
-      m_onContinuationFailCallback,
-      CREATE_VECTOR2(cont, exception));
-  } catch (const Object& callback_exception) {
-    raise_warning("[asio] Ignoring exception thrown by ContinuationWaitHandle::onFail callback");
+    raise_warning("[asio] Ignoring exception thrown by AsyncFunctionWaitHandle::onFail callback");
   }
 }
 
@@ -137,37 +135,77 @@ void AsioSession::onJoin(c_WaitHandle* wait_handle) {
   }
 }
 
-void AsioSession::onGenArrayCreate(c_GenArrayWaitHandle* wait_handle, CVarRef dependencies) {
+void AsioSession::onGenArrayCreate(c_GenArrayWaitHandle* wait_handle, const Variant& dependencies) {
   assert(m_onGenArrayCreateCallback.get());
   try {
     vm_call_user_func(
       m_onGenArrayCreateCallback,
-      CREATE_VECTOR2(wait_handle, dependencies));
+      make_packed_array(wait_handle, dependencies));
   } catch (const Object& callback_exception) {
     raise_warning("[asio] Ignoring exception thrown by GenArrayWaitHandle::onCreate callback");
   }
 }
 
-void AsioSession::onGenVectorCreate(c_GenVectorWaitHandle* wait_handle, CVarRef dependencies) {
+void AsioSession::onGenMapCreate(c_GenMapWaitHandle* wait_handle, const Variant& dependencies) {
+  assert(m_onGenMapCreateCallback.get());
+  try {
+    vm_call_user_func(
+      m_onGenMapCreateCallback,
+      make_packed_array(wait_handle, dependencies));
+  } catch (const Object& callback_exception) {
+    raise_warning("[asio] Ignoring exception thrown by GenMapWaitHandle::onCreate callback");
+  }
+}
+
+void AsioSession::onGenVectorCreate(c_GenVectorWaitHandle* wait_handle, const Variant& dependencies) {
   assert(m_onGenVectorCreateCallback.get());
   try {
     vm_call_user_func(
       m_onGenVectorCreateCallback,
-      CREATE_VECTOR2(wait_handle, dependencies));
+      make_packed_array(wait_handle, dependencies));
   } catch (const Object& callback_exception) {
     raise_warning("[asio] Ignoring exception thrown by GenVectorWaitHandle::onCreate callback");
   }
 }
 
-void AsioSession::onSetResultToRefCreate(c_SetResultToRefWaitHandle* wait_handle, CObjRef child) {
+void AsioSession::onSetResultToRefCreate(c_SetResultToRefWaitHandle* wait_handle, const Object& child) {
   assert(m_onSetResultToRefCreateCallback.get());
   try {
     vm_call_user_func(
       m_onSetResultToRefCreateCallback,
-      CREATE_VECTOR2(wait_handle, child));
+      make_packed_array(wait_handle, child));
   } catch (const Object& callback_exception) {
     raise_warning("[asio] Ignoring exception thrown by SetResultToRefWaitHandle::onCreate callback");
   }
+}
+
+bool AsioSession::sleep_wh_greater::operator() (const c_SleepWaitHandle* x,
+                                                const c_SleepWaitHandle* y) {
+  return x->getWakeTime() > y->getWakeTime();
+}
+
+bool AsioSession::processSleepEvents() {
+  if (m_sleepEventQueue.empty()) {
+    return false;
+  }
+
+  bool woken = false;
+  auto now = TimePoint::clock::now();
+
+  while (!m_sleepEventQueue.empty()) {
+    auto wh = m_sleepEventQueue.top();
+
+    if (wh->getWakeTime() > now) {
+      break;
+    }
+    woken = true;
+
+    wh->process();
+    decRefObj(wh);
+    m_sleepEventQueue.pop();
+  }
+
+  return woken;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

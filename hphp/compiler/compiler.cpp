@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,24 +25,25 @@
 #include "hphp/compiler/option.h"
 #include "hphp/compiler/parser/parser.h"
 #include "hphp/compiler/builtin_symbols.h"
-#include "hphp/util/json.h"
+#include "hphp/compiler/json.h"
 #include "hphp/util/logger.h"
-#include "hphp/util/db_conn.h"
+#include "hphp/util/db-conn.h"
 #include "hphp/util/exception.h"
 #include "hphp/util/process.h"
-#include "hphp/util/util.h"
+#include "hphp/util/text-util.h"
 #include "hphp/util/timer.h"
 #include "hphp/util/hdf.h"
-#include "hphp/util/async_func.h"
-#include "hphp/runtime/base/program_functions.h"
-#include "hphp/runtime/base/memory/smart_allocator.h"
+#include "hphp/util/async-func.h"
+#include "hphp/util/current-executable.h"
+#include "hphp/util/file-util.h"
+#include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/externals.h"
-#include "hphp/runtime/base/thread_init_fini.h"
+#include "hphp/runtime/base/thread-init-fini.h"
 #include "hphp/runtime/vm/repo.h"
 #include "hphp/system/systemlib.h"
-#include "hphp/util/repo_schema.h"
+#include "hphp/util/repo-schema.h"
 
-#include "hphp/hhvm/process_init.h"
+#include "hphp/hhvm/process-init.h"
 
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -52,6 +53,7 @@
 #include <boost/program_options/positional_options.hpp>
 #include <boost/program_options/variables_map.hpp>
 #include <boost/program_options/parsers.hpp>
+#include <exception>
 
 using namespace boost::program_options;
 using std::cout;
@@ -117,7 +119,8 @@ public:
 
     struct stat sb;
     stat(m_name, &sb);
-    Logger::Info("%dMB %s saved", (int64_t)sb.st_size/(1024*1024), m_name);
+    Logger::Info("%" PRId64" MB %s saved",
+                 (int64_t)sb.st_size/(1024*1024), m_name);
   }
 
 private:
@@ -343,23 +346,9 @@ int prepareOptions(CompilerOptions &po, int argc, char **argv) {
     return 1;
   }
   if (vm.count("version")) {
-#ifdef HPHP_VERSION
-#undef HPHP_VERSION
-#endif
-
-#ifdef HPHP_COMPILER_STR
-#undef HPHP_COMPILER_STR
-#endif
-
-#ifdef DEBUG
-#define HPHP_COMPILER_STR "HipHop Compiler (Debug Build) v"
-#else
-#define HPHP_COMPILER_STR "HipHop Compiler v"
-#endif
-
-#define HPHP_VERSION(v) cout << HPHP_COMPILER_STR #v << "\n";
-#include "../version"
-
+    cout << "HipHop Repo Compiler";
+    cout << " " << k_HHVM_VERSION.c_str();
+    cout << " (" << (debug ? "dbg" : "rel") << ")\n";
     cout << "Compiler: " << kCompilerId << "\n";
     cout << "Repo schema: " << kRepoSchemaId << "\n";
     return 1;
@@ -411,35 +400,35 @@ int prepareOptions(CompilerOptions &po, int argc, char **argv) {
   if (po.inputDir.empty()) {
     po.inputDir = '.';
   }
-  po.inputDir = Util::normalizeDir(po.inputDir);
+  po.inputDir = FileUtil::normalizeDir(po.inputDir);
   if (po.configDir.empty()) {
     po.configDir = po.inputDir;
   }
-  po.configDir = Util::normalizeDir(po.configDir);
+  po.configDir = FileUtil::normalizeDir(po.configDir);
   Option::RootDirectory = po.configDir;
   Option::IncludeSearchPaths = po.includePaths;
 
   for (unsigned int i = 0; i < po.excludeDirs.size(); i++) {
     Option::PackageExcludeDirs.insert
-      (Util::normalizeDir(po.excludeDirs[i]));
+      (FileUtil::normalizeDir(po.excludeDirs[i]));
   }
   for (unsigned int i = 0; i < po.excludeFiles.size(); i++) {
     Option::PackageExcludeFiles.insert(po.excludeFiles[i]);
   }
   for (unsigned int i = 0; i < po.excludePatterns.size(); i++) {
     Option::PackageExcludePatterns.insert
-      (Util::format_pattern(po.excludePatterns[i], true));
+      (format_pattern(po.excludePatterns[i], true));
   }
   for (unsigned int i = 0; i < po.excludeStaticDirs.size(); i++) {
     Option::PackageExcludeStaticDirs.insert
-      (Util::normalizeDir(po.excludeStaticDirs[i]));
+      (FileUtil::normalizeDir(po.excludeStaticDirs[i]));
   }
   for (unsigned int i = 0; i < po.excludeStaticFiles.size(); i++) {
     Option::PackageExcludeStaticFiles.insert(po.excludeStaticFiles[i]);
   }
   for (unsigned int i = 0; i < po.excludeStaticPatterns.size(); i++) {
     Option::PackageExcludeStaticPatterns.insert
-      (Util::format_pattern(po.excludeStaticPatterns[i], true));
+      (format_pattern(po.excludeStaticPatterns[i], true));
   }
 
   if (po.target == "hhbc" || po.target == "run") {
@@ -482,6 +471,8 @@ int prepareOptions(CompilerOptions &po, int argc, char **argv) {
     po.optimizations = "none";
     Option::ParseTimeOpts = false;
   }
+
+  initialize_hhbbc_options();
 
   return 0;
 }
@@ -539,6 +530,12 @@ int process(const CompilerOptions &po) {
 
   bool isPickledPHP = (po.target == "php" && po.format == "pickled");
   if (!isPickledPHP) {
+    bool wp = Option::WholeProgram;
+    Option::WholeProgram = false;
+    BuiltinSymbols::s_systemAr = ar;
+    hphp_process_init();
+    BuiltinSymbols::s_systemAr.reset();
+    Option::WholeProgram = wp;
     if (po.target == "hhbc" && !Option::WholeProgram) {
       // We're trying to produce the same bytecode as runtime parsing.
       // There's nothing to do.
@@ -546,9 +543,7 @@ int process(const CompilerOptions &po) {
       if (!BuiltinSymbols::Load(ar)) {
         return false;
       }
-      ar->loadBuiltins();
     }
-    hphp_process_init();
   }
 
   {
@@ -595,6 +590,7 @@ int process(const CompilerOptions &po) {
         return 1;
       }
       if (Option::WholeProgram || po.target == "analyze") {
+        Timer timer(Timer::WallTime, "analyzeProgram");
         ar->analyzeProgram();
       }
     }
@@ -799,11 +795,14 @@ void hhbcTargetInit(const CompilerOptions &po, AnalysisResultPtr ar) {
   if (po.format.find("exe") != string::npos) {
     RuntimeOption::RepoCentralPath += ".hhbc";
   }
+  unlink(RuntimeOption::RepoCentralPath.c_str());
   RuntimeOption::RepoLocalMode = "--";
   RuntimeOption::RepoDebugInfo = Option::RepoDebugInfo;
   RuntimeOption::RepoJournal = "memory";
   RuntimeOption::EnableHipHopSyntax = Option::EnableHipHopSyntax;
+  RuntimeOption::EnableZendCompat = Option::EnableZendCompat;
   RuntimeOption::EvalJitEnableRenameFunction = Option::JitEnableRenameFunction;
+  RuntimeOption::IntsOverflowToInts = Option::IntsOverflowToInts;
 
   // Turn off commits, because we don't want systemlib to get included
   RuntimeOption::RepoCommit = false;
@@ -852,7 +851,7 @@ int hhbcTarget(const CompilerOptions &po, AnalysisResultPtr ar,
     if (!po.filecache.empty()) {
       fcThread.waitForEnd();
     }
-    Util::syncdir(po.outputDir, po.syncDir);
+    FileUtil::syncdir(po.outputDir, po.syncDir);
     boost::filesystem::remove_all(po.syncDir);
   }
 
@@ -865,11 +864,11 @@ int hhbcTarget(const CompilerOptions &po, AnalysisResultPtr ar,
      */
     string exe = po.outputDir + '/' + po.program;
     string repo = "repo=" + exe + ".hhbc";
-    char buf[PATH_MAX];
-    if (!realpath("/proc/self/exe", buf)) return -1;
+    string buf = current_executable_path();
+    if (buf.empty()) return -1;
 
     const char *argv[] = { "objcopy", "--add-section", repo.c_str(),
-                           buf, exe.c_str(), 0 };
+                           buf.c_str(), exe.c_str(), 0 };
     string out;
     ret = Process::Exec(argv[0], argv, nullptr, out, nullptr) ? 0 : 1;
   }
@@ -908,11 +907,13 @@ int runTarget(const CompilerOptions &po) {
   // run the executable
   string cmd;
   if (po.format.find("exe") == string::npos) {
-    char buf[PATH_MAX];
-    if (!realpath("/proc/self/exe", buf)) return -1;
+    string buf = current_executable_path();
+    if (buf.empty()) return -1;
 
     cmd += buf;
     cmd += " -vRepo.Authoritative=true";
+    if (getenv("HPHP_DUMP_BYTECODE")) cmd += " -vEval.DumpBytecode=1";
+    if (getenv("HPHP_INTERP"))        cmd += " -vEval.Jit=0";
     cmd += " -vRepo.Local.Mode=r- -vRepo.Local.Path=";
   }
   cmd += po.outputDir + '/' + po.program;
@@ -920,7 +921,7 @@ int runTarget(const CompilerOptions &po) {
     (po.inputs.size() == 1 ? po.inputs[0] : "") +
     " " + po.programArgs;
   Logger::Info("running executable: %s", cmd.c_str());
-  ret = Util::ssystem(cmd.c_str());
+  ret = FileUtil::ssystem(cmd.c_str());
   if (ret && ret != -1) ret = 1;
 
   // delete the temporary directory if not needed

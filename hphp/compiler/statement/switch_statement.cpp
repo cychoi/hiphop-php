@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,7 @@
 */
 
 #include "hphp/compiler/statement/switch_statement.h"
+#include <set>
 #include "hphp/compiler/analysis/analysis_result.h"
 #include "hphp/compiler/statement/statement_list.h"
 #include "hphp/compiler/statement/case_statement.h"
@@ -23,7 +24,7 @@
 #include "hphp/compiler/analysis/variable_table.h"
 #include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/compiler/expression/scalar_expression.h"
-
+#include "hphp/util/text-util.h"
 #include "hphp/runtime/base/comparisons.h"
 
 using namespace HPHP;
@@ -74,7 +75,7 @@ void SwitchStatement::analyzeProgram(AnalysisResultPtr ar) {
       m_exp->is(Expression::KindOfSimpleVariable)) {
     SimpleVariablePtr exp = dynamic_pointer_cast<SimpleVariable>(m_exp);
     if (exp && exp->getSymbol() && exp->getSymbol()->isClassName()) {
-      // Mark some classes as volitle since the name is used in switch
+      // Mark some classes as volatile since the name is used in switch
       for (int i = 0; i < m_cases->getCount(); i++) {
         CaseStatementPtr stmt =
           dynamic_pointer_cast<CaseStatement>((*m_cases)[i]);
@@ -85,7 +86,7 @@ void SwitchStatement::analyzeProgram(AnalysisResultPtr ar) {
             dynamic_pointer_cast<ScalarExpression>(caseCond);
           if (name && name->isLiteralString()) {
             string className = name->getLiteralString();
-            ClassScopePtr cls = ar->findClass(Util::toLower(className));
+            ClassScopePtr cls = ar->findClass(toLower(className));
             if (cls && cls->isUserClass()) {
               cls->setVolatile();
             }
@@ -127,10 +128,10 @@ int SwitchStatement::getKidCount() const {
 void SwitchStatement::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_exp = boost::dynamic_pointer_cast<Expression>(cp);
+      m_exp = dynamic_pointer_cast<Expression>(cp);
       break;
     case 1:
-      m_cases = boost::dynamic_pointer_cast<StatementList>(cp);
+      m_cases = dynamic_pointer_cast<StatementList>(cp);
       break;
     default:
       assert(false);
@@ -183,6 +184,24 @@ void SwitchStatement::inferTypes(AnalysisResultPtr ar) {
       Compiler::Error(Compiler::MoreThanOneDefault, m_cases);
     }
   }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void SwitchStatement::outputCodeModel(CodeGenerator &cg) {
+  auto numProps = 2;
+  if (m_cases != nullptr) numProps++;
+
+  cg.printObjectHeader("SwitchStatement", numProps);
+  cg.printPropertyHeader("expression");
+  m_exp->outputCodeModel(cg);
+  if (m_cases != nullptr) {
+    cg.printPropertyHeader("caseStatements");
+    cg.printStatementVector(m_cases);
+  }
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,6 +20,7 @@
 #include "hphp/compiler/statement/method_statement.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/analysis/class_scope.h"
+#include "hphp/util/text-util.h"
 
 using namespace HPHP;
 
@@ -53,7 +54,7 @@ void UseTraitStatement::onParseRecur(AnalysisResultConstPtr ar,
   vector<string> usedTraits;
   getUsedTraitNames(usedTraits);
   for (auto &t : usedTraits) {
-    ar->parseOnDemandByClass(Util::toLower(t));
+    ar->parseOnDemandByClass(toLower(t));
   }
   scope->addUsedTraits(usedTraits);
 }
@@ -93,10 +94,10 @@ int UseTraitStatement::getKidCount() const {
 void UseTraitStatement::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
     case 0:
-      m_exp = boost::dynamic_pointer_cast<ExpressionList>(cp);
+      m_exp = dynamic_pointer_cast<ExpressionList>(cp);
       break;
     case 1:
-      m_stmt = boost::dynamic_pointer_cast<StatementList>(cp);
+      m_stmt = dynamic_pointer_cast<StatementList>(cp);
       break;
     default:
       assert(false);
@@ -105,6 +106,19 @@ void UseTraitStatement::setNthKid(int n, ConstructPtr cp) {
 }
 
 void UseTraitStatement::inferTypes(AnalysisResultPtr ar) {
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void UseTraitStatement::outputCodeModel(CodeGenerator &cg) {
+  cg.printObjectHeader("UseTraitStatement", 3);
+  cg.printPropertyHeader("typeExpressions");
+  cg.printTypeExpressionVector(m_exp);
+  cg.printPropertyHeader("block");
+  cg.printAsBlock(m_stmt);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

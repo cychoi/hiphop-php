@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,14 +17,23 @@
 #ifndef incl_HPHP_DATATYPE_H_
 #define incl_HPHP_DATATYPE_H_
 
-#include "hphp/util/base.h"
+#include <cstdint>
+#include <string>
+#include <cstdio>
+
+#include "folly/Format.h"
+
+#include "hphp/util/portability.h"
+#include "hphp/util/assertions.h"
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
-// definitions
 
-typedef std::conditional<packed_tv, int8_t, int32_t>::type DataTypeInt;
-enum DataType: DataTypeInt {
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * DataType is the type tag for a TypedValue (see typed-value.h).
+ */
+enum DataType : int8_t {
   KindOfClass            = -13,
   MinDataType            = -13,
 
@@ -35,6 +44,7 @@ enum DataType: DataTypeInt {
 
   KindOfInvalid          = -1,
   KindOfUnknown          = KindOfInvalid,
+  KindOfNone             = KindOfInvalid,
 
   /**
    * Beware if you change the order, as we may have a few type checks
@@ -42,50 +52,62 @@ enum DataType: DataTypeInt {
    * the number of bits needed to represent this.  (Known dependency
    * in unwind-x64.h.)
    */
-  KindOfUninit           = 0,
+  KindOfUninit           = 0x00,
   // Any code that static_asserts about the value of KindOfNull may
   // also depend on there not being any values between KindOfUninit
   // and KindOfNull.
-  KindOfNull             = 8,     //   0001000    0x08
-  KindOfBoolean          = 9,     //   0001001    0x09
-  KindOfInt64            = 10,    //   0001010    0x0a
-  KindOfDouble           = 11,    //   0001011    0x0b
+  KindOfNull             = 0x08,  //   0001000
+  KindOfBoolean          = 0x09,  //   0001001
+  KindOfInt64            = 0x0a,  //   0001010
+  KindOfDouble           = 0x0b,  //   0001011
 
-  KindOfStaticString     = 12,    //   0001100    0x0c
-  KindOfString           = 20,    //   0010100    0x14
-  KindOfArray            = 32,    //   0100000    0x20
-  KindOfObject           = 64,    //   1000000    0x40
-  KindOfRef              = 96,    //   1100000    0x60
-  KindOfIndirect         = 97,    //   1100001    0x61
+  KindOfStaticString     = 0x0c,  //   0001100
+  KindOfString           = 0x14,  //   0010100
+  KindOfArray            = 0x20,  //   0100000
+  KindOfObject           = 0x30,  //   0110000
+  KindOfResource         = 0x40,  //   1000000
+  KindOfRef              = 0x50,  //   1010000
+  KindOfIndirect         = 0x51,  //   1010001
 
   MaxNumDataTypes        = KindOfIndirect + 1, // marker, not a valid type
-  MaxNumDataTypesIndex   = 11 + 1,  // 1 + the number of valid DataTypes above
+  MaxNumDataTypesIndex   = 12 + 1,  // 1 + the number of valid DataTypes above
 
-  MaxDataType            = 0x7f, // Allow KindOf* > 11 in HphpArray.
   // Note: KindOfStringBit must be set in KindOfStaticString and KindOfString,
   //       and it must be 0 in any other real DataType.
-  KindOfStringBit        = 4,
+  KindOfStringBit        = 0x04,
 
   // Note: KindOfUncountedInitBit must be set for Null, Boolean, Int64, Double,
   //       and StaticString, and it must be 0 for any other real DataType.
-  KindOfUncountedInitBit = 8,
+  KindOfUncountedInitBit = 0x08,
 };
 
-const unsigned int kDataTypeMask = 0x7F;
-const unsigned int kNotConstantValueTypeMask = KindOfRef;
+const unsigned int kDataTypeMask = 0x7f;
+
+// For a given DataType dt >= 0, this mask can be used to test if dt is
+// KindOfArray, KindOfObject, KindOfResource, or KindOfRef
+const unsigned int kNotConstantValueTypeMask = 0x60;
 
 // All DataTypes greater than this value are refcounted.
 const DataType KindOfRefCountThreshold = KindOfStaticString;
 
-enum DataTypeCategory {
-  DataTypeGeneric,
-  DataTypeCountness,
-  DataTypeCountnessInit,
-  DataTypeSpecific
-};
+// These must be kept in order from least to most specific.
+#define DT_CATEGORIES(func)                     \
+  func(Generic)                                 \
+  func(Countness)                               \
+  func(CountnessInit)                           \
+  func(Specific)                                \
+  func(Specialized)
 
-///////////////////////////////////////////////////////////////////////////////
-// nannies
+enum class DataTypeCategory : uint8_t {
+#define DT(name) name,
+  DT_CATEGORIES(DT)
+#undef DT
+};
+#define DT(name) auto constexpr DataType##name = DataTypeCategory::name;
+DT_CATEGORIES(DT)
+#undef DT
+
+//////////////////////////////////////////////////////////////////////
 
 static_assert(KindOfString       & KindOfStringBit, "");
 static_assert(KindOfStaticString & KindOfStringBit, "");
@@ -96,6 +118,7 @@ static_assert(!(KindOfInt64      & KindOfStringBit), "");
 static_assert(!(KindOfDouble     & KindOfStringBit), "");
 static_assert(!(KindOfArray      & KindOfStringBit), "");
 static_assert(!(KindOfObject     & KindOfStringBit), "");
+static_assert(!(KindOfResource   & KindOfStringBit), "");
 static_assert(!(KindOfRef        & KindOfStringBit), "");
 static_assert(!(KindOfIndirect   & KindOfStringBit), "");
 static_assert(!(KindOfClass      & KindOfStringBit), "");
@@ -109,19 +132,21 @@ static_assert(!(KindOfUninit     & KindOfUncountedInitBit), "");
 static_assert(!(KindOfString     & KindOfUncountedInitBit), "");
 static_assert(!(KindOfArray      & KindOfUncountedInitBit), "");
 static_assert(!(KindOfObject     & KindOfUncountedInitBit), "");
+static_assert(!(KindOfResource   & KindOfUncountedInitBit), "");
 static_assert(!(KindOfRef        & KindOfUncountedInitBit), "");
 static_assert(!(KindOfIndirect   & KindOfUncountedInitBit), "");
 static_assert(!(KindOfClass      & KindOfUncountedInitBit), "");
 
 // assume KindOfUninit == 0 in ClsCns
 static_assert(KindOfUninit == 0,
-              "Several things assume this tag is 0, especially target cache");
+              "Several things assume this tag is 0, especially RDS");
 
-BOOST_STATIC_ASSERT(MaxNumDataTypes - 1 <= kDataTypeMask);
+static_assert(MaxNumDataTypes - 1 <= kDataTypeMask, "");
 
-static_assert(kNotConstantValueTypeMask & KindOfArray &&
-              kNotConstantValueTypeMask & KindOfObject &&
-              kNotConstantValueTypeMask & KindOfRef,
+static_assert((kNotConstantValueTypeMask & KindOfArray) != 0  &&
+              (kNotConstantValueTypeMask & KindOfObject) != 0 &&
+              (kNotConstantValueTypeMask & KindOfResource) != 0 &&
+              (kNotConstantValueTypeMask & KindOfRef) != 0,
               "DataType & kNotConstantValueTypeMask must be non-zero for "
               "Array, Object and Ref types");
 static_assert(!(kNotConstantValueTypeMask &
@@ -130,11 +155,11 @@ static_assert(!(kNotConstantValueTypeMask &
               "DataType & kNotConstantValueTypeMask must be zero for "
               "null, bool, int, double and string types");
 
-///////////////////////////////////////////////////////////////////////////////
-// helpers
+
+//////////////////////////////////////////////////////////////////////
 
 inline std::string tname(DataType t) {
-  switch(t) {
+  switch (t) {
 #define CS(name) \
     case KindOf ## name: return std::string(#name);
     CS(Uninit)
@@ -146,6 +171,7 @@ inline std::string tname(DataType t) {
     CS(String)
     CS(Array)
     CS(Object)
+    CS(Resource)
     CS(Ref)
     CS(Class)
     CS(Any)
@@ -163,6 +189,15 @@ inline std::string tname(DataType t) {
   }
 }
 
+inline std::string typeCategoryName(DataTypeCategory c) {
+  switch (c) {
+# define CASE(name) case DataType##name: return "DataType" #name;
+  DT_CATEGORIES(CASE)
+#undef CASE
+  }
+  not_reached();
+}
+
 inline int getDataTypeIndex(DataType type) {
   switch (type) {
     case KindOfUninit       : return 0;
@@ -174,8 +209,9 @@ inline int getDataTypeIndex(DataType type) {
     case KindOfString       : return 6;
     case KindOfArray        : return 7;
     case KindOfObject       : return 8;
-    case KindOfRef          : return 9;
-    case KindOfIndirect     : return 10;
+    case KindOfResource     : return 9;
+    case KindOfRef          : return 10;
+    case KindOfIndirect     : return 11;
     default                 : not_reached();
   }
 }
@@ -191,30 +227,39 @@ inline DataType getDataTypeValue(unsigned index) {
     case 6  : return KindOfString;
     case 7  : return KindOfArray;
     case 8  : return KindOfObject;
-    case 9  : return KindOfRef;
-    case 10 : return KindOfIndirect;
+    case 9  : return KindOfResource;
+    case 10 : return KindOfRef;
+    case 11 : return KindOfIndirect;
     default : not_reached();
   }
 }
 
-// These are used in type_variant.cpp and translator-x64.cpp
-const unsigned int kShiftDataTypeToDestrIndex = 5;
-const unsigned int kDestrTableSize = 4;
+// These are used in type_variant.cpp and mc-generator.cpp
+const int kShiftDataTypeToDestrIndex = 4;
+const int kDestrTableSize = 6;
 
 #define TYPE_TO_DESTR_IDX(t) ((t) >> kShiftDataTypeToDestrIndex)
 
-inline ALWAYS_INLINE unsigned typeToDestrIndex(DataType t) {
-  assert(t >= KindOfString && t <= KindOfRef);
+ALWAYS_INLINE unsigned typeToDestrIndex(DataType t) {
+  assert(t == KindOfString || t == KindOfArray || t == KindOfObject ||
+         t == KindOfResource || t == KindOfRef);
   return TYPE_TO_DESTR_IDX(t);
 }
 
-// Helper macro for checking if a given type is refcounted
-#define IS_REFCOUNTED_TYPE(t) ((t) > KindOfRefCountThreshold)
+#define IS_REAL_TYPE(t)                                                 \
+  (((t) >= ::HPHP::KindOfUninit && (t) < ::HPHP::MaxNumDataTypes) ||    \
+   (t) == ::HPHP::KindOfClass)
 
-// Helper macro for checking if a type is KindOfString or KindOfStaticString.
-BOOST_STATIC_ASSERT(KindOfStaticString == 0x0C);
-BOOST_STATIC_ASSERT(KindOfString       == 0x14);
-#define IS_STRING_TYPE(t) (((t) & ~0x18) == KindOfStringBit)
+// Helper macro for checking if a given type is refcounted
+#define IS_REFCOUNTED_TYPE(t)                                   \
+  (assert(IS_REAL_TYPE(t)), (t) > HPHP::KindOfRefCountThreshold)
+
+// Helper function for checking if a type is KindOfString or KindOfStaticString.
+static_assert(KindOfStaticString == 0x0C, "");
+static_assert(KindOfString       == 0x14, "");
+inline bool IS_STRING_TYPE(DataType t) {
+  return (t & ~0x18) == KindOfStringBit;
+}
 
 // Check if a type is KindOfUninit or KindOfNull
 #define IS_NULL_TYPE(t) (unsigned(t) <= KindOfNull)
@@ -223,9 +268,6 @@ BOOST_STATIC_ASSERT(KindOfString       == 0x14);
 #define IS_ARRAY_TYPE(t) ((t) == KindOfArray)
 #define IS_BOOL_TYPE(t) ((t) == KindOfBoolean)
 #define IS_DOUBLE_TYPE(t) ((t) == KindOfDouble)
-
-#define IS_REAL_TYPE(t) \
-  (((t) >= KindOfUninit && (t) < MaxNumDataTypes) || (t) == KindOfClass)
 
 inline bool IS_INT_KEY_TYPE(DataType t) {
   return t <= KindOfInt64;
@@ -242,7 +284,53 @@ inline DataType typeInitNull(DataType t) {
   return t == KindOfUninit ? KindOfNull : t;
 }
 
-///////////////////////////////////////////////////////////////////////////////
-} // namespace HPHP
+/*
+ * Returns whether two DataTypes for primitive types are "equivalent"
+ * as far as user-visible php types are concerned.  (I.e. ignoring
+ * different types of strings or different types of nulls.)
+ *
+ * Pre: t1 and t2 must both be DataTypes that represent php-types.
+ * (Non-internal KindOfs.)
+ */
+inline bool equivDataTypes(DataType t1, DataType t2) {
+  return
+    (t1 == t2) ||
+    (IS_STRING_TYPE(t1) && IS_STRING_TYPE(t2)) ||
+    (IS_NULL_TYPE(t1) && IS_NULL_TYPE(t2));
+}
 
-#endif // incl_HPHP_DATATYPE_H_
+//////////////////////////////////////////////////////////////////////
+
+}
+
+//////////////////////////////////////////////////////////////////////
+
+namespace folly {
+template<> struct FormatValue<HPHP::DataTypeCategory> {
+  explicit FormatValue(HPHP::DataTypeCategory val) : m_val(val) {}
+
+  template<typename Callback>
+  void format(FormatArg& arg, Callback& cb) const {
+    format_value::formatString(typeCategoryName(m_val), arg, cb);
+  }
+
+ private:
+  HPHP::DataTypeCategory m_val;
+};
+
+template<> struct FormatValue<HPHP::DataType> {
+  explicit FormatValue(HPHP::DataType dt) : m_dt(dt) {}
+
+  template<typename C>
+  void format(FormatArg& arg, C& cb) const {
+    format_value::formatString(tname(m_dt), arg, cb);
+  }
+
+ private:
+  HPHP::DataType m_dt;
+};
+}
+
+//////////////////////////////////////////////////////////////////////
+
+#endif

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,13 +16,15 @@
 #ifndef incl_HPHP_JIT_LAYOUT_H_
 #define incl_HPHP_JIT_LAYOUT_H_
 
-#include "hphp/runtime/base/memory/smart_containers.h"
-#include "hphp/runtime/vm/jit/ir.h"
+#include "hphp/runtime/base/smart-containers.h"
 #include "hphp/runtime/vm/jit/block.h"
 
 namespace HPHP { namespace JIT {
 
 //////////////////////////////////////////////////////////////////////
+
+struct Block;
+class IRUnit;
 
 /*
  * Information about where to position the blocks in a trace.
@@ -32,8 +34,8 @@ namespace HPHP { namespace JIT {
  * astubs.
  */
 struct LayoutInfo {
-  smart::vector<Block*> blocks;
-  smart::vector<Block*>::iterator astubsIt;
+  BlockList blocks;
+  BlockList::iterator astubsIt;
 };
 
 /*
@@ -41,7 +43,7 @@ struct LayoutInfo {
  * goal is to minimize branching and put related blocks close to each
  * other.
  */
-LayoutInfo layoutBlocks(IRTrace*, const IRFactory&);
+LayoutInfo layoutBlocks(const IRUnit&);
 
 //////////////////////////////////////////////////////////////////////
 

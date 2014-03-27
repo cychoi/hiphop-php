@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,137 +16,487 @@
 */
 
 #include "hphp/runtime/ext/ext_string.h"
-#include "hphp/runtime/base/util/string_buffer.h"
-#include "hphp/runtime/base/zend/zend_string.h"
-#include "hphp/runtime/base/zend/zend_url.h"
-#include "hphp/runtime/base/zend/zend_printf.h"
-#include "hphp/runtime/base/zend/zend_scanf.h"
+#include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/base/zend-url.h"
+#include "hphp/runtime/base/zend-printf.h"
+#include "hphp/runtime/base/zend-scanf.h"
 #include "hphp/runtime/base/bstring.h"
-#include "hphp/runtime/base/util/request_local.h"
+#include "hphp/runtime/base/request-local.h"
 #include "hphp/util/lock.h"
 #include <locale.h>
-#include "hphp/runtime/base/server/http_request_handler.h"
-#include "hphp/runtime/base/server/http_protocol.h"
+#include "hphp/runtime/server/http-request-handler.h"
+#include "hphp/runtime/server/http-protocol.h"
+#include "hphp/runtime/ext/ext_math.h"
+#include "hphp/runtime/ext/std/ext_std_variable.h"
+#include "folly/Unicode.h"
+#include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/zend/html-table.h"
+#include "hphp/runtime/base/container-functions.h"
 
 namespace HPHP {
 
 static Mutex s_mutex;
 ///////////////////////////////////////////////////////////////////////////////
 
-String f_addcslashes(CStrRef str, CStrRef charlist) {
-  return StringUtil::CEncode(str, charlist);
+template <class Op> ALWAYS_INLINE
+String stringForEachBuffered(uint32_t bufLen, const String& str, Op action) {
+  StringBuffer sb(bufLen);
+  StringSlice sl  = str.slice();
+  const char* src = sl.begin();
+  const char* end = sl.end();
+
+  for (; src < end; ++src) {
+    action(sb, src, end);
+  }
+
+  return sb.detach();
 }
-String f_stripcslashes(CStrRef str) {
-  return StringUtil::CDecode(str);
+
+template <bool mutate, class Op> ALWAYS_INLINE
+String stringForEach(uint32_t len, const String& str, Op action) {
+  String ret = mutate ? str : String(len, ReserveString);
+
+  StringSlice srcSlice = str.slice();
+  auto const dstSlice = ret.bufferSlice();
+
+  const char* src = srcSlice.begin();
+  const char* end = srcSlice.end();
+
+  char* dst = dstSlice.begin();
+
+  for (; src != end; ++src, ++dst) {
+    *dst = action(*src);
+  }
+
+  if (!mutate) ret.get()->setSize(len);
+  return ret;
 }
-String f_addslashes(CStrRef str) {
-  return StringUtil::SqlEncode(str);
+
+template <class Op> ALWAYS_INLINE
+String stringForEachFast(const String& str, Op action) {
+  if (str.empty()) {
+    return str;
+  }
+
+  if (str.get()->hasExactlyOneRef()) {
+    return stringForEach<true>(str.size(), str.get(), action);
+  }
+
+  return stringForEach<false>(str.size(), str.get(), action);
 }
-String f_stripslashes(CStrRef str) {
-  return StringUtil::SqlDecode(str);
+
+String f_addcslashes(const String& str, const String& charlist) {
+  if (str.empty() || (!charlist.isNull() && charlist.empty())) {
+    return str;
+  }
+
+  int masklen = charlist.isNull() ? 10 : charlist.size();
+  const char* list = charlist.isNull() ? "\\\x00\x01..\x1f\x7f..\xff"
+                                       : charlist.c_str();
+
+  char flags[256];
+  string_charmask(list, masklen, flags);
+
+  return stringForEachBuffered(str.size(), str,
+    [&] (StringBuffer& ret, const char* src, const char* end) {
+      int c = (unsigned char)*src;
+
+      if (flags[c]) {
+        ret.append('\\');
+        if ((c < 32) || (c > 126)) {
+          switch (c) {
+            case '\n': ret.append('n'); break;
+            case '\t': ret.append('t'); break;
+            case '\r': ret.append('r'); break;
+            case '\a': ret.append('a'); break;
+            case '\v': ret.append('v'); break;
+            case '\b': ret.append('b'); break;
+            case '\f': ret.append('f'); break;
+            default: ret.append((char)('0' + (c / 64))); c %= 64;
+                     ret.append((char)('0' + (c /  8))); c %=  8;
+                     ret.append((char)('0' + c));
+          }
+          return;
+        }
+      }
+      ret.append((char)c);
+    });
 }
-String f_bin2hex(CStrRef str) {
-  return StringUtil::HexEncode(str);
+
+String f_stripcslashes(const String& str) {
+  if (str.empty()) {
+    return str;
+  }
+
+  return stringForEachBuffered(str.size(), str,
+    [&] (StringBuffer& ret, const char*& src, const char* end) {
+      char c;
+      const char* p;
+
+      if (*src != '\\' || src + 1 == end) {
+        ret.append(*src);
+        return;
+      }
+
+      switch (*++src) {
+        case 'n': ret.append('\n'); break;
+        case 'r': ret.append('\r'); break;
+        case 'a': ret.append('\a'); break;
+        case 't': ret.append('\t'); break;
+        case 'v': ret.append('\v'); break;
+        case 'b': ret.append('\b'); break;
+        case 'f': ret.append('\f'); break;
+        case '\\': ret.append('\\'); break;
+        case 'x':
+          if (src + 1 == end || !isxdigit(src[1])) {
+            ret.append(*src);
+            break;
+          }
+
+          for (c = 0, ++src, p = src + 2; src < p && src < end &&
+               isxdigit(*src); ++src) {
+            c *= 16;
+            c += (*src < 'A' ? *src - '0' :
+                  *src < 'a' ? *src - 'A' + 10 :
+                               *src - 'a' + 10);
+          }
+          ret.append(c);
+          src--;
+          break;
+
+        default:
+          if (*src < '0' || '7' < *src) {
+            // The character after the slash is nothing special. Append it
+            // unchanged to the result.
+            ret.append(*src);
+            break;
+          }
+
+          // Decode a base 8 number up to 3 characters long.
+          for (c = 0, p = src + 3; src < p && src < end && '0' <= *src &&
+               *src < '8'; ++src) {
+            c *= 8;
+            c += (*src - '0');
+          }
+          ret.append(c);
+          src--;
+      }
+    });
 }
-Variant f_hex2bin(CStrRef str) {
-  try {
-    return StringUtil::HexDecode(str);
-  } catch (...) {
+
+String f_addslashes(const String& str) {
+  if (str.empty()) {
+    return str;
+  }
+
+  return stringForEachBuffered(str.size(), str,
+    [&] (StringBuffer& ret, const char* src, const char* end) {
+      switch (*src) {
+        case '\0':
+          ret.append('\\');
+          ret.append('0');
+          break;
+        case '\\': case '\"': case '\'':
+          ret.append('\\');
+          /* fall through */
+        default:
+          ret.append(*src);
+      }
+    });
+}
+
+String f_stripslashes(const String& str) {
+  if (str.empty()) {
+    return str;
+  }
+
+  return stringForEachBuffered(str.size(), str,
+    [&] (StringBuffer& ret, const char*& src, const char* end) {
+      if (*src == '\\' && *++src == '0') {
+        ret.append('\0');
+        return;
+      }
+      if (src < end) {
+        ret.append(*src);
+      }
+    });
+}
+
+String f_bin2hex(const String& str) {
+  if (str.empty()) {
+    return str;
+  }
+
+  return stringForEachBuffered(str.size(), str,
+    [&] (StringBuffer& ret, const char* src, const char* end) {
+      static char hexconvtab[] = "0123456789abcdef";
+      ret.append(hexconvtab[(unsigned char)*src >> 4]);
+      ret.append(hexconvtab[(unsigned char)*src & 15]);
+    });
+}
+
+Variant f_hex2bin(const String& str) {
+  if (str.empty()) {
+    return str;
+  }
+
+  if (str.size() % 2) {
     raise_warning("hex2bin: malformed input");
     return false;
   }
+
+  StringBuffer ret(str.size() / 2 + 1);
+
+  StringSlice sl  = str.slice();
+  const char* src = sl.begin();
+  const char* end = sl.end();
+
+  for (; src != end; ++src) {
+    int val;
+    if (isdigit(*src))                   val = 16 * (*src++ - '0');
+    else if ('a' <= *src && *src <= 'f') val = 16 * (*src++ - 'a' + 10);
+    else if ('A' <= *src && *src <= 'F') val = 16 * (*src++ - 'A' + 10);
+    else {
+      raise_warning("hex2bin: malformed input");
+      return false;
+    }
+
+    if (isdigit(*src))                   val += (*src - '0');
+    else if ('a' <= *src && *src <= 'f') val += (*src - 'a' + 10);
+    else if ('A' <= *src && *src <= 'F') val += (*src - 'A' + 10);
+    else {
+      raise_warning("hex2bin: malformed input");
+      return false;
+    }
+
+    ret.append((char)val);
+  }
+
+  return ret.detach();
 }
-String f_nl2br(CStrRef str) {
-  return str.replace("\n", "<br />\n");
+
+const StaticString
+  s_nl("\n"),
+  s_br("<br />\n"),
+  s_non_xhtml_br("<br>\n");
+
+String f_nl2br(const String& str, bool is_xhtml /* = true */) {
+  if (is_xhtml) {
+    return string_replace(str, s_nl, s_br);
+  } else {
+    return string_replace(str, s_nl, s_non_xhtml_br);
+  }
 }
-String f_quotemeta(CStrRef str) {
-  return StringUtil::RegExEncode(str);
+
+String f_quotemeta(const String& str) {
+  if (str.empty()) {
+    return str;
+  }
+
+  return stringForEachBuffered(str.size(), str,
+    [&] (StringBuffer& ret, const char* src, const char* end) {
+      switch (*src) {
+        case '.': case '\\': case '+': case '*': case '?': case '[': case ']':
+        case '^': case '$': case '(': case ')':
+          ret.append('\\');
+          /* fall through */
+        default:
+          ret.append(*src);
+      }
+    });
 }
-String f_str_shuffle(CStrRef str) {
-  return StringUtil::Shuffle(str);
+
+String f_str_shuffle(const String& str) {
+  if (str.size() <= 1) {
+    return str;
+  }
+
+  String ret = str.get()->hasExactlyOneRef() ? str : String(str, CopyString);
+  char* buf  = ret.get()->mutableData();
+  int left   = ret.size();
+
+  while (--left) {
+    int idx = f_rand(0, left);
+    if (idx != left) {
+      char temp = buf[left];
+      buf[left] = buf[idx];
+      buf[idx] = temp;
+    }
+  }
+  return ret;
 }
-String f_strrev(CStrRef str) {
-  return StringUtil::Reverse(str);
+
+String f_strrev(const String& str) {
+  auto len = str.size();
+
+  if (str.get()->hasExactlyOneRef()) {
+    char* sdata = str.get()->mutableData();
+    for (int i = 0; i < len / 2; ++i) {
+      char temp = sdata[i];
+      sdata[i] = sdata[len - i - 1];
+      sdata[len - i - 1] = temp;
+    }
+    return str;
+  }
+
+  String ret(len, ReserveString);
+
+  const char* data = str.data();
+  char* dest = ret.get()->mutableData();
+
+  for (int i = 0; i < len; ++i) {
+    dest[i] = data[len - i - 1];
+  }
+
+  ret.setSize(len);
+  return ret;
 }
-String f_strtolower(CStrRef str) {
-  return StringUtil::ToLower(str);
+
+String f_strtolower(String str) {
+  return stringForEachFast(str, tolower);
 }
-String f_strtoupper(CStrRef str) {
-  return StringUtil::ToUpper(str, StringUtil::ToUpperAll);
+
+String f_strtoupper(String str) {
+  return stringForEachFast(str, toupper);
 }
-String f_ucfirst(CStrRef str) {
-  return StringUtil::ToUpper(str, StringUtil::ToUpperFirst);
+
+template <class OpTo, class OpIs> ALWAYS_INLINE
+String stringToCaseFirst(const String& str, OpTo tocase, OpIs iscase) {
+  if (str.empty() || iscase(str[0])) {
+    return str;
+  }
+
+  if (str.get()->hasExactlyOneRef()) {
+    char* sdata = str.get()->mutableData();
+    sdata[0] = tocase(sdata[0]);
+    return str;
+  }
+
+  String ret(str, CopyString);
+  char* first = ret.get()->mutableData();
+
+  *first = tocase(*first);
+  return ret;
 }
-String f_lcfirst(CStrRef str) {
-  return StringUtil::ToLower(str, StringUtil::ToLowerFirst);
+
+String f_ucfirst(String str) {
+  return stringToCaseFirst(str, toupper, isupper);
 }
-String f_ucwords(CStrRef str) {
-  return StringUtil::ToUpper(str, StringUtil::ToUpperWords);
+
+String f_lcfirst(String str) {
+  return stringToCaseFirst(str, tolower, islower);
 }
-String f_strip_tags(CStrRef str, CStrRef allowable_tags /* = "" */) {
+
+String f_ucwords(String str) {
+  char last = ' ';
+  return stringForEachFast(str, [&] (char c) {
+    char ret = isspace(last) ? toupper(c) : c;
+    last = c;
+    return ret;
+  });
+}
+
+String f_strip_tags(const String& str, const String& allowable_tags /* = "" */) {
   return StringUtil::StripHTMLTags(str, allowable_tags);
 }
-String f_trim(CStrRef str, CStrRef charlist /* = k_HPHP_TRIM_CHARLIST */) {
-  return StringUtil::Trim(str, StringUtil::TrimBoth, charlist);
+
+template <bool left, bool right> ALWAYS_INLINE
+String stringTrim(const String& str, const String& charlist) {
+  char flags[256];
+  string_charmask(charlist.c_str(), charlist.size(), flags);
+
+  auto len = str.size();
+  int start = 0, end = len - 1;
+
+  if (left) {
+    for (; start < len && flags[(unsigned char)str[start]]; ++start)
+      /* do nothing */;
+  }
+
+  if (right) {
+    for (; end >= start && flags[(unsigned char)str[end]]; --end) {}
+  }
+
+  if (str.get()->hasExactlyOneRef()) {
+    int slen = end - start + 1;
+    if (start) {
+      char* sdata = str.get()->mutableData();
+      for (int idx = 0; start < len;) sdata[idx++] = sdata[start++];
+    }
+    str.get()->setSize(slen);
+    return str;
+  }
+
+  return str.substr(start, end - start + 1);
 }
-String f_ltrim(CStrRef str, CStrRef charlist /* = k_HPHP_TRIM_CHARLIST */) {
-  return StringUtil::Trim(str, StringUtil::TrimLeft, charlist);
+
+String f_trim(String str, const String& charlist /* = k_HPHP_TRIM_CHARLIST */) {
+  return stringTrim<true,true>(str, charlist);
 }
-String f_rtrim(CStrRef str, CStrRef charlist /* = k_HPHP_TRIM_CHARLIST */) {
-  return StringUtil::Trim(str, StringUtil::TrimRight, charlist);
+
+String f_ltrim(String str, const String& charlist /* = k_HPHP_TRIM_CHARLIST */) {
+  return stringTrim<true,false>(str, charlist);
 }
-String f_chop(CStrRef str, CStrRef charlist /* = k_HPHP_TRIM_CHARLIST */) {
-  return StringUtil::Trim(str, StringUtil::TrimRight, charlist);
+
+String f_rtrim(String str, const String& charlist /* = k_HPHP_TRIM_CHARLIST */) {
+  return stringTrim<false,true>(str, charlist);
 }
-Variant f_explode(CStrRef delimiter, CStrRef str, int limit /* = 0x7FFFFFFF */) {
+
+String f_chop(String str, const String& charlist /* = k_HPHP_TRIM_CHARLIST */) {
+  return stringTrim<false,true>(str, charlist);
+}
+
+Variant f_explode(const String& delimiter, const String& str, int limit /* = 0x7FFFFFFF */) {
   return StringUtil::Explode(str, delimiter, limit);
 }
 
-String f_implode(CVarRef arg1, CVarRef arg2 /* = null_variant */) {
+String f_implode(const Variant& arg1, const Variant& arg2 /* = null_variant */) {
   Array items;
   String delim;
-  if (arg1.is(KindOfArray)) {
-    items = arg1.toArray();
+  if (isContainer(arg1)) {
+    items = arg1;
     delim = arg2.toString();
-  } else if (arg2.is(KindOfArray)) {
-    items = arg2.toArray();
+  } else if (isContainer(arg2)) {
+    items = arg2;
     delim = arg1.toString();
   } else {
-    throw_bad_type_exception("arguments need at least one array");
+    throw_bad_type_exception("expected a container as one of the arguments");
     return String();
   }
   return StringUtil::Implode(items, delim);
 }
 
-String f_join(CVarRef glue, CVarRef pieces /* = null_variant */) {
+String f_join(const Variant& glue, const Variant& pieces /* = null_variant */) {
   return f_implode(glue, pieces);
 }
-Variant f_str_split(CStrRef str, int split_length /* = 1 */) {
+
+Variant f_str_split(const String& str, int split_length /* = 1 */) {
   return StringUtil::Split(str, split_length);
 }
-Variant f_chunk_split(CStrRef body, int chunklen /* = 76 */,
-                      CStrRef end /* = "\r\n" */) {
+
+Variant f_chunk_split(const String& body, int chunklen /* = 76 */,
+                      const String& end /* = "\r\n" */) {
   return StringUtil::ChunkSplit(body, chunklen, end);
 }
 
-class TokenizerData : public RequestEventHandler {
-public:
+struct TokenizerData final : RequestEventHandler {
   String str;
   int pos;
   int mask[256];
 
-  virtual void requestInit() {
+  void requestInit() override {
     str.reset();
     pos = 0;
     memset(&mask, 0, sizeof(mask));
   }
-  virtual void requestShutdown() {
+  void requestShutdown() override {
     requestInit();
   }
 };
 IMPLEMENT_STATIC_REQUEST_LOCAL(TokenizerData, s_tokenizer_data);
 
-Variant f_strtok(CStrRef str, CVarRef token /* = null_variant */) {
+Variant f_strtok(const String& str, const Variant& token /* = null_variant */) {
   String stoken;
   if (!token.isNull()) {
     s_tokenizer_data->str = str;
@@ -193,10 +543,13 @@ Variant f_strtok(CStrRef str, CVarRef token /* = null_variant */) {
   return ret;
 }
 
-static Variant str_replace(CVarRef search, CVarRef replace, CStrRef subject,
-                           int &count, bool caseSensitive) {
+static
+Variant str_replace(const Variant& search, const Variant& replace, const String& subject,
+                    int &count, bool caseSensitive) {
+  count = 0;
   if (search.is(KindOfArray)) {
     String ret = subject;
+    int c = 0;
 
     Array searchArr = search.toArray();
     if (replace.is(KindOfArray)) {
@@ -204,21 +557,24 @@ static Variant str_replace(CVarRef search, CVarRef replace, CStrRef subject,
       ArrayIter replIter(replArr);
       for (ArrayIter iter(searchArr); iter; ++iter) {
         if (replIter) {
-          ret = ret.replace(iter.second().toString(),
-                            replIter.second().toString(),
-                            count, caseSensitive);
+          ret = string_replace(ret, iter.second().toString(),
+                               replIter.second().toString(),
+                               c, caseSensitive);
           ++replIter;
         } else {
-          ret = ret.replace(iter.second().toString(),
-                            "", count, caseSensitive);
+          ret = string_replace(ret, iter.second().toString(),
+                               "", c, caseSensitive);
         }
+        count +=c;
       }
       return ret;
     }
 
     String repl = replace.toString();
     for (ArrayIter iter(searchArr); iter; ++iter) {
-      ret = ret.replace(iter.second().toString(), repl, count, caseSensitive);
+      ret = string_replace(ret, iter.second().toString(), repl, c,
+                           caseSensitive);
+      count += c;
     }
     return ret;
   }
@@ -226,19 +582,27 @@ static Variant str_replace(CVarRef search, CVarRef replace, CStrRef subject,
   if (replace.is(KindOfArray)) {
     raise_notice("Array to string conversion");
   }
-  return subject.replace(search.toString(), replace.toString(), count,
-                         caseSensitive);
+  return string_replace(subject, search.toString(), replace.toString(), count,
+                        caseSensitive);
 }
 
-static Variant str_replace(CVarRef search, CVarRef replace, CVarRef subject,
+static Variant str_replace(const Variant& search, const Variant& replace, const Variant& subject,
                            int &count, bool caseSensitive) {
+  count = 0;
   if (subject.is(KindOfArray)) {
     Array arr = subject.toArray();
-    Array ret;
+    Array ret = Array::Create();
+    int c;
     for (ArrayIter iter(arr); iter; ++iter) {
+      if (iter.second().is(KindOfArray) || iter.second().is(KindOfObject)) {
+        ret.set(iter.first(), iter.second());
+        continue;
+      }
+
       String replaced = str_replace(search, replace, iter.second().toString(),
-                                    count, caseSensitive);
+                                    c, caseSensitive);
       ret.set(iter.first(), replaced);
+      count += c;
     }
     return ret;
   }
@@ -246,7 +610,7 @@ static Variant str_replace(CVarRef search, CVarRef replace, CVarRef subject,
                      caseSensitive);
 }
 
-Variant f_str_replace(CVarRef search, CVarRef replace, CVarRef subject,
+Variant f_str_replace(const Variant& search, const Variant& replace, const Variant& subject,
                       VRefParam count /* = null */) {
   int nCount = 0;
   Variant ret = str_replace(search, replace, subject, nCount, true);
@@ -254,7 +618,7 @@ Variant f_str_replace(CVarRef search, CVarRef replace, CVarRef subject,
   return ret;
 }
 
-Variant f_str_ireplace(CVarRef search, CVarRef replace, CVarRef subject,
+Variant f_str_ireplace(const Variant& search, const Variant& replace, const Variant& subject,
                        VRefParam count /* = null */) {
   int nCount = 0;
   Variant ret = str_replace(search, replace, subject, nCount, false);
@@ -262,12 +626,12 @@ Variant f_str_ireplace(CVarRef search, CVarRef replace, CVarRef subject,
   return ret;
 }
 
-Variant f_substr_replace(CVarRef str, CVarRef replacement, CVarRef start,
-                         CVarRef length /* = 0x7FFFFFFF */) {
+Variant f_substr_replace(const Variant& str, const Variant& replacement, const Variant& start,
+                         const Variant& length /* = 0x7FFFFFFF */) {
   if (!str.is(KindOfArray)) {
     String repl;
     if (replacement.is(KindOfArray)) {
-      repl = replacement[0].toString();
+      repl = replacement.asCArrRef()[0].toString();
     } else {
       repl = replacement.toString();
     }
@@ -286,7 +650,8 @@ Variant f_substr_replace(CVarRef str, CVarRef replacement, CVarRef start,
       throw_invalid_argument("start and length as arrays not implemented");
       return str;
     }
-    return str.toString().replace(start.toInt32(), length.toInt32(), repl);
+    return string_replace(str.toString(), start.toInt32(), length.toInt32(),
+                          repl);
   }
 
   Array ret;
@@ -303,12 +668,13 @@ Variant f_substr_replace(CVarRef str, CVarRef replacement, CVarRef start,
          ++iter, ++startIter, ++lengthIter) {
       int nStart = startIter.second().toInt32();
       int nLength = lengthIter.second().toInt32();
-      String repl("");
+      String repl = empty_string;
       if (replIter) {
         repl = replIter.second().toString();
         ++replIter;
       }
-      ret.append(iter.second().toString().replace(nStart, nLength, repl));
+      auto s2 = string_replace(iter.second().toString(), nStart, nLength, repl);
+      ret.append(s2);
     }
   } else {
     String repl = replacement.toString();
@@ -316,60 +682,92 @@ Variant f_substr_replace(CVarRef str, CVarRef replacement, CVarRef start,
          ++iter, ++startIter, ++lengthIter) {
       int nStart = startIter.second().toInt32();
       int nLength = lengthIter.second().toInt32();
-      ret.append(iter.second().toString().replace(nStart, nLength, repl));
+      auto s2 = string_replace(iter.second().toString(), nStart, nLength, repl);
+      ret.append(s2);
     }
   }
   return ret;
 }
 
-Variant f_substr(CStrRef str, int start, int length /* = 0x7FFFFFFF */) {
+Variant f_substr(const String& str, int start, int length /* = 0x7FFFFFFF */) {
   String ret = str.substr(start, length, true);
   if (ret.isNull()) return false;
   return ret;
 }
-String f_str_pad(CStrRef input, int pad_length, CStrRef pad_string /* = " " */,
+
+String f_str_pad(const String& input, int pad_length, const String& pad_string /* = " " */,
                         int pad_type /* = k_STR_PAD_RIGHT */) {
   return StringUtil::Pad(input, pad_length, pad_string,
                          (StringUtil::PadType)pad_type);
 }
-String f_str_repeat(CStrRef input, int multiplier) {
-  return StringUtil::Repeat(input, multiplier);
-}
-Variant f_wordwrap(CStrRef str, int width /* = 75 */, CStrRef wordbreak /* = "\n" */,
-                   bool cut /* = false */) {
-  String ret = StringUtil::WordWrap(str, width, wordbreak, cut);
-  if (ret.isNull()) return false;
-  return ret;
+
+String f_str_repeat(const String& input, int multiplier) {
+  if (input.empty()) {
+    return input;
+  }
+
+  if (multiplier < 0) {
+    raise_warning("Second argument has to be greater than or equal to 0");
+    return String();
+  }
+
+  if (multiplier == 0) {
+    return String("", CopyString);
+  }
+
+  if (input.size() == 1) {
+    String ret(input.size() * multiplier, ReserveString);
+
+    memset(ret.get()->mutableData(), *input.data(), multiplier);
+    ret.get()->setSize(multiplier);
+    return ret;
+  }
+
+  StringBuffer ret(input.size() * multiplier);
+
+  while (multiplier--) {
+    ret.append(input);
+  }
+
+  return ret.detach();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant f_printf(int _argc, CStrRef format, CArrRef _argv /* = null_array */) {
+Variant f_printf(int _argc, const String& format, const Array& _argv /* = null_array */) {
   int len = 0; char *output = string_printf(format.data(), format.size(),
                                             _argv, &len);
   if (output == NULL) return false;
-  echo(output); free(output);
+  echo(output, len); free(output);
   return len;
 }
-Variant f_vprintf(CStrRef format, CArrRef args) {
+
+Variant f_vprintf(const String& format, const Array& args) {
   int len = 0; char *output = string_printf(format.data(), format.size(),
                                             args, &len);
   if (output == NULL) return false;
-  echo(output); free(output);
+  echo(output, len); free(output);
   return len;
 }
-Variant f_sprintf(int _argc, CStrRef format, CArrRef _argv /* = null_array */) {
-  char *output = string_printf(format.data(), format.size(), _argv, NULL);
+
+Variant f_sprintf(int _argc, const String& format, const Array& _argv /* = null_array */) {
+  int len = 0;
+  char *output = string_printf(format.data(), format.size(), _argv, &len);
   if (output == NULL) return false;
-  return String(output, AttachString);
-}
-Variant f_vsprintf(CStrRef format, CArrRef args) {
-  char *output = string_printf(format.data(), format.size(), args, NULL);
-  if (output == NULL) return false;
-  return String(output, AttachString);
+  return String(output, len, AttachString);
 }
 
-Variant f_sscanf(int _argc, CStrRef str, CStrRef format, CArrRef _argv /* = null_array */) {
+Variant f_vsprintf(const String& format, const Array& args) {
+  int len = 0;
+  char *output = string_printf(format.data(), format.size(), args, &len);
+  if (output == NULL) return false;
+  return String(output, len, AttachString);
+}
+
+Variant f_sscanf(int _argc,
+                 const String& str,
+                 const String& format,
+                 const Array& _argv /* = null_array */) {
   Variant ret;
   int result;
   result = string_sscanf(str.c_str(), format.c_str(), _argv.size(), ret);
@@ -392,31 +790,33 @@ String f_chr(int64_t ascii) {
   return String(buf, 1, CopyString);
 }
 
-int64_t f_ord(CStrRef str) {
+int64_t f_ord(const String& str) {
   return (int64_t)(unsigned char)str[0];
 }
 
-Variant f_money_format(CStrRef format, double number) {
+Variant f_money_format(const String& format, double number) {
   String s = StringUtil::MoneyFormat(format.c_str(), number);
   if (s.isNull()) return false;
   return s;
 }
 
 String f_number_format(double number, int decimals /* = 0 */,
-                       CStrRef dec_point /* = "." */,
-                       CStrRef thousands_sep /* = "," */) {
+                       const Variant& dec_point /* = "." */,
+                       const Variant& thousands_sep /* = "," */) {
   char ch_dec_point = '.';
   if (!dec_point.isNull()) {
-    if (dec_point.size() >= 1) {
-      ch_dec_point = dec_point[0];
+    const String& s = dec_point.toString();
+    if (s.size() >= 1) {
+      ch_dec_point = s[0];
     } else {
       ch_dec_point = 0;
     }
   }
   char ch_thousands_sep = ',';
   if (!thousands_sep.isNull()) {
-    if (thousands_sep.size() >= 1) {
-      ch_thousands_sep = thousands_sep[0];
+    const String& s = thousands_sep.toString();
+    if (s.size() >= 1) {
+      ch_thousands_sep = s[0];
     } else {
       ch_thousands_sep = 0;
     }
@@ -426,10 +826,11 @@ String f_number_format(double number, int decimals /* = 0 */,
   return String(ret, AttachString);
 }
 
-int64_t f_strcmp(CStrRef str1, CStrRef str2) {
+int64_t f_strcmp(const String& str1, const String& str2) {
   return string_strcmp(str1.data(), str1.size(), str2.data(), str2.size());
 }
-Variant f_strncmp(CStrRef str1, CStrRef str2, int len) {
+
+Variant f_strncmp(const String& str1, const String& str2, int len) {
   if (len < 0) {
     raise_warning("Length must be greater than or equal to 0");
     return false;
@@ -437,16 +838,17 @@ Variant f_strncmp(CStrRef str1, CStrRef str2, int len) {
   return string_strncmp(str1.data(), str1.size(), str2.data(), str2.size(),
                         len);
 }
-int64_t f_strnatcmp(CStrRef str1, CStrRef str2) {
+
+int64_t f_strnatcmp(const String& str1, const String& str2) {
   return string_natural_cmp(str1.data(), str1.size(), str2.data(), str2.size(),
                             false);
 }
 
-int64_t f_strcasecmp(CStrRef str1, CStrRef str2) {
+int64_t f_strcasecmp(const String& str1, const String& str2) {
   return bstrcasecmp(str1.data(), str1.size(), str2.data(), str2.size());
 }
 
-Variant f_strncasecmp(CStrRef str1, CStrRef str2, int len) {
+Variant f_strncasecmp(const String& str1, const String& str2, int len) {
   if (len < 0) {
     raise_warning("Length must be greater than or equal to 0");
     return false;
@@ -455,26 +857,33 @@ Variant f_strncasecmp(CStrRef str1, CStrRef str2, int len) {
                             len);
 }
 
-int64_t f_strnatcasecmp(CStrRef str1, CStrRef str2) {
+int64_t f_strnatcasecmp(const String& str1, const String& str2) {
   return string_natural_cmp(str1.data(), str1.size(), str2.data(), str2.size(),
                             true);
 }
 
-int64_t f_strcoll(CStrRef str1, CStrRef str2) {
+int64_t f_strcoll(const String& str1, const String& str2) {
   return strcoll(str1.c_str(), str2.c_str());
 }
 
-Variant f_substr_compare(CStrRef main_str, CStrRef str, int offset,
+Variant f_substr_compare(const String& main_str, const String& str, int offset,
                          int length /* = INT_MAX */,
                          bool case_insensitivity /* = false */) {
   int s1_len = main_str.size();
   int s2_len = str.size();
 
+  if (length <= 0) {
+    raise_warning("The length must be greater than zero");
+    return false;
+  }
+
   if (offset < 0) {
     offset = s1_len + offset;
     if (offset < 0) offset = 0;
   }
-  if (offset >= s1_len || length <= 0) {
+
+  if (offset >= s1_len) {
+    raise_warning("The start position cannot exceed initial string length");
     return false;
   }
 
@@ -489,15 +898,7 @@ Variant f_substr_compare(CStrRef main_str, CStrRef str, int offset,
   return string_ncmp(s1 + offset, str.data(), cmp_len);
 }
 
-Variant f_strrchr(CStrRef haystack, CVarRef needle) {
-  Variant ret = f_strrpos(haystack, needle);
-  if (same(ret, false)) {
-    return false;
-  }
-  return haystack.substr(ret.toInt32());
-}
-
-Variant f_strstr(CStrRef haystack, CVarRef needle,
+Variant f_strstr(const String& haystack, const Variant& needle,
                  bool before_needle /* = false */) {
   Variant ret = f_strpos(haystack, needle);
   if (same(ret, false)) {
@@ -510,7 +911,7 @@ Variant f_strstr(CStrRef haystack, CVarRef needle,
   }
 }
 
-Variant f_stristr(CStrRef haystack, CVarRef needle) {
+Variant f_stristr(const String& haystack, const Variant& needle) {
   Variant ret = f_stripos(haystack, needle);
   if (same(ret, false)) {
     return false;
@@ -518,7 +919,7 @@ Variant f_stristr(CStrRef haystack, CVarRef needle) {
   return haystack.substr(ret.toInt32());
 }
 
-Variant f_strpbrk(CStrRef haystack, CStrRef char_list) {
+Variant f_strpbrk(const String& haystack, const String& char_list) {
   if (char_list.empty()) {
     throw_invalid_argument("char_list: (empty)");
     return false;
@@ -530,11 +931,11 @@ Variant f_strpbrk(CStrRef haystack, CStrRef char_list) {
   return false;
 }
 
-Variant f_strchr(CStrRef haystack, CVarRef needle) {
+Variant f_strchr(const String& haystack, const Variant& needle) {
   return f_strstr(haystack, needle);
 }
 
-Variant f_strpos(CStrRef haystack, CVarRef needle, int offset /* = 0 */) {
+Variant f_strpos(const String& haystack, const Variant& needle, int offset /* = 0 */) {
   if (offset < 0 || offset > haystack.size()) {
     raise_warning("Offset not contained in string");
     return false;
@@ -554,7 +955,7 @@ Variant f_strpos(CStrRef haystack, CVarRef needle, int offset /* = 0 */) {
   return false;
 }
 
-Variant f_stripos(CStrRef haystack, CVarRef needle, int offset /* = 0 */) {
+Variant f_stripos(const String& haystack, const Variant& needle, int offset /* = 0 */) {
   if (offset < 0 || offset > haystack.size()) {
     raise_warning("Offset not contained in string");
     return false;
@@ -569,9 +970,40 @@ Variant f_stripos(CStrRef haystack, CVarRef needle, int offset /* = 0 */) {
   return false;
 }
 
-Variant f_strrpos(CStrRef haystack, CVarRef needle, int offset /* = 0 */) {
+static bool is_valid_strrpos_args(
+    const String& haystack,
+    const Variant& needle,
+    int offset) {
+  if (haystack.size() == 0) {
+    return false;
+  }
+  if (needle.isString() && needle.toString().size() == 0) {
+    return false;
+  }
   if (offset < -haystack.size() || offset > haystack.size()) {
     raise_warning("Offset is greater than the length of haystack string");
+    return false;
+  }
+  return true;
+}
+
+Variant f_strrchr(const String& haystack, const Variant& needle) {
+  if (haystack.size() == 0) {
+    return false;
+  }
+
+  int pos;
+  if (needle.isString() && needle.toString().size() > 0) {
+    pos = haystack.rfind(needle.toString().data()[0], false);
+  } else {
+    pos = haystack.rfind(needle.toByte(), false);
+  }
+  if (pos < 0) return false;
+  return haystack.substr(pos);
+}
+
+Variant f_strrpos(const String& haystack, const Variant& needle, int offset /* = 0 */) {
+  if (!is_valid_strrpos_args(haystack, needle, offset)) {
     return false;
   }
   int pos;
@@ -584,9 +1016,8 @@ Variant f_strrpos(CStrRef haystack, CVarRef needle, int offset /* = 0 */) {
   return false;
 }
 
-Variant f_strripos(CStrRef haystack, CVarRef needle, int offset /* = 0 */) {
-  if (offset < -haystack.size() || offset > haystack.size()) {
-    raise_warning("Offset is greater than the length of haystack string");
+Variant f_strripos(const String& haystack, const Variant& needle, int offset /* = 0 */) {
+  if (!is_valid_strrpos_args(haystack, needle, offset)) {
     return false;
   }
   int pos;
@@ -599,7 +1030,7 @@ Variant f_strripos(CStrRef haystack, CVarRef needle, int offset /* = 0 */) {
   return false;
 }
 
-Variant f_substr_count(CStrRef haystack, CStrRef needle, int offset /* = 0 */,
+Variant f_substr_count(const String& haystack, const String& needle, int offset /* = 0 */,
                        int length /* = 0x7FFFFFFF */) {
   int lenNeedle = needle.size();
   if (lenNeedle == 0) {
@@ -628,7 +1059,7 @@ Variant f_substr_count(CStrRef haystack, CStrRef needle, int offset /* = 0 */,
   return count;
 }
 
-Variant f_strspn(CStrRef str1, CStrRef str2, int start /* = 0 */,
+Variant f_strspn(const String& str1, const String& str2, int start /* = 0 */,
                  int length /* = 0x7FFFFFFF */) {
   const char *s1 = str1.data();
   const char *s2 = str2.data();
@@ -647,7 +1078,7 @@ Variant f_strspn(CStrRef str1, CStrRef str2, int start /* = 0 */,
   return length;
 }
 
-Variant f_strcspn(CStrRef str1, CStrRef str2, int start /* = 0 */,
+Variant f_strcspn(const String& str1, const String& str2, int start /* = 0 */,
                   int length /* = 0x7FFFFFFF */) {
   const char *s1 = str1.data();
   const char *s2 = str2.data();
@@ -666,7 +1097,7 @@ Variant f_strcspn(CStrRef str1, CStrRef str2, int start /* = 0 */,
   return length;
 }
 
-Variant f_strlen(CVarRef vstr) {
+Variant f_strlen(const Variant& vstr) {
   auto const cell = vstr.asCell();
   switch (cell->m_type) {
   case KindOfString:
@@ -675,18 +1106,42 @@ Variant f_strlen(CVarRef vstr) {
   case KindOfArray:
     raise_warning("strlen() expects parameter 1 to be string, array given");
     return uninit_null();
+  case KindOfResource:
+    raise_warning("strlen() expects parameter 1 to be string, resource given");
+    return uninit_null();
   case KindOfObject:
     if (!f_method_exists(vstr, "__toString")) {
       raise_warning("strlen() expects parameter 1 to be string, object given");
       return uninit_null();
     } //else fallback to default
   default:
-    CStrRef str = vstr.toString();
+    const String& str = vstr.toString();
     return Variant(str.size());
   }
 }
 
-Variant f_count_chars(CStrRef str, int64_t mode /* = 0 */) {
+Array f_str_getcsv(const String& str,
+                   const String& delimiter /* = "," */,
+                   const String& enclosure /* = "\"" */,
+                   const String& escape /* = "\\" */) {
+  if (str.empty()) {
+    return Array::Create(null_variant);
+  }
+
+  auto check_arg = [](const String& arg, char default_arg) {
+    return arg.size() > 0 ? arg[0] : default_arg;
+  };
+
+  char delimiter_char = check_arg(delimiter, ',');
+  char enclosure_char = check_arg(enclosure, '"');
+  char escape_char = check_arg(escape, '\\');
+
+  auto dummy = NEWOBJ(PlainFile)();
+  auto wrapper = Resource(dummy);
+  return dummy->readCSV(0, delimiter_char, enclosure_char, escape_char, &str);
+}
+
+Variant f_count_chars(const String& str, int64_t mode /* = 0 */) {
   int chars[256];
   memset((void*)chars, 0, sizeof(chars));
   const unsigned char *buf = (const unsigned char *)str.data();
@@ -733,7 +1188,7 @@ Variant f_count_chars(CStrRef str, int64_t mode /* = 0 */) {
     return String(retstr, retlen, CopyString);
   }
 
-  throw_invalid_argument("mode: %d", mode);
+  throw_invalid_argument("mode: %" PRId64, mode);
   return false;
 }
 
@@ -748,8 +1203,8 @@ Variant f_count_chars(CStrRef str, int64_t mode /* = 0 */) {
  * string containing alphabetic characters, which also may contain, but not
  * start with "'" and "-" characters.
  */
-Variant f_str_word_count(CStrRef str, int64_t format /* = 0 */,
-                         CStrRef charlist /* = "" */) {
+Variant f_str_word_count(const String& str, int64_t format /* = 0 */,
+                         const String& charlist /* = "" */) {
   int str_len = str.size();
   switch (format) {
   case 1:
@@ -764,7 +1219,7 @@ Variant f_str_word_count(CStrRef str, int64_t format /* = 0 */,
     }
     break;
   default:
-    throw_invalid_argument("format: %d", format);
+    throw_invalid_argument("format: %" PRId64, format);
     return false;
   }
 
@@ -822,13 +1277,13 @@ Variant f_str_word_count(CStrRef str, int64_t format /* = 0 */,
   return ret.isNull() ? Array::Create() : ret;
 }
 
-int64_t f_levenshtein(CStrRef str1, CStrRef str2, int cost_ins /* = 1 */,
+int64_t f_levenshtein(const String& str1, const String& str2, int cost_ins /* = 1 */,
                          int cost_rep /* = 1 */, int cost_del /* = 1 */) {
   return string_levenshtein(str1.data(), str1.size(), str2.data(), str2.size(),
                             cost_ins, cost_rep, cost_del);
 }
 
-int64_t f_similar_text(CStrRef first, CStrRef second,
+int64_t f_similar_text(const String& first, const String& second,
                        VRefParam percent /* = uninit_null() */) {
   float p;
   int ret = string_similar_text(first.data(), first.size(),
@@ -837,12 +1292,12 @@ int64_t f_similar_text(CStrRef first, CStrRef second,
   return ret;
 }
 
-Variant f_soundex(CStrRef str) {
+Variant f_soundex(const String& str) {
   if (str.empty()) return false;
   return String(string_soundex(str.c_str()), AttachString);
 }
 
-Variant f_metaphone(CStrRef str, int phones /* = 0 */) {
+Variant f_metaphone(const String& str, int phones /* = 0 */) {
   char *ret = string_metaphone(str.data(), str.size(), 0, 1);
   if (ret) {
     return String(ret, AttachString);
@@ -850,77 +1305,89 @@ Variant f_metaphone(CStrRef str, int phones /* = 0 */) {
   return false;
 }
 
-String f_html_entity_decode(CStrRef str, int quote_style /* = k_ENT_COMPAT */,
-                            CStrRef charset /* = "ISO-8859-1" */) {
+String f_html_entity_decode(const String& str, int flags /* = k_ENT_COMPAT */,
+                            const String& charset /* = "UTF-8" */) {
   const char *scharset = charset.data();
-  if (!*scharset) scharset = "UTF-8";
-  return StringUtil::HtmlDecode(str, (StringUtil::QuoteStyle)quote_style,
+  if (!*scharset) scharset = "ISO-8859-1";
+  return StringUtil::HtmlDecode(str, StringUtil::toQuoteStyle(flags),
                                 scharset, true);
 }
 
-String f_htmlentities(CStrRef str, int quote_style /* = k_ENT_COMPAT */,
-                      CStrRef charset /* = "ISO-8859-1" */,
+String f_htmlentities(const String& str, int flags /* = k_ENT_COMPAT */,
+                      const String& charset /* = "UTF-8" */,
                       bool double_encode /* = true */) {
-  // dropping double_encode parameters and see runtime/base/zend_html.h
+  // dropping double_encode parameters and see runtime/base/zend-html.h
   const char *scharset = charset.data();
-  if (!*scharset) scharset = "UTF-8";
-  return StringUtil::HtmlEncode(str, (StringUtil::QuoteStyle)quote_style,
-                                scharset, true);
+  if (!*scharset) scharset = "ISO-8859-1";
+  return StringUtil::HtmlEncode(str, StringUtil::toQuoteStyleBitmask(flags),
+                                scharset, double_encode, true);
 }
-String f_htmlspecialchars_decode(CStrRef str,
-                                 int quote_style /* = k_ENT_COMPAT */) {
-  return StringUtil::HtmlDecode(str, (StringUtil::QuoteStyle)quote_style,
+
+String f_htmlspecialchars_decode(const String& str,
+                                 int flags /* = k_ENT_COMPAT */) {
+  return StringUtil::HtmlDecode(str, StringUtil::toQuoteStyle(flags),
                                 "UTF-8", false);
 }
-String f_htmlspecialchars(CStrRef str, int quote_style /* = k_ENT_COMPAT */,
-                          CStrRef charset /* = "ISO-8859-1" */,
+
+String f_htmlspecialchars(const String& str, int flags /* = k_ENT_COMPAT */,
+                          const String& charset /* = "UTF-8" */,
                           bool double_encode /* = true */) {
-  // dropping double_encode parameters and see runtime/base/zend_html.h
+  // dropping double_encode parameters and see runtime/base/zend-html.h
   const char *scharset = charset.data();
-  if (!*scharset) scharset = "UTF-8";
-  return StringUtil::HtmlEncode(str, (StringUtil::QuoteStyle)quote_style,
-                                scharset, false);
+  if (!*scharset) scharset = "ISO-8859-1";
+  return StringUtil::HtmlEncode(str, StringUtil::toQuoteStyleBitmask(flags),
+                                scharset, double_encode, false);
 }
-String f_fb_htmlspecialchars(CStrRef str, int quote_style /* = k_ENT_COMPAT */,
-                             CStrRef charset /* = "ISO-8859-1" */,
-                             CArrRef extra /* = Array() */) {
-  return StringUtil::HtmlEncodeExtra(str, (StringUtil::QuoteStyle)quote_style,
+
+String f_fb_htmlspecialchars(const String& str, int flags /* = k_ENT_COMPAT */,
+                             const String& charset /* = "ISO-8859-1" */,
+                             const Array& extra /* = Array() */) {
+  return StringUtil::HtmlEncodeExtra(str, StringUtil::toQuoteStyle(flags),
                                      charset.data(), false, extra);
 }
-String f_quoted_printable_encode(CStrRef str) {
+
+String f_quoted_printable_encode(const String& str) {
   return StringUtil::QuotedPrintableEncode(str);
 }
-String f_quoted_printable_decode(CStrRef str) {
+
+String f_quoted_printable_decode(const String& str) {
   return StringUtil::QuotedPrintableDecode(str);
 }
-Variant f_convert_uudecode(CStrRef data) {
+
+Variant f_convert_uudecode(const String& data) {
   String ret = StringUtil::UUDecode(data);
   if (ret.isNull()) {
     return false; // bad format
   }
   return ret;
 }
-Variant f_convert_uuencode(CStrRef data) {
+
+Variant f_convert_uuencode(const String& data) {
   if (data.empty()) return false;
   return StringUtil::UUEncode(data);
 }
-String f_str_rot13(CStrRef str) {
+
+String f_str_rot13(const String& str) {
   return StringUtil::ROT13(str);
 }
-int64_t f_crc32(CStrRef str) {
+
+int64_t f_crc32(const String& str) {
   return (uint32_t)StringUtil::CRC32(str);
 }
-String f_crypt(CStrRef str, CStrRef salt /* = "" */) {
+
+String f_crypt(const String& str, const String& salt /* = "" */) {
   return StringUtil::Crypt(str, salt.c_str());
 }
-String f_md5(CStrRef str, bool raw_output /* = false */) {
+
+String f_md5(const String& str, bool raw_output /* = false */) {
   return StringUtil::MD5(str, raw_output);
 }
-String f_sha1(CStrRef str, bool raw_output /* = false */) {
+
+String f_sha1(const String& str, bool raw_output /* = false */) {
   return StringUtil::SHA1(str, raw_output);
 }
 
-Variant f_strtr(CStrRef str, CVarRef from, CVarRef to /* = null_variant */) {
+Variant f_strtr(const String& str, const Variant& from, const Variant& to /* = null_variant */) {
   if (str.empty()) {
     return str;
   }
@@ -961,13 +1428,13 @@ Variant f_strtr(CStrRef str, CVarRef from, CVarRef to /* = null_variant */) {
       maxlen = slen - pos;
     }
     bool found = false;
-    memcpy(key.mutableSlice().ptr, s + pos, maxlen);
+    memcpy(key.bufferSlice().ptr, s + pos, maxlen);
     for (int len = maxlen; len >= minlen; len--) {
       key.setSize(len);
       if (arr.exists(key)) {
         String replace = arr[key].toString();
         if (!replace.empty()) {
-          result += replace;
+          result.append(replace);
         }
         pos += len;
         found = true;
@@ -975,18 +1442,23 @@ Variant f_strtr(CStrRef str, CVarRef from, CVarRef to /* = null_variant */) {
       }
     }
     if (!found) {
-      result += s[pos++];
+      result.append(s[pos++]);
     }
   }
   return result.detach();
 }
 
-void f_parse_str(CStrRef str, VRefParam arr /* = null */) {
-  arr = Array::Create();
-  HttpProtocol::DecodeParameters(arr, str.data(), str.size());
+void f_parse_str(const String& str, VRefParam arr /* = null */) {
+  Array result = Array::Create();
+  HttpProtocol::DecodeParameters(result, str.data(), str.size());
+  if (!arr.isReferenced()) {
+    HHVM_FN(extract)(result);
+    return;
+  }
+  arr = result;
 }
 
-Variant f_setlocale(int _argc, int category, CVarRef locale, CArrRef _argv /* = null_array */) {
+Variant f_setlocale(int _argc, int category, const Variant& locale, const Array& _argv /* = null_array */) {
   Array argv = _argv;
   if (locale.is(KindOfArray)) {
     if (!argv.empty()) throw_invalid_argument("locale: not string)");
@@ -1021,24 +1493,25 @@ Variant f_setlocale(int _argc, int category, CVarRef locale, CArrRef _argv /* = 
   return false;
 }
 
-static const StaticString s_decimal_point("decimal_point");
-static const StaticString s_thousands_sep("thousands_sep");
-static const StaticString s_int_curr_symbol("int_curr_symbol");
-static const StaticString s_currency_symbol("currency_symbol");
-static const StaticString s_mon_decimal_point("mon_decimal_point");
-static const StaticString s_mon_thousands_sep("mon_thousands_sep");
-static const StaticString s_positive_sign("positive_sign");
-static const StaticString s_negative_sign("negative_sign");
-static const StaticString s_int_frac_digits("int_frac_digits");
-static const StaticString s_frac_digits("frac_digits");
-static const StaticString s_p_cs_precedes("p_cs_precedes");
-static const StaticString s_p_sep_by_space("p_sep_by_space");
-static const StaticString s_n_cs_precedes("n_cs_precedes");
-static const StaticString s_n_sep_by_space("n_sep_by_space");
-static const StaticString s_p_sign_posn("p_sign_posn");
-static const StaticString s_n_sign_posn("n_sign_posn");
-static const StaticString s_grouping("grouping");
-static const StaticString s_mon_grouping("mon_grouping");
+const StaticString
+  s_decimal_point("decimal_point"),
+  s_thousands_sep("thousands_sep"),
+  s_int_curr_symbol("int_curr_symbol"),
+  s_currency_symbol("currency_symbol"),
+  s_mon_decimal_point("mon_decimal_point"),
+  s_mon_thousands_sep("mon_thousands_sep"),
+  s_positive_sign("positive_sign"),
+  s_negative_sign("negative_sign"),
+  s_int_frac_digits("int_frac_digits"),
+  s_frac_digits("frac_digits"),
+  s_p_cs_precedes("p_cs_precedes"),
+  s_p_sep_by_space("p_sep_by_space"),
+  s_n_cs_precedes("n_cs_precedes"),
+  s_n_sep_by_space("n_sep_by_space"),
+  s_p_sign_posn("p_sign_posn"),
+  s_n_sign_posn("n_sign_posn"),
+  s_grouping("grouping"),
+  s_mon_grouping("mon_grouping");
 
 Array f_localeconv() {
   struct lconv currlocdata;
@@ -1091,7 +1564,7 @@ String f_nl_langinfo(int item) {
   return nl_langinfo(item);
 }
 
-String f_convert_cyr_string(CStrRef str, CStrRef from, CStrRef to) {
+String f_convert_cyr_string(const String& str, const String& from, const String& to) {
   char ch_from = from[0];
   char ch_to = to[0];
   char *ret = string_convert_cyrillic_string(str.data(), str.size(),
@@ -1099,63 +1572,131 @@ String f_convert_cyr_string(CStrRef str, CStrRef from, CStrRef to) {
   return String(ret, str.size(), AttachString);
 }
 
+
+const StaticString
+  s_amp("&"),
+  s_ampsemi("&amp;");
+
+
 #define ENT_HTML_QUOTE_NONE     0
 #define ENT_HTML_QUOTE_SINGLE   1
 #define ENT_HTML_QUOTE_DOUBLE   2
 
-static const HtmlBasicEntity basic_entities[] = {
+static const HtmlBasicEntity basic_entities_noapos[] = {
   { '"',  "&quot;",   6,  ENT_HTML_QUOTE_DOUBLE },
   { '\'', "&#039;",   6,  ENT_HTML_QUOTE_SINGLE },
-  { '\'', "&#39;",    5,  ENT_HTML_QUOTE_SINGLE },
   { '<',  "&lt;",     4,  0 },
   { '>',  "&gt;",     4,  0 },
-  { 0, NULL, 0, 0 }
+  { 0,    nullptr,    0,  0 }
 };
 
-static const StaticString s_amp("&");
-static const StaticString s_ampsemi("&amp;");
+static const HtmlBasicEntity basic_entities_apos[] = {
+  { '"',  "&quot;",   6,  ENT_HTML_QUOTE_DOUBLE },
+  { '\'', "&apos;",   6,  ENT_HTML_QUOTE_SINGLE },
+  { '<',  "&lt;",     4,  0 },
+  { '>',  "&gt;",     4,  0 },
+  { 0,     nullptr,   0,  0 }
+};
 
-Array f_get_html_translation_table(int table /* = 0 */, int quote_style /* = k_ENT_COMPAT */) {
-  static entity_charset charset = determine_charset(nullptr); // get default one
+const HtmlBasicEntity* get_basic_table(bool all, entity_doctype doctype) {
+  if (doctype == entity_doctype::xhtml) {
+    return all ? basic_entities_noapos : basic_entities_apos;
+  }
 
-  assert(charset != entity_charset_enum::cs_unknown);
+  if (doctype == entity_doctype::html401) {
+    return basic_entities_noapos;
+  }
+
+  return basic_entities_apos;
+}
+
+#define ENT_HTML_DOC_TYPE_MASK  (16|32)
+#define ENT_HTML_DOC_HTML401    0
+#define ENT_HTML_DOC_XML1       16
+#define ENT_HTML_DOC_XHTML      32
+#define ENT_HTML_DOC_HTML5      (16|32)
+
+entity_doctype determine_doctype(int flags) {
+  int mask = flags & ENT_HTML_DOC_TYPE_MASK;
+  switch (mask) {
+    case ENT_HTML_DOC_HTML401: return entity_doctype::html401;
+    case ENT_HTML_DOC_XML1: return entity_doctype::xml1;
+    case ENT_HTML_DOC_XHTML: return entity_doctype::xhtml;
+    case ENT_HTML_DOC_HTML5: return entity_doctype::html5;
+  }
+  not_reached();
+}
+
+String encode_as_utf8(int code_point) {
+  auto res = folly::codePointToUtf8(code_point);
+  return String::FromCStr(res.data());
+}
+
+Array f_get_html_translation_table(int table /* = 0 */,
+                                   int flags /* = k_ENT_COMPAT */,
+                                   const String& encoding /* = "UTF-8" */) {
+  using namespace entity_charset_enum;
+  auto charset = determine_charset(encoding.data());
+  if (charset == cs_unknown) {
+    charset = cs_utf_8;
+    if (!encoding.empty()) {
+      raise_warning("get_html_translation_table(): charset `%s' not supported"
+                    ", assuming utf-8", encoding.data());
+    }
+  }
+  auto doctype = determine_doctype(flags);
 
   const int HTML_SPECIALCHARS = 0;
   const int HTML_ENTITIES = 1;
-
-  using namespace entity_charset_enum;
+  bool all = (table == HTML_ENTITIES);
 
   Array ret;
   switch (table) {
   case HTML_ENTITIES: {
-    auto entity_map = html_get_entity_map();
+    if (charset == cs_utf_8) {
+      auto entity_map = get_doctype_entity_table(doctype);
+      for (const auto& item : *entity_map) {
+        auto key = encode_as_utf8(item.first);
 
-    for (int j = 0; entity_map[j].charset != cs_terminator; j++) {
-      const html_entity_map &em = entity_map[j];
-      if (em.charset != charset)
-        continue;
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "&%s;", item.second.c_str());
+        ret.set(key, String(buffer, CopyString));
+      }
+      if (doctype == entity_doctype::html5) {
+        for (const auto& item: *get_multicode_table()) {
+          auto codes = item.first;
+          String key = encode_as_utf8(codes.first);
+          key += encode_as_utf8(codes.second);
 
-      for (int i = 0; i <= em.endchar - em.basechar; i++) {
-        char buffer[16];
+          char buffer[32];
+          snprintf(buffer, sizeof(buffer), "&%s", item.second.c_str());
+          ret.set(key, String(buffer, CopyString));
+        }
+      }
+    } else {
+      const auto& entity_map = get_doctype_entity_table(doctype);
+      auto charset_table = get_charset_table(charset);
+      for (const auto& item : *charset_table) {
+        const auto iter = entity_map->find(item.second);
+        if (iter != entity_map->end()) {
+          char buffer[16];
+          snprintf(buffer, sizeof(buffer), "&%s;", iter->second.c_str());
 
-        if (em.table[i] == NULL)
-          continue;
-        /* what about wide chars here ?? */
-        snprintf(buffer, sizeof(buffer), "&%s;", em.table[i]);
-        ret.set(String::FromChar(i + em.basechar),
-                String(buffer, CopyString));
+          auto key = String::FromChar(item.first);
+          ret.set(key, String(buffer, CopyString));
+        }
       }
     }
     /* fall thru */
   }
   case HTML_SPECIALCHARS:
-    for (int j = 0; basic_entities[j].charcode != 0; j++) {
-      if (basic_entities[j].flags &&
-          (quote_style & basic_entities[j].flags) == 0)
+    const auto& basic_table = get_basic_table(all, doctype);
+    for (int j = 0; basic_table[j].charcode != 0; j++) {
+      const auto& item = basic_table[j];
+      if (item.flags && (flags & item.flags) == 0)
         continue;
 
-      ret.set(String::FromChar(basic_entities[j].charcode),
-              basic_entities[j].entity);
+      ret.set(String::FromChar(item.charcode), item.entity);
     }
     ret.set(s_amp, s_ampsemi);
     break;
@@ -1164,20 +1705,14 @@ Array f_get_html_translation_table(int table /* = 0 */, int quote_style /* = k_E
   return ret;
 }
 
-String f_hebrev(CStrRef hebrew_text, int max_chars_per_line /* = 0 */) {
+String f_hebrev(const String& hebrew_text, int max_chars_per_line /* = 0 */) {
   if (hebrew_text.empty()) return hebrew_text;
-  int len = hebrew_text.size();
-  char *ret = string_convert_hebrew_string(hebrew_text.data(), len,
-                                           max_chars_per_line, false);
-  return String(ret, len, AttachString);
+  return string_convert_hebrew_string(hebrew_text, max_chars_per_line, false);
 }
 
-String f_hebrevc(CStrRef hebrew_text, int max_chars_per_line /* = 0 */) {
+String f_hebrevc(const String& hebrew_text, int max_chars_per_line /* = 0 */) {
   if (hebrew_text.empty()) return hebrew_text;
-  int len = hebrew_text.size();
-  char *ret = string_convert_hebrew_string(hebrew_text.data(), len,
-                                           max_chars_per_line, true);
-  return String(ret, len, AttachString);
+  return string_convert_hebrew_string(hebrew_text, max_chars_per_line, true);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,19 +18,22 @@
 #include "hphp/compiler/expression/array_element_expression.h"
 #include "hphp/compiler/expression/object_property_expression.h"
 #include "hphp/compiler/expression/unary_op_expression.h"
-#include "hphp/util/parser/hphp.tab.hpp"
+#include "hphp/parser/hphp.tab.hpp"
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/constant_expression.h"
-#include "hphp/runtime/base/complex_types.h"
-#include "hphp/runtime/base/type_conversions.h"
-#include "hphp/runtime/base/builtin_functions.h"
+#include "hphp/compiler/code_model_enums.h"
+#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/comparisons.h"
-#include "hphp/runtime/base/zend/zend_string.h"
+#include "hphp/runtime/base/zend-string.h"
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/expression/encaps_list_expression.h"
 #include "hphp/compiler/expression/simple_function_call.h"
 #include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/compiler/statement/loop_statement.h"
+#include "hphp/runtime/base/tv-arith.h"
+#include "hphp/runtime/vm/runtime.h"
 
 using namespace HPHP;
 
@@ -64,17 +67,22 @@ BinaryOpExpression::BinaryOpExpression
     break;
   case T_COLLECTION: {
     std::string s = m_exp1->getLiteralString();
-    int cType = 0;
+    Collection::Type cType = Collection::InvalidType;
     if (strcasecmp(s.c_str(), "vector") == 0) {
       cType = Collection::VectorType;
-    } else if (strcasecmp(s.c_str(), "map") == 0) {
+    } else if (strcasecmp(s.c_str(), "map") == 0 ||
+               strcasecmp(s.c_str(), "stablemmap") == 0) {
       cType = Collection::MapType;
-    } else if (strcasecmp(s.c_str(), "stablemap") == 0) {
-      cType = Collection::StableMapType;
     } else if (strcasecmp(s.c_str(), "set") == 0) {
       cType = Collection::SetType;
     } else if (strcasecmp(s.c_str(), "pair") == 0) {
       cType = Collection::PairType;
+    } else if (strcasecmp(s.c_str(), "immvector") == 0) {
+      cType = Collection::ImmVectorType;
+    } else if (strcasecmp(s.c_str(), "immmap") == 0) {
+      cType = Collection::ImmMapType;
+    } else if (strcasecmp(s.c_str(), "immset") == 0) {
+      cType = Collection::ImmSetType;
     }
     ExpressionListPtr el = static_pointer_cast<ExpressionList>(m_exp2);
     el->setCollectionType(cType);
@@ -242,10 +250,10 @@ int BinaryOpExpression::getKidCount() const {
 void BinaryOpExpression::setNthKid(int n, ConstructPtr cp) {
   switch (n) {
   case 0:
-    m_exp1 = boost::dynamic_pointer_cast<Expression>(cp);
+    m_exp1 = dynamic_pointer_cast<Expression>(cp);
     break;
   case 1:
-    m_exp2 = boost::dynamic_pointer_cast<Expression>(cp);
+    m_exp2 = dynamic_pointer_cast<Expression>(cp);
     break;
   default:
     assert(false);
@@ -475,6 +483,9 @@ ExpressionPtr BinaryOpExpression::foldConst(AnalysisResultConstPtr ar) {
               ExpressionPtr aExp = m_exp1;
               ExpressionPtr bExp = binOpExp->m_exp1;
               ExpressionPtr cExp = binOpExp->m_exp2;
+              if (aExp->isArray() || bExp->isArray() || cExp->isArray()) {
+                break;
+              }
               m_exp1 = binOpExp = Clone(binOpExp);
               m_exp2 = cExp;
               binOpExp->m_exp1 = aExp;
@@ -521,66 +532,110 @@ ExpressionPtr BinaryOpExpression::foldConst(AnalysisResultConstPtr ar) {
         }
       }
       Variant result;
+      auto add = RuntimeOption::IntsOverflowToInts ? cellAdd : cellAddO;
+      auto sub = RuntimeOption::IntsOverflowToInts ? cellSub : cellSubO;
+      auto mul = RuntimeOption::IntsOverflowToInts ? cellMul : cellMulO;
+
       switch (m_op) {
         case T_LOGICAL_XOR:
-          result = logical_xor(v1, v2); break;
+          result = static_cast<bool>(v1.toBoolean() ^ v2.toBoolean());
+          break;
         case '|':
-          result = bitwise_or(v1, v2); break;
+          *result.asCell() = cellBitOr(*v1.asCell(), *v2.asCell());
+          break;
         case '&':
-          result = bitwise_and(v1, v2); break;
+          *result.asCell() = cellBitAnd(*v1.asCell(), *v2.asCell());
+          break;
         case '^':
-          result = bitwise_xor(v1, v2); break;
+          *result.asCell() = cellBitXor(*v1.asCell(), *v2.asCell());
+          break;
         case '.':
-          result = concat(v1, v2); break;
+          if (v1.isArray() || v2.isArray()) {
+            return ExpressionPtr();
+          }
+          result = concat(v1.toString(), v2.toString());
+          break;
         case T_IS_IDENTICAL:
-          result = same(v1, v2); break;
+          result = same(v1, v2);
+          break;
         case T_IS_NOT_IDENTICAL:
-          result = !same(v1, v2); break;
+          result = !same(v1, v2);
+          break;
         case T_IS_EQUAL:
-          result = equal(v1, v2); break;
+          result = equal(v1, v2);
+          break;
         case T_IS_NOT_EQUAL:
-          result = !equal(v1, v2); break;
+          result = !equal(v1, v2);
+          break;
         case '<':
-          result = less(v1, v2); break;
+          result = less(v1, v2);
+          break;
         case T_IS_SMALLER_OR_EQUAL:
-          result = less_or_equal(v1, v2); break;
+          result = cellLessOrEqual(*v1.asCell(), *v2.asCell());
+          break;
         case '>':
-          result = more(v1, v2); break;
+          result = more(v1, v2);
+          break;
         case T_IS_GREATER_OR_EQUAL:
-          result = more_or_equal(v1, v2); break;
+          result = cellGreaterOrEqual(*v1.asCell(), *v2.asCell());
+          break;
         case '+':
-          result = plus(v1, v2); break;
+          *result.asCell() = add(*v1.asCell(), *v2.asCell());
+          break;
         case '-':
-          result = minus(v1, v2); break;
+          *result.asCell() = sub(*v1.asCell(), *v2.asCell());
+          break;
         case '*':
-          result = multiply(v1, v2); break;
+          *result.asCell() = mul(*v1.asCell(), *v2.asCell());
+          break;
         case '/':
           if ((v2.isIntVal() && v2.toInt64() == 0) || v2.toDouble() == 0.0) {
             return ExpressionPtr();
           }
-          result = divide(v1, v2); break;
+          *result.asCell() = cellDiv(*v1.asCell(), *v2.asCell());
+          break;
         case '%':
           if ((v2.isIntVal() && v2.toInt64() == 0) || v2.toDouble() == 0.0) {
             return ExpressionPtr();
           }
-          result = modulo(v1, v2); break;
+          *result.asCell() = cellMod(*v1.asCell(), *v2.asCell());
+          break;
         case T_SL:
-          result = shift_left(v1, v2); break;
+          result = v1.toInt64() << v2.toInt64();
+          break;
         case T_SR:
-          result = shift_right(v1, v2); break;
+          result = v1.toInt64() >> v2.toInt64();
+          break;
         case T_BOOLEAN_OR:
-          result = v1 || v2; break;
+          result = v1.toBoolean() || v2.toBoolean(); break;
         case T_BOOLEAN_AND:
-          result = v1 && v2; break;
+          result = v1.toBoolean() && v2.toBoolean(); break;
         case T_LOGICAL_OR:
-          result = v1 || v2; break;
+          result = v1.toBoolean() || v2.toBoolean(); break;
         case T_LOGICAL_AND:
-          result = v1 && v2; break;
+          result = v1.toBoolean() && v2.toBoolean(); break;
         case T_INSTANCEOF: {
-          if (v1.isArray() && v2.isString() &&
-              interface_supports_array(v2.getStringData())) {
-            result = true;
-            break;
+          if (v2.isString()) {
+            if (v1.isArray() &&
+                interface_supports_array(v2.getStringData())) {
+              result = true;
+              break;
+            }
+            if (v1.isString() &&
+                interface_supports_string(v2.getStringData())) {
+              result = true;
+              break;
+            }
+            if (v1.isInteger() &&
+                interface_supports_int(v2.getStringData())) {
+              result = true;
+              break;
+            }
+            if (v1.isDouble() &&
+                interface_supports_double(v2.getStringData())) {
+              result = true;
+              break;
+            }
           }
           result = false;
           break;
@@ -764,7 +819,7 @@ TypePtr BinaryOpExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
   case T_COLLECTION:
     et1 = Type::Any;
     et2 = Type::Any;
-    rt = Type::Object;
+    rt = Type::CreateObjectType(m_exp1->getLiteralString());
     break;
   default:
     assert(false);
@@ -874,6 +929,80 @@ TypePtr BinaryOpExpression::inferTypes(AnalysisResultPtr ar, TypePtr type,
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
+void BinaryOpExpression::outputCodeModel(CodeGenerator &cg) {
+  if (m_op == T_COLLECTION) {
+    cg.printObjectHeader("CollectionInitializerExpression", 3);
+    cg.printPropertyHeader("class");
+    cg.printTypeExpression(m_exp1);
+    cg.printPropertyHeader("arguments");
+    cg.printExpressionVector(static_pointer_cast<ExpressionList>(m_exp2));
+    cg.printPropertyHeader("sourceLocation");
+    cg.printLocation(this->getLocation());
+    cg.printObjectFooter();
+    return;
+  }
+
+  cg.printObjectHeader("BinaryOpExpression", 4);
+  cg.printPropertyHeader("expression1");
+  m_exp1->outputCodeModel(cg);
+  cg.printPropertyHeader("expression2");
+  if (m_op == T_INSTANCEOF) {
+    cg.printTypeExpression(m_exp2);
+  } else {
+    m_exp2->outputCodeModel(cg);
+  }
+  cg.printPropertyHeader("operation");
+
+  int op = 0;
+  switch (m_op) {
+    case T_PLUS_EQUAL: op = PHP_PLUS_ASSIGN; break;
+    case T_MINUS_EQUAL: op = PHP_MINUS_ASSIGN; break;
+    case T_MUL_EQUAL: op = PHP_MULTIPLY_ASSIGN; break;
+    case T_DIV_EQUAL: op = PHP_DIVIDE_ASSIGN; break;
+    case T_CONCAT_EQUAL: op = PHP_CONCAT_ASSIGN; break;
+    case T_MOD_EQUAL:  op = PHP_MODULUS_ASSIGN;  break;
+    case T_AND_EQUAL: op = PHP_AND_ASSIGN; break;
+    case T_OR_EQUAL: op = PHP_OR_ASSIGN;  break;
+    case T_XOR_EQUAL: op = PHP_XOR_ASSIGN; break;
+    case T_SL_EQUAL: op = PHP_SHIFT_LEFT_ASSIGN; break;
+    case T_SR_EQUAL: op = PHP_SHIFT_RIGHT_ASSIGN; break;
+    case T_BOOLEAN_OR: op = PHP_BOOLEAN_OR;  break;
+    case T_BOOLEAN_AND: op = PHP_BOOLEAN_AND; break;
+    case T_LOGICAL_OR: op = PHP_LOGICAL_OR; break;
+    case T_LOGICAL_AND: op = PHP_LOGICAL_AND;  break;
+    case T_LOGICAL_XOR: op = PHP_LOGICAL_XOR; break;
+    case '|': op = PHP_OR; break;
+    case '&': op = PHP_AND;  break;
+    case '^': op = PHP_XOR; break;
+    case '.': op = PHP_CONCAT; break;
+    case '+': op = PHP_PLUS; break;
+    case '-': op = PHP_MINUS; break;
+    case '*': op = PHP_MULTIPLY; break;
+    case '/': op = PHP_DIVIDE; break;
+    case '%': op = PHP_MODULUS; break;
+    case T_SL: op = PHP_SHIFT_LEFT; break;
+    case T_SR: op = PHP_SHIFT_RIGHT; break;
+    case T_IS_IDENTICAL: op = PHP_IS_IDENTICAL; break;
+    case T_IS_NOT_IDENTICAL: op = PHP_IS_NOT_IDENTICAL; break;
+    case T_IS_EQUAL: op = PHP_IS_EQUAL; break;
+    case T_IS_NOT_EQUAL: op = PHP_IS_NOT_EQUAL; break;
+    case '<': op = PHP_IS_SMALLER; break;
+    case T_IS_SMALLER_OR_EQUAL: op = PHP_IS_SMALLER_OR_EQUAL; break;
+    case '>': op = PHP_IS_GREATER; break;
+    case T_IS_GREATER_OR_EQUAL: op = PHP_IS_GREATER_OR_EQUAL;  break;
+    case T_INSTANCEOF: op = PHP_INSTANCEOF;  break;
+    default:
+      assert(false);
+  }
+
+  cg.printValue(op);
+  cg.printPropertyHeader("sourceLocation");
+  cg.printLocation(this->getLocation());
+  cg.printObjectFooter();
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 
 void BinaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
@@ -953,4 +1082,3 @@ bool BinaryOpExpression::isOpEqual() {
   }
   return false;
 }
-

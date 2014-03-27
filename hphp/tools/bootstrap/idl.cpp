@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,9 +19,17 @@
 #include <fstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <algorithm>
+#include <string>
 
 #include "folly/Format.h"
 #include "folly/json.h"
+
+#ifdef __APPLE__
+#define INT64_TYPE "long long"
+#else
+#define INT64_TYPE "long"
+#endif
 
 namespace HPHP { namespace IDL {
 /////////////////////////////////////////////////////////////////////////////
@@ -40,7 +48,7 @@ static const std::unordered_map<fbstring, DataType> g_kindOfMap =
   {"StringMap",   KindOfArray},
   {"VariantMap",  KindOfArray},
   {"Object",      KindOfObject},
-  {"Resource",    KindOfObject},
+  {"Resource",    KindOfResource},
   {"Variant",     KindOfAny},
   {"Numeric",     KindOfAny},
   {"Primitive",   KindOfAny},
@@ -54,11 +62,12 @@ static const std::unordered_map<int, fbstring> g_typeMap =
   {(int)KindOfInvalid,     "void"},
   {(int)KindOfNull,        "HPHP::Variant"},
   {(int)KindOfBoolean,     "bool"},
-  {(int)KindOfInt64,       "long"},
+  {(int)KindOfInt64,       INT64_TYPE},
   {(int)KindOfDouble,      "double"},
   {(int)KindOfString,      "HPHP::String"},
   {(int)KindOfArray,       "HPHP::Array"},
   {(int)KindOfObject,      "HPHP::Object"},
+  {(int)KindOfResource,    "HPHP::Resource"},
   {(int)KindOfAny,         "HPHP::Variant"},
 };
 
@@ -67,16 +76,21 @@ static const std::unordered_map<int, fbstring> g_phpTypeMap =
   {(int)KindOfInvalid,     "void"},
   {(int)KindOfNull,        "void"},
   {(int)KindOfBoolean,     "bool"},
-  {(int)KindOfInt64,       "long"},
+  {(int)KindOfInt64,       INT64_TYPE},
   {(int)KindOfDouble,      "double"},
   {(int)KindOfString,      "String"},
   {(int)KindOfArray,       "Array"},
   {(int)KindOfObject,      "Object"},
+  {(int)KindOfResource,    "Resource"},
   {(int)KindOfAny,         "mixed"},
 };
 
 static const std::unordered_map<fbstring, FuncFlags> g_flagsMap =
 {
+  {"ZendParamModeNull",              ZendParamModeNull},
+  {"ZendParamModeFalse",             ZendParamModeFalse},
+  {"CppCustomDelete",                CppCustomDelete},
+  {"ZendCompat",                     ZendCompat},
   {"IsAbstract",                     IsAbstract},
   {"IsFinal",                        IsFinal},
   {"IsPublic",                       IsPublic},
@@ -86,9 +100,8 @@ static const std::unordered_map<fbstring, FuncFlags> g_flagsMap =
   {"IsStatic",                       IsStatic},
   {"IsCppAbstract",                  IsCppAbstract},
   {"IsReference",                    IsReference},
-  {"IsConstructor",                  IsConstructor},
   {"IsNothing",                      IsNothing},
-  {"HasDocComment",                  HasDocComment},
+  {"IsCppSerializable",              IsCppSerializable},
   {"HipHopSpecific",                 HipHopSpecific},
   {"VariableArguments",              VariableArguments},
   {"RefVariableArguments",           RefVariableArguments},
@@ -103,7 +116,7 @@ static const std::unordered_map<fbstring, FuncFlags> g_flagsMap =
   {"NoDefaultSweep",                 NoDefaultSweep},
   {"IsSystem",                       IsSystem},
   {"IsTrait",                        IsTrait},
-  {"NeedsActRec",                    NeedsActRec},
+  {"NoFCallBuiltin",                 NoFCallBuiltin},
 };
 
 static const std::unordered_set<fbstring> g_knownStringConstants =
@@ -122,6 +135,13 @@ static DataType kindOfFromDynamic(const folly::dynamic& t) {
   if (!t.isString()) {
     return KindOfInvalid;
   }
+
+  // If you hit this assert, the IDL contains "type": "Array"; you need to
+  // use one of {Int64,String,Variant}{Vec,Map} instead.
+  //
+  // These are still KindOfArray, not the HH types.
+  assert(t.asString() != "Array");
+
   auto it = g_kindOfMap.find(t.asString());
   if (it == g_kindOfMap.end()) {
     return KindOfObject;
@@ -210,6 +230,7 @@ static const std::unordered_map<fbstring,fbstring> g_serializedDefaults = {
   {"null_string",       "N;"},
   {"null_array",        "N;"},
   {"null_object",       "N;"},
+  {"null_resource",     "N;"},
   {"null_variant",      "N;"},
   {"INT_MAX",           "i:2147483647;"}, // (1 << 31) - 1
 };
@@ -222,9 +243,46 @@ static const std::unordered_map<fbstring,fbstring> g_phpDefaults = {
   {"null_string",       "null"},
   {"null_array",        "null"},
   {"null_object",       "null"},
+  {"null_resource",     "null"},
   {"null_variant",      "null"},
   {"INT_MAX",           "null"},
 };
+
+static fbstring unescapeString(fbstring val) {
+  fbstring s = "";
+  for (int i = 0; i < val.size(); ) {
+    int ch = val[i++];
+    if (ch == '\\') {
+      if (i == val.size()) {
+        throw std::logic_error(
+          folly::format("Malformed string: '{0}'", val).str());
+      }
+      ch = val[i++];
+      switch (ch) {
+        case 'n': ch = '\n'; break;
+        case 'r': ch = '\r'; break;
+        case 't': ch = '\t'; break;
+        case '/':
+        case '"':
+        case '\'':
+        case '\\':break;
+        case '0':
+          ch = 0;
+          if (i == val.size() ||
+              (!isdigit(val[i]) && val[i] != 'x' && val[i] != 'X')) {
+            break;
+          }
+          // fall through
+        default:
+          throw std::logic_error(
+            folly::format("Malformed string: '{0}'", val).str());
+          break;
+      }
+    }
+    s += (char)ch;
+  }
+  return s;
+}
 
 /**
  * From idl/base.php:get_serialized_default()
@@ -274,7 +332,8 @@ fbstring PhpParam::getDefaultSerialized() const {
 
   // Quoted string:  "foo"
   if ((val.size() >= 2) && (val[0] == '"') && (val[val.size()-1] == '"')) {
-    return phpSerialize(val.substr(1, val.size() - 2));
+    auto s = unescapeString(val.substr(1, val.size() - 2));
+    return phpSerialize(s);
   }
 
   // Integers and Floats
@@ -419,6 +478,8 @@ fbstring phpSerialize(const folly::dynamic& d) {
   return "N;";
 }
 
+static auto NAMESPACE_STRING = "\\";
+
 static fbstring getFollyDynamicDefaultString(const folly::dynamic& d,
                                              const fbstring& key,
                                              const fbstring& def) {
@@ -431,6 +492,24 @@ static fbstring getFollyDynamicDefaultString(const folly::dynamic& d,
     return def;
   }
   return val.asString();
+}
+
+static fbstring toPhpName(fbstring idlName) {
+  fbstring phpName = idlName;
+  return phpName;
+}
+
+/*
+ * Strip an idl name of any namespaces.
+ */
+static fbstring toCppName(fbstring idlName) {
+  fbstring cppName;
+
+  size_t endNs = idlName.find_last_of(NAMESPACE_STRING);
+  cppName = (std::string::npos == endNs) ? idlName : idlName.substr(endNs + 1);
+  assert(!cppName.empty());
+
+  return cppName;
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -481,10 +560,12 @@ PhpConst::PhpConst(const folly::dynamic& cns,
 // PhpParam
 
 PhpParam::PhpParam(const folly::dynamic& param,
-                   bool isMagicMethod /*= false */) :
+                   bool isMagicMethod /*= false */,
+                   ParamMode paramMode /*= CoerceAndCall */) :
     m_name(param["name"].asString()),
     m_param(param),
-    m_desc(getFollyDynamicDefaultString(param, "desc", "")) {
+    m_desc(getFollyDynamicDefaultString(param, "desc", "")),
+    m_paramMode(paramMode) {
   if (isMagicMethod) {
     m_kindOf = KindOfAny;
     m_cppType = "HPHP::Variant";
@@ -523,6 +604,9 @@ bool PhpParam::defValueNeedsVariable() const {
   if ((cppKindOf == KindOfObject) && (defVal == "null_object")) {
     return false;
   }
+  if ((cppKindOf == KindOfResource) && (defVal == "null_resource")) {
+    return false;
+  }
   if ((cppKindOf == KindOfAny) && (defVal == "null_variant")) {
     return false;
   }
@@ -535,7 +619,9 @@ bool PhpParam::defValueNeedsVariable() const {
 
 PhpFunc::PhpFunc(const folly::dynamic& d,
                  const fbstring& className) :
-    m_name(d["name"].asString()),
+    m_idlName(d["name"].asString()),
+    m_phpName(toPhpName(m_idlName)),
+    m_cppName(toCppName(m_idlName)),
     m_className(className),
     m_func(d),
     m_desc(getFollyDynamicDefaultString(d, "desc", "")),
@@ -545,6 +631,14 @@ PhpFunc::PhpFunc(const folly::dynamic& d,
     m_returnPhpType("void"),
     m_minNumParams(0),
     m_numTypeChecks(0) {
+
+  if (isMethod() &&
+      m_idlName.find_last_of(NAMESPACE_STRING) != std::string::npos) {
+    throw std::logic_error(
+      folly::format("'{0}' is a method and cannot have a namespace in its name",
+                    m_idlName).str()
+    );
+  }
   auto returnIt = d.find("return");
   if (returnIt != d.items().end()) {
     auto retNode = returnIt->second;
@@ -563,7 +657,7 @@ PhpFunc::PhpFunc(const folly::dynamic& d,
   auto args = d.find("args");
   if (args == d.items().end() || !args->second.isArray()) {
     throw std::logic_error(
-      folly::format("'{0}' must have an array field 'args'", name()).str()
+      folly::format("'{0}' must have an array field 'args'", m_idlName).str()
     );
   }
   auto ret = d.find("return");
@@ -571,13 +665,23 @@ PhpFunc::PhpFunc(const folly::dynamic& d,
       ret->second.find("type") == ret->second.items().end()) {
     throw std::logic_error(
       folly::format("'{0}' must have an array field 'return', which must have "
-                    "a string field 'type'", name()).str()
+                    "a string field 'type'", m_idlName).str()
     );
   }
 
   bool magic = isMagicMethod();
+
+  m_flags = parseFlags(m_func["flags"]);
+
+  ParamMode paramMode = ParamMode::CoerceAndCall;
+  if (m_flags & ZendParamModeNull) {
+    paramMode = ParamMode::ZendNull;
+  } else if (m_flags & ZendParamModeFalse) {
+    paramMode = ParamMode::ZendFalse;
+  }
+
   for (auto &p : args->second) {
-    PhpParam param(p, magic);
+    PhpParam param(p, magic, paramMode);
     m_params.push_back(param);
     if (!param.hasDefault()) {
       ++m_minNumParams;
@@ -586,14 +690,12 @@ PhpFunc::PhpFunc(const folly::dynamic& d,
       ++m_numTypeChecks;
     }
   }
-
-  m_flags = parseFlags(m_func["flags"]);
 }
 
 fbstring PhpFunc::getCppSig() const {
   std::ostringstream out;
 
-  fbstring nm = name();
+  fbstring nm = getCppName();
   fbstring lowername = nm;
   std::transform(nm.begin(), nm.end(), lowername.begin(),
                  std::ptr_fun<int, int>(std::tolower));
@@ -650,7 +752,9 @@ PhpProp::PhpProp(const folly::dynamic& d, fbstring cls) :
 
 PhpClass::PhpClass(const folly::dynamic &c) :
   m_class(c),
-  m_name(c["name"].asString()),
+  m_idlName(c["name"].asString()),
+  m_phpName(toPhpName(m_idlName)),
+  m_cppName(toCppName(m_idlName)),
   m_flags(parseFlags(m_class["flags"])),
   m_desc(getFollyDynamicDefaultString(c, "desc", "")) {
 
@@ -659,7 +763,8 @@ PhpClass::PhpClass(const folly::dynamic &c) :
     auto ifaces = ifacesIt->second;
     if (!ifaces.isArray()) {
       throw std::logic_error(
-        folly::format("Class {0}.ifaces field must be an array", m_name).str()
+        folly::format("Class {0}.ifaces field must be an array",
+          m_idlName).str()
       );
     }
     for (auto &interface : ifaces) {
@@ -668,20 +773,20 @@ PhpClass::PhpClass(const folly::dynamic &c) :
   }
 
   for (auto const& f : c["funcs"]) {
-    PhpFunc func(f, m_name);
+    PhpFunc func(f, getCppName());
     m_methods.push_back(func);
   }
 
   if (c.find("consts") != c.items().end()) {
     for (auto const& cns : c["consts"]) {
-      PhpConst cons(cns, m_name);
+      PhpConst cons(cns, getCppName());
       m_constants.push_back(cons);
     }
   }
 
   if (c.find("properties") != c.items().end()) {
     for (auto const& prp : c["properties"]) {
-      PhpProp prop(prp, m_name);
+      PhpProp prop(prp, getCppName());
       m_properties.push_back(prop);
     }
   }
@@ -692,7 +797,8 @@ PhpClass::PhpClass(const folly::dynamic &c) :
 void parseIDL(const char* idlFilePath,
               fbvector<PhpFunc>& funcVec,
               fbvector<PhpClass>& classVec,
-              fbvector<PhpConst>& constVec) {
+              fbvector<PhpConst>& constVec,
+              fbvector<PhpExtension>& extVec) {
   std::ostringstream jsonString;
   std::ifstream infile(idlFilePath);
   infile >> jsonString.rdbuf();
@@ -711,13 +817,19 @@ void parseIDL(const char* idlFilePath,
     PhpConst cns(c);
     constVec.push_back(cns);
   }
+  auto it = parsed.find("extension");
+  if (it != parsed.items().end()) {
+    PhpExtension ext(it->second);
+    extVec.push_back(ext);
+  }
 }
 
 void parseIDL(const char* idlFilePath,
               fbvector<PhpFunc>& funcVec,
               fbvector<PhpClass>& classVec) {
   fbvector<PhpConst> consts; // dummy
-  parseIDL(idlFilePath, funcVec, classVec, consts);
+  fbvector<PhpExtension> exts; // dummy
+  parseIDL(idlFilePath, funcVec, classVec, consts, exts);
 }
 
 /////////////////////////////////////////////////////////////////////////////

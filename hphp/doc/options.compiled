@@ -84,7 +84,6 @@ flood error logs.
     CallUserHandlerOnFatals = true
     MaxLoopCount = 0
     NoInfiniteRecursionDetection = false
-    MaxStackDepth = 1000
     ThrowBadTypeExceptions = false
     ThrowTooManyArguments = false
     WarnTooManyArguments = false
@@ -107,7 +106,6 @@ flood error logs.
     MaxRSSPollingCycle = 0    # in seconds, how often to check max memory
     DropCacheCycle = 0        # in seconds, how often to drop disk cache
     MaxSQLRowCount = 0
-    MaxMemcacheKeyCount = 0
     SerializationSizeLimit = 0
     StringOffsetLimit = 10 * 1024 * 1024
   }
@@ -130,6 +128,7 @@ flood error logs.
     Host = www.default_domain.com
     IP = 0.0.0.0
     Port = 80
+    Type = libevent | fastcgi
     ThreadCount = 50
     ThreadRoundRobin = false   # last thread serves next
     ThreadDropCacheTimeoutSeconds = 0
@@ -152,14 +151,6 @@ flood error logs.
     # maximum memory size for image processing
     ImageMemoryMaxBytes = Upload.UploadMaxFileSize * 2
 
-    # Recommended to turn this on to avoid memory leaks and to enable the
-    # RequestInitDocument and RequestInitFunction features.
-    EnableMemoryManager = false
-
-    # Only for debugging memory problems. When turned on, server will report
-    # SmartAllocator's usage for each thread to stdout.
-    CheckMemory = false
-
     # If ServerName is not specified for a virtual host, use prefix + this
     # suffix to compose one. If "Pattern" was specified, matched pattern,
     # either by parentheses for the first match or without parentheses for
@@ -168,6 +159,9 @@ flood error logs.
 
     # Forcing $_SERVER['SERVER_NAME'] to come from request header
     ForceServerNameToHeader = false
+    
+    # Print file paths traversed onto the 404 page
+    PathDebug = false
 
     # startup options
     TakeoverFilename = filename   # for port takeover between server instances
@@ -248,13 +242,12 @@ to use for sending.
 
     # static contents
     FileCache = filename
-    EnableStaticContentCache = true
     EnableStaticContentFromDisk = true
     ExpiresActive = true
     ExpiresDefault = 2592000
     DefaultCharsetName = UTF-8
 
-- EnableStaticContentCache, EnableStaticContentFromDisk
+- EnableStaticContentFromDisk
 
 A static content cache creates one single file from all static contents,
 including css, js, html, images and any other non-PHP files (or even PHP files,
@@ -288,15 +281,6 @@ used for PHP responses in case no other charset has been set explicitly.
 
     APC {
       EnableApc = true
-      UseSharedMemory = false
-      SharedMemorySize = 1024  # in MB
-
-- UseSharedMemory
-
-When off, APC will use regular process memory for faster access, but only
-limited to single process. Shared memory model allows sharing between two or
-more processes, but it has SharedMemorySize as upper limit.
-
       PrimeLibrary = filename
       LoadThread = 2
       CompletionKeys {
@@ -390,6 +374,7 @@ These are experimental LFU settings.
       Prefix = prefix.
       Pattern = regex pattern
       PathTranslation = html
+      CheckExistenceBeforeRewrite = true
       ServerName =
       ServerVariables {
         name = value
@@ -436,6 +421,12 @@ These are experimental LFU settings.
       }
     }
   }
+
+- CheckExistenceBeforeRewrite
+
+With this setting, rewrite rules will not be applied for files that exist in
+the original path. This is the default behavior. Set this to false if one wants
+to block access to certain files (ex. .htaccess.)
 
 = Administration Server
 
@@ -587,8 +578,6 @@ next requests.
     Malloc = false
     APC = false
     APCKey = false
-    Memcache = false
-    MemcacheKey = false
     SQL = false
     SQLTable = false
     NetworkIO = false
@@ -630,9 +619,6 @@ next requests.
     CoreDumpEmail = email address
     CoreDumpReport = true
     CoreDumpReportDirectory = /tmp
-
-    LocalMemcache = false
-    MemcacheReadOnly = false
   }
 
 - FullBacktrace, ServerStackTrace, ServerErrorMessage, TranslateSource
@@ -691,6 +677,23 @@ will look like this,
 "path" points to PHP source files. "log" points to error log location and
 "accesslog" points to access log location.
 
+== Debugger Configuration
+
+By default, HHVM does not listen for connections from the HipHop
+Debugger (hphpd). To enable this you need to first setup the sandbox
+environment described above, then add the following to your config:
+
+  Eval.Debugger {
+    EnableDebugger = true
+    EnableDebuggerServer = true
+    Port = 8089
+    DefaultSandboxPath = path to source files, similar to Server.SourceRoot
+  }
+
+This will cause HHVM to start a debugger server, and you should see an
+entry in the log indicating the debugger server has started before the
+entry about all servers having been started.
+
 - Machine Sharing
 
 The benefit is, same server can have one "Sandbox" configuration, and many
@@ -699,6 +702,8 @@ users can use the same machine serving their own source files.
 = HPHPi Settings
 
   Eval {
+    CheckSymLink = true
+
     EnableHipHopSyntax = false
     EnableHipHopExperimentalSyntax = false
 
@@ -725,6 +730,13 @@ users can use the same machine serving their own source files.
       }
     }
 
+    TimeoutsUseWallTime = true
+    CheckFlushOnUserClose = true
+
+    # Causes HHVM to disallow constructs that are unavailable when Repo.Authoritative
+    # is active, without requiring you to run in Repo.Authoritative.
+    AuthoritativeMode = true
+
     # experimental, please ignore
     BytecodeInterpreter = false
     DumpBytecode = false
@@ -732,17 +744,36 @@ users can use the same machine serving their own source files.
     CodeCoverageOutputFile =
   }
 
+- CheckSymLink
+
+Determines whether or not to follow symlinks (and, from a performance
+standpoint, make the associated realpath() calls needed) when resolving
+includes/requires and loading code. This is enabled by default for parity with
+the reference implementation. If not needed for a particular application and/or
+configuration, disable this when tuning.
+
+- TimeoutsUseWallTime
+
+Determines whether or not to interpret set_time_limit timeouts as wall time or
+CPU time (which the reference implementation uses.) Defaults to wall time.
+
+- CheckFlushOnUserClose
+
+Determines whether or not close() for user streams (registered by
+stream_wrapper_register) will consider the return value of the implicit call to
+flush() when calculating its return value.
+
 = MySQL
 
   MySQL {
     ReadOnly = false
-    Localize = false           # true for native driver that's faster
     ConnectTimeout = 1000      # in ms
     ReadTimeout = 1000         # in ms
     WaitTimeout = -1           # in ms, -1 means "don't set"
     SlowQueryThreshold = 1000  # in ms, log slow queries as errors
     KillOnTimeout = false
     Socket =                   # Default location to look for mysql.sock
+    TypedResults = true
   }
 
 - KillOnTimeout
@@ -750,6 +781,11 @@ users can use the same machine serving their own source files.
 When a query takes long time to execute on server, client has a chance to
 kill it to avoid extra server cost by turning on KillOnTimeout.
 
+- TypedResults
+
+Zend returns strings and NULL only for MySQL results, not integers or floats.
+HHVM return ints (and, sometimes, actual doubles). This behavior can be
+disabled by setting TypedResults to false.
 
 = HTTP Monitoring
 
@@ -786,3 +822,19 @@ kill it to avoid extra server cost by turning on KillOnTimeout.
 This feature allows a machine to overwrite configurations just by matching
 machine names with specified regex pattern. This block of configuration can
 appear at any location of the file, even at top.
+
+= PHP File Extensions
+
+By default any file with .php in the URL is treated as PHP source code and is
+passed through to the execution engine for processing. This configuration option
+allows other file extensions to be treated similarly. Note that .php is
+automatically treated as such and does not need to be specified in this list.
+
+    PhpFile {
+        Extensions {
+            phpt = application/x-phpt
+            hphp = application/x-hhvm-php
+        }
+    }
+
+The content type is not used and is just for descriptive purposes.

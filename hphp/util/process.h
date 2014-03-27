@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,8 +17,13 @@
 #ifndef incl_HPHP_PROCESS_H_
 #define incl_HPHP_PROCESS_H_
 
-#include "hphp/util/base.h"
+#include <string>
+#include <vector>
+#include <cstdio>
+
+#include <sys/types.h>
 #include <sys/syscall.h>
+#include <unistd.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -65,11 +70,6 @@ public:
   static std::string GetAppName();
 
   /**
-   * Current executable's version.
-   */
-  static std::string GetAppVersion();
-
-  /**
    * This machine'a name.
    */
   static std::string GetHostName();
@@ -113,6 +113,21 @@ public:
    */
   static pthread_t GetThreadId() {
     return pthread_self();
+  }
+
+  /**
+   * Current thread's identifier.
+   */
+  static uint64_t GetThreadIdForTrace() {
+    // For tracing purposes this just needs to be unique, pthread_t is not
+    // portable but even if it's a pointer to a struct like on OSX this will
+    // produce a unique value. If we support platforms where this isn't the
+    // case we will need to revisit this.
+#ifdef __linux__
+    return pthread_self();
+#else
+    return (uint64_t)pthread_self();
+#endif
   }
 
   /*

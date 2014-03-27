@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,20 +13,21 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#include "gtest/gtest.h"
-#include "hphp/hhvm/process_init.h"
+#include <gtest/gtest.h>
+#include "hphp/hhvm/process-init.h"
+#include "hphp/util/current-executable.h"
 
 #include <string>
 
 int main(int argc, char** argv) {
-  char buf[PATH_MAX];
-  if (realpath("/proc/self/exe", buf)) {
+  std::string buf = HPHP::current_executable_path();
+  if (!buf.empty()) {
+    size_t idx = buf.length();
     for (int i = 0; i < 4; i++) {
-      char* p = strrchr(buf, '/');
-      assert(p);
-      *p = 0;
+      idx = buf.find_last_of('/', idx - 1);
+      assert(idx != std::string::npos);
     }
-    std::string slib = buf;
+    std::string slib = buf.substr(0, idx);
     slib += "/ext_hhvm/systemlib.php";
     setenv("HHVM_SYSTEMLIB", slib.c_str(), true);
   }

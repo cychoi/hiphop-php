@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,10 +15,11 @@
 */
 
 #include "hphp/test/ext/test_ext_server.h"
+#include <vector>
 #include "hphp/runtime/ext/ext_server.h"
-#include "hphp/runtime/base/server/pagelet_server.h"
-#include "hphp/runtime/base/server/xbox_server.h"
-#include "hphp/runtime/base/runtime_option.h"
+#include "hphp/runtime/server/pagelet-server.h"
+#include "hphp/runtime/server/xbox-server.h"
+#include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/ext/ext_file.h"
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -39,7 +40,6 @@ bool TestExtServer::RunTests(const std::string &which) {
   XboxServer::Restart();
 
   RUN_TEST(test_dangling_server_proxy_old_request);
-  RUN_TEST(test_dangling_server_proxy_new_request);
   RUN_TEST(test_pagelet_server_task_start);
   RUN_TEST(test_pagelet_server_task_status);
   RUN_TEST(test_pagelet_server_task_result);
@@ -55,10 +55,6 @@ bool TestExtServer::RunTests(const std::string &which) {
 ///////////////////////////////////////////////////////////////////////////////
 
 bool TestExtServer::test_dangling_server_proxy_old_request() {
-  return Count(true);
-}
-
-bool TestExtServer::test_dangling_server_proxy_new_request() {
   return Count(true);
 }
 
@@ -82,13 +78,13 @@ bool TestExtServer::test_pagelet_server_task_result() {
   String baseheader("MyHeader: ");
   String basepost("postparam=");
 
-  std::vector<Object> tasks;
+  std::vector<Resource> tasks;
   for (int i = 0; i < TEST_SIZE; ++i) {
     String url = baseurl + String(i);
     String header = baseheader + String(i);
     String post = basepost + String(i);
-    Object task = f_pagelet_server_task_start(url, CREATE_VECTOR1(header),
-                                              post);
+    Resource task = f_pagelet_server_task_start(url, make_packed_array(header),
+                                                post);
     tasks.push_back(task);
   }
 
@@ -116,7 +112,7 @@ bool TestExtServer::test_pagelet_server_task_result() {
     VS(expected, f_pagelet_server_task_result(tasks[i], ref(headers),
                                               ref(code), 0));
     VS(code, 200);
-    VS(headers[1], "ResponseHeader: okay");
+    VS(headers.toArray()[1], "ResponseHeader: okay");
 
     VS(expected, f_pagelet_server_task_result(tasks[i], ref(headers),
                                               ref(code), 1));
@@ -134,8 +130,8 @@ bool TestExtServer::test_xbox_send_message() {
     s_response("response");
   Variant ret;
   VERIFY(f_xbox_send_message("hello", ref(ret), 5000));
-  VS(ret[s_code], 200);
-  VS(ret[s_response], "olleh");
+  VS(ret.toArray()[s_code], 200);
+  VS(ret.toArray()[s_response], "olleh");
   return Count(true);
 }
 
@@ -155,7 +151,7 @@ bool TestExtServer::test_xbox_task_status() {
 }
 
 bool TestExtServer::test_xbox_task_result() {
-  Object task = f_xbox_task_start("hello");
+  Resource task = f_xbox_task_start("hello");
   f_xbox_task_status(task);
   Variant ret;
   VS(f_xbox_task_result(task, 0, ref(ret)), 200);

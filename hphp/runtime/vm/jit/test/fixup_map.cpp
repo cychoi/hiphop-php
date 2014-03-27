@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,10 +15,10 @@
 */
 #include "hphp/runtime/vm/jit/fixup.h"
 
-#include "gtest/gtest.h"
-#include "hphp/hhvm/process_init.h"
+#include <gtest/gtest.h>
+#include "hphp/hhvm/process-init.h"
 
-namespace HPHP { namespace Transl {
+namespace HPHP { namespace JIT {
 
 //////////////////////////////////////////////////////////////////////
 
@@ -42,10 +42,10 @@ void* writer(void* that) {
 
 void* reader(void* that) {
   FixupMap* m = (FixupMap*)that;
-  const StringData* sd = StringData::GetStaticString("test");
+  const StringData* sd = makeStaticString("test");
   // ar2: a mock actrec, requires a Func, which can't be builtin.
   Unit u;
-  Func f(u, 1, 1, 1, 0, 0, sd, AttrNone, true, nullptr, 0, false);
+  Func f(u, 1, nullptr, 1, 1, 0, 0, sd, AttrNone, true, nullptr, 0);
   ActRec ar2;
   ar2.m_savedRip = 0xdeadbeef;
   ar2.m_savedRbp = 0;
@@ -59,7 +59,7 @@ void* reader(void* that) {
     while (!m->getFrameRegs(&ar1, 0, &vmr)) {
       // Has to succeed eventually.
     }
-    assert(vmr.m_pc == u.entry() + i * kPcMul);
+    assert(vmr.m_pc == reinterpret_cast<const Op*>(u.entry() + i * kPcMul));
     assert(vmr.m_fp == &ar2);
     assert(vmr.m_sp == (TypedValue*)&ar2 - i * kSpMul);
   }

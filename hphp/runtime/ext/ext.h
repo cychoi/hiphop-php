@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -20,21 +20,15 @@
 #ifndef incl_EXT_LIST_EXT_H_
 #define incl_EXT_LIST_EXT_H_
 
-#include "hphp/runtime/ext/ext_apache.h"
 #include "hphp/runtime/ext/ext_apc.h"
-#include "hphp/runtime/ext/ext_apd.h"
 #include "hphp/runtime/ext/ext_array.h"
 #include "hphp/runtime/ext/ext_asio.h"
-#include "hphp/runtime/ext/ext_bcmath.h"
-#include "hphp/runtime/ext/ext_bzip2.h"
 #include "hphp/runtime/ext/ext_class.h"
 #include "hphp/runtime/ext/ext_closure.h"
 #include "hphp/runtime/ext/ext_collections.h"
 #include "hphp/runtime/ext/ext_continuation.h"
-#include "hphp/runtime/ext/ext_ctype.h"
-#include "hphp/runtime/ext/ext_curl.h"
 #include "hphp/runtime/ext/ext_datetime.h"
-#include "hphp/runtime/ext/ext_debugger.h"
+#include "hphp/runtime/ext/debugger/ext_debugger.h"
 #include "hphp/runtime/ext/ext_domdocument.h"
 #include "hphp/runtime/ext/ext_error.h"
 #include "hphp/runtime/ext/ext_fb.h"
@@ -44,16 +38,9 @@
 #include "hphp/runtime/ext/ext_hash.h"
 #include "hphp/runtime/ext/ext_iconv.h"
 #include "hphp/runtime/ext/ext_icu.h"
-#include "hphp/runtime/ext/ext_icu_ucnv.h"
-#include "hphp/runtime/ext/ext_icu_ucsdet.h"
-#include "hphp/runtime/ext/ext_icu_uspoof.h"
-#include "hphp/runtime/ext/ext_image.h"
 #include "hphp/runtime/ext/ext_imap.h"
-#include "hphp/runtime/ext/ext_intl.h"
 #include "hphp/runtime/ext/ext_ipc.h"
-#include "hphp/runtime/ext/ext_json.h"
 #include "hphp/runtime/ext/ext_ldap.h"
-#include "hphp/runtime/ext/ext_magick.h"
 #include "hphp/runtime/ext/ext_mailparse.h"
 #include "hphp/runtime/ext/ext_math.h"
 #include "hphp/runtime/ext/ext_mb.h"
@@ -61,32 +48,28 @@
 #include "hphp/runtime/ext/ext_memcache.h"
 #include "hphp/runtime/ext/ext_memcached.h"
 #include "hphp/runtime/ext/ext_misc.h"
-#include "hphp/runtime/ext/ext_mysql.h"
 #include "hphp/runtime/ext/ext_network.h"
 #include "hphp/runtime/ext/ext_openssl.h"
-#include "hphp/runtime/ext/ext_options.h"
 #include "hphp/runtime/ext/ext_output.h"
 #include "hphp/runtime/ext/ext_pdo.h"
 #include "hphp/runtime/ext/ext_posix.h"
-#include "hphp/runtime/ext/ext_preg.h"
 #include "hphp/runtime/ext/ext_process.h"
-#include "hphp/runtime/ext/ext_reflection.h"
 #include "hphp/runtime/ext/ext_server.h"
-#include "hphp/runtime/ext/ext_session.h"
+#include "hphp/runtime/ext/session/ext_session.h"
 #include "hphp/runtime/ext/ext_simplexml.h"
 #include "hphp/runtime/ext/ext_soap.h"
 #include "hphp/runtime/ext/ext_socket.h"
 #include "hphp/runtime/ext/ext_spl.h"
 #include "hphp/runtime/ext/ext_sqlite3.h"
-#include "hphp/runtime/ext/ext_stream.h"
+#include "hphp/runtime/ext/stream/ext_stream.h"
 #include "hphp/runtime/ext/ext_string.h"
 #include "hphp/runtime/ext/ext_thread.h"
 #include "hphp/runtime/ext/ext_thrift.h"
-#include "hphp/runtime/ext/ext_url.h"
-#include "hphp/runtime/ext/ext_variable.h"
 #include "hphp/runtime/ext/ext_xml.h"
 #include "hphp/runtime/ext/ext_xmlreader.h"
 #include "hphp/runtime/ext/ext_xmlwriter.h"
-#include "hphp/runtime/ext/ext_zlib.h"
+#include "hphp/runtime/ext/ext_xsltprocessor.h"
+#include "hphp/runtime/ext/gd/ext_image.h"
+#include "hphp/runtime/ext/mysql/ext_mysql.h"
 
 #endif // incl_EXT_LIST_EXT_H_

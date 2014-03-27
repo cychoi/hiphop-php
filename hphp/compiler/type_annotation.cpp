@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,8 @@
 */
 
 #include "hphp/compiler/type_annotation.h"
-#include "hphp/util/util.h"
+#include <vector>
+#include "hphp/util/text-util.h"
 
 namespace HPHP {
 
@@ -31,25 +32,27 @@ TypeAnnotation::TypeAnnotation(const std::string &name,
                                 m_tuple(false),
                                 m_function(false),
                                 m_xhp(false),
-                                m_typevar(false) {}
+                                m_typevar(false) { }
 
-const std::string TypeAnnotation::simpleName() const {
+std::string TypeAnnotation::vanillaName() const {
   // filter out types that should not be exposed to the runtime
   if (m_nullable || m_soft || m_typevar || m_function) {
     return "";
   }
-  if (!m_name.compare("mixed") || !m_name.compare("this")) {
+  if (!strcasecmp(m_name.c_str(), "HH\\mixed") ||
+      !strcasecmp(m_name.c_str(), "this")) {
     return "";
   }
   return m_name;
 }
 
-const std::string TypeAnnotation::fullName() const {
+std::string TypeAnnotation::fullName() const {
   std::string name;
+  if (m_soft) {
+    name += '@';
+  }
   if (m_nullable) {
     name += '?';
-  } else if (m_soft) {
-    name += '@';
   }
 
   if (m_function) {
@@ -64,6 +67,41 @@ const std::string TypeAnnotation::fullName() const {
     name += m_name;
   }
   return name;
+}
+
+DataType TypeAnnotation::dataType(bool expectedType /*= false */) const {
+  if (m_function || m_xhp || m_tuple) {
+    return KindOfObject;
+  }
+  if (m_typeArgs) {
+    return !strcasecmp(m_name.c_str(), "array") ? KindOfArray : KindOfObject;
+  }
+  if (!expectedType && (m_nullable || m_soft)) {
+    return KindOfUnknown;
+  }
+  if (!strcasecmp(m_name.c_str(), "null") ||
+      !strcasecmp(m_name.c_str(), "void")) {
+    return KindOfNull;
+  }
+  if (!strcasecmp(m_name.c_str(), "HH\\bool"))     return KindOfBoolean;
+  if (!strcasecmp(m_name.c_str(), "HH\\int"))      return KindOfInt64;
+  if (!strcasecmp(m_name.c_str(), "HH\\float"))    return KindOfDouble;
+  if (!strcasecmp(m_name.c_str(), "HH\\num"))      return KindOfUnknown;
+  if (!strcasecmp(m_name.c_str(), "HH\\string"))   return KindOfString;
+  if (!strcasecmp(m_name.c_str(), "array"))        return KindOfArray;
+  if (!strcasecmp(m_name.c_str(), "HH\\resource")) return KindOfResource;
+  if (!strcasecmp(m_name.c_str(), "HH\\mixed"))    return KindOfUnknown;
+
+  return KindOfObject;
+}
+
+void TypeAnnotation::getAllSimpleNames(std::vector<std::string>& names) const {
+  names.push_back(m_name);
+  if (m_typeList) {
+    m_typeList->getAllSimpleNames(names);
+  } else if (m_typeArgs) {
+    m_typeArgs->getAllSimpleNames(names);
+  }
 }
 
 void TypeAnnotation::functionTypeName(std::string &name) const {
@@ -89,16 +127,17 @@ void TypeAnnotation::functionTypeName(std::string &name) const {
 }
 
 // xhp names are mangled so we get them back to their original definition
+// @see the mangling in ScannerToken::xhpLabel
 void TypeAnnotation::xhpTypeName(std::string &name) const {
   // remove prefix if any
-  if (m_name.compare(0, sizeof("xhp_xhp__") - 1, "xhp_xhp__") == 0) {
+  if (m_name.compare(0, sizeof("xhp_") - 1, "xhp_") == 0) {
     name += std::string(m_name).replace(0, sizeof("xhp_") - 1, ":");
   } else {
     name += m_name;
   }
   // un-mangle back
-  Util::replaceAll(name, "__", ":");
-  Util::replaceAll(name, "_", "-");
+  replaceAll(name, "__", ":");
+  replaceAll(name, "_", "-");
 }
 
 void TypeAnnotation::tupleTypeName(std::string &name) const {
@@ -136,6 +175,49 @@ void TypeAnnotation::appendToTypeList(TypeAnnotationPtr typeList) {
   } else {
     m_typeList = typeList;
   }
+}
+
+void TypeAnnotation::outputCodeModel(CodeGenerator& cg) {
+  TypeAnnotationPtr typeArgsElem = m_typeArgs;
+  auto numTypeArgs = 0;
+  while (typeArgsElem != nullptr) {
+    numTypeArgs++;
+    typeArgsElem = typeArgsElem->m_typeList;
+  }
+  typeArgsElem = m_typeArgs;
+
+  auto numProps = 1;
+  if (m_nullable) numProps++;
+  if (m_soft) numProps++;
+  if (m_function) numProps++;
+  if (numTypeArgs > 0) numProps++;
+  cg.printObjectHeader("TypeExpression", numProps);
+  cg.printPropertyHeader("name");
+  cg.printValue(m_tuple ? "tuple" : m_name);
+  if (m_nullable) {
+    cg.printPropertyHeader("isNullable");
+    cg.printBool(true);
+  }
+  if (m_soft) {
+    cg.printPropertyHeader("isSoft");
+    cg.printBool(true);
+  }
+  if (m_function) {
+    cg.printPropertyHeader("returnType");
+    typeArgsElem->outputCodeModel(cg);
+    typeArgsElem = typeArgsElem->m_typeList;
+    numTypeArgs--;
+  }
+  if (numTypeArgs > 0) {
+    cg.printPropertyHeader("typeArguments");
+    cg.printf("V:9:\"HH\\Vector\":%d:{", numTypeArgs);
+    while (typeArgsElem != nullptr) {
+      typeArgsElem->outputCodeModel(cg);
+      typeArgsElem = typeArgsElem->m_typeList;
+    }
+    cg.printf("}");
+  }
+  cg.printObjectFooter();
 }
 
 }

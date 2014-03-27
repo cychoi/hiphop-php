@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,14 +17,20 @@
 #include "hphp/util/compatibility.h"
 #include "hphp/util/vdso.h"
 
-#if defined(__APPLE__)
-# include <mach/mach_time.h>
-#endif
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
 char *strndup(const char* str, size_t len) {
   size_t str_len = strlen(str);
   if (len < str_len) {
@@ -58,22 +64,18 @@ int dprintf(int fd, const char *format, ...) {
 #endif
 
 int gettime(clockid_t which_clock, struct timespec *tp) {
-#if defined(__APPLE__)
-  if (which_clock == CLOCK_THREAD_CPUTIME_ID) {
-    tp->tv_sec = 0;
-    tp->tv_nsec = mach_absolute_time();
-    return 0;
-  }
+#if defined(__APPLE__) || defined(__FreeBSD__)
+  // XXX: OSX doesn't support realtime so we ignore which_clock
   struct timeval tv;
   int ret = gettimeofday(&tv, nullptr);
   tp->tv_sec = tv.tv_sec;
   tp->tv_nsec = tv.tv_usec * 1000;
   return ret;
 #else
-  static int vdso_usable =
-    Util::Vdso::ClockGetTime(which_clock, tp);
-  if (vdso_usable == 0)
-    return Util::Vdso::ClockGetTime(which_clock, tp);
+  static int vdso_usable = Vdso::ClockGetTime(which_clock, tp);
+  if (vdso_usable == 0) {
+    return Vdso::ClockGetTime(which_clock, tp);
+  }
   return clock_gettime(which_clock, tp);
 #endif
 }
@@ -82,6 +84,14 @@ int64_t gettime_diff_us(const timespec &start, const timespec &end) {
   int64_t dsec = end.tv_sec - start.tv_sec;
   int64_t dnsec = end.tv_nsec - start.tv_nsec;
   return dsec * 1000000 + dnsec / 1000;
+}
+
+int fadvise_dontneed(int fd, off_t len) {
+#if defined(__FreeBSD__) || defined(__APPLE__)
+  return 0;
+#else
+  return posix_fadvise(fd, 0, len, POSIX_FADV_DONTNEED);
+#endif
 }
 
 ///////////////////////////////////////////////////////////////////////////////

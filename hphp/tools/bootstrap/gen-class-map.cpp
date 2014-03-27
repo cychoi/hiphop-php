@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -81,7 +81,13 @@ static fbstring genDocCommentPreamble(const fbstring& name,
     } else {
       ret += "function.";
     }
-    ret += name + ".php )";
+    auto mangled_name = name;
+    for (auto it = mangled_name.begin(); it != mangled_name.end(); ++it) {
+      if (*it == '_') {
+        *it = '-';
+      }
+    }
+    ret += mangled_name + ".php )";
   }
 
   if (desc.size()) {
@@ -92,7 +98,7 @@ static fbstring genDocCommentPreamble(const fbstring& name,
 
 static fbstring genDocComment(const PhpFunc& func,
                               const fbstring& classname) {
-  fbstring ret(genDocCommentPreamble(func.name(), func.getDesc(),
+  fbstring ret(genDocCommentPreamble(func.getPhpName(), func.getDesc(),
                                      func.flags(), classname));
 
   for (auto &param : func.params()) {
@@ -120,9 +126,8 @@ static fbstring genDocComment(const PhpFunc& func,
 }
 
 static fbstring genDocComment(const PhpClass& cls) {
-  return formatDocComment(
-           genDocCommentPreamble(cls.name(), cls.getDesc(), cls.flags(), "")
-         );
+  return formatDocComment(genDocCommentPreamble(cls.getPhpName(),
+        cls.getDesc(), cls.flags(), ""));
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -132,11 +137,19 @@ static void declareConstants(std::ostream &out,
                              const fbvector<PhpConst>& consts,
                              bool extrn) {
   for (auto c : consts) {
-    if (!c.hasValue()) {
-      continue;
-    }
+    /*
+     * If there's no value, we assume there's an
+     * "extern const k_Name = value;" in the c++,
+     * plus an "extern const k_Name;" in a header
+     * included by ext.h.
+     * For the parser tokens T_*, we have the definitions
+     * but no header declarations.
+     * The exception for KindOfInt64 below is to make sure
+     * we declare them in class_map.cpp before using them.
+     */
+    if (!c.hasValue() && c.kindOf() != KindOfInt64) continue;
 
-    if (extrn) {
+    if (extrn || !c.hasValue()) {
       out << "extern const " << c.getCppType() << " " << c.varname() << ";\n";
     } else if (c.kindOf() == KindOfString) {
       fbstring val = c.value();
@@ -168,12 +181,13 @@ static void outputConstants(const char *outputfn,
 // Class Map
 
 #define FUNC_FLAG_MASK (IsProtected|IsPrivate|IsPublic|\
-                        IsAbstract|IsStatic|IsFinal|HasDocComment|\
+                        IsAbstract|IsStatic|IsFinal|\
                         AllowIntercept|NoProfile|ContextSensitive|\
                         HipHopSpecific|VariableArguments|\
                         RefVariableArguments|MixedVariableArguments|\
-                        NeedsActRec|FunctionIsFoldable|\
-                        NoInjection|NoEffect|HasOptFunction)
+                        NoFCallBuiltin|FunctionIsFoldable|\
+                        NoInjection|NoEffect|HasOptFunction|ZendParamModeNull|\
+                        ZendParamModeFalse|ZendCompat)
 
 static void writeFunction(std::ostream& out, const PhpFunc& func) {
   auto flags = (func.flags() & FUNC_FLAG_MASK) | IsSystem | IsNothing;
@@ -191,16 +205,14 @@ static void writeFunction(std::ostream& out, const PhpFunc& func) {
     flags |= IsReference;
   }
 
-  out << "  " << castLong(flags, true) << ", \"" << func.name() << "\", "
-      << "\"\", "
+  out << "  " << castLong(flags, true)
+      << ", \"" << escapeCpp(func.getPhpName()) << "\", " << "\"\", "
       << castLong(0) << ", "
       << castLong(0) << ",\n";
 
-  if (flags & HasDocComment) {
-    out << "  \""
-        << escapeCpp(genDocComment(func, func.className()))
-        << "\",\n";
-  }
+  out << "  \""
+      << escapeCpp(genDocComment(func, func.className()))
+      << "\",\n";
 
   DataType rko = func.returnKindOf();
   if (rko == KindOfAny) {
@@ -250,7 +262,7 @@ static void writeConstant(std::ostream& out, const PhpConst& cns) {
 
   if (cns.isSystem()) {
     // Special "magic" constants
-    if ((name == "SID") || (name == "PHP_SAPI")) {
+    if (name == "SID") {
       out << "(const char *)((offsetof(EnvConstants, k_" << name << ") - "
           << "offsetof(EnvConstants, stgv_Variant)) / sizeof(Variant)), "
           << castLong(1) << ",\n";
@@ -267,22 +279,20 @@ static void writeConstant(std::ostream& out, const PhpConst& cns) {
 }
 
 #define CLASS_FLAG_MASK (IsAbstract|IsFinal|NoDefaultSweep|\
-                         HipHopSpecific|HasDocComment)
+                         HipHopSpecific|IsCppSerializable|ZendCompat)
 #define PROP_FLAG_MASK  (IsProtected|IsPrivate|IsPublic|IsStatic)
 
 static void writeClass(std::ostream& out, const PhpClass& cls) {
   auto flags = (cls.flags() & CLASS_FLAG_MASK) | IsSystem | IsNothing;
 
   out << "  " << castLong(flags, true) << ", "
-      << "\"" << escapeCpp(cls.name()) << "\", "
+      << "\"" << escapeCpp(cls.getPhpName()) << "\", "
       << "\"" << escapeCpp(strtolower(cls.parent())) << "\", "
       << "\"\", "
       << castLong(0) << ", "
       << castLong(0) << ",\n";
 
-  if (flags & HasDocComment) {
-    out << "  \"" << escapeCpp(genDocComment(cls)) << "\",\n";
-  }
+  out << "  \"" << escapeCpp(genDocComment(cls)) << "\",\n";
 
   out << "  ";
   for (auto &iface : cls.ifaces()) {
@@ -317,17 +327,27 @@ static void writeClass(std::ostream& out, const PhpClass& cls) {
 static void outputClassMap(const char *outputfn, const char *classmap_name,
                            const fbvector<PhpClass>& classes,
                            const fbvector<PhpFunc>& funcs,
-                           const fbvector<PhpConst>& consts) {
+                           const fbvector<PhpConst>& consts,
+                           const fbvector<PhpExtension>& exts) {
   std::ofstream out(outputfn);
 
   out << "// @" "generated by gen-class-map.cpp\n"
-      << "#include \"hphp/runtime/base/base_includes.h\"\n"
+      << "#include \"hphp/runtime/base/base-includes.h\"\n"
       << "#include \"hphp/runtime/ext/ext.h\"\n"
       << "namespace HPHP {\n";
   declareConstants(out, consts, false);
-  out << "const char *" << classmap_name << "[] = {\n"
-      << "  (const char *)ClassInfo::IsSystem, NULL, "
-      << "\"\", \"\", NULL, NULL, NULL,\n";
+  out << "const char *" << classmap_name << "[] = {\n";
+
+  for (auto &e : exts) {
+    auto sym = e.symbol();
+    if (!sym.empty()) {
+      out << "  (const char*)&" << sym << ",\n";
+    }
+  }
+  out << "  NULL,\n"; // End of extensions
+
+  out << "  (const char *)ClassInfo::IsSystem, NULL, "
+      << "\"\", \"\", NULL, NULL, \"\", NULL,\n";
   for (auto &f : funcs) {
     writeFunction(out, f);
   }
@@ -377,10 +397,11 @@ int main(int argc, const char* argv[]) {
   fbvector<PhpFunc> funcs;
   fbvector<PhpClass> classes;
   fbvector<PhpConst> consts;
+  fbvector<PhpExtension> exts;
 
   for (int i = (system ? 4 : 3); i < argc; ++i) {
     try {
-      parseIDL(argv[i], funcs, classes, consts);
+      parseIDL(argv[i], funcs, classes, consts, exts);
     } catch (const std::exception& exc) {
       std::cerr << argv[i] << ": " << exc.what() << "\n";
       return 1;
@@ -389,7 +410,7 @@ int main(int argc, const char* argv[]) {
 
   const char* path = argv[2];
   const char* name = (system ? "g_class_map" : argv[1]);
-  outputClassMap(path, name, classes, funcs, consts);
+  outputClassMap(path, name, classes, funcs, consts, exts);
   if (system) {
     path = argv[3];
     outputConstants(path, consts);

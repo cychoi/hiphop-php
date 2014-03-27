@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,11 @@
 #include <sstream>
 #include <boost/format.hpp>
 #include <boost/bind.hpp>
+#include <atomic>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
 #include "hphp/compiler/analysis/alias_manager.h"
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/analysis/class_scope.h"
@@ -32,6 +37,7 @@
 #include "hphp/compiler/statement/loop_statement.h"
 #include "hphp/compiler/statement/class_variable.h"
 #include "hphp/compiler/statement/use_trait_statement.h"
+#include "hphp/compiler/statement/trait_require_statement.h"
 #include "hphp/compiler/analysis/symbol_table.h"
 #include "hphp/compiler/package.h"
 #include "hphp/compiler/parser/parser.h"
@@ -45,15 +51,14 @@
 #include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/expression/array_pair_expression.h"
 #include "hphp/compiler/expression/simple_function_call.h"
-#include "hphp/runtime/ext/ext_json.h"
-#include "hphp/runtime/base/zend/zend_printf.h"
-#include "hphp/runtime/base/program_functions.h"
+#include "hphp/runtime/base/zend-printf.h"
+#include "hphp/runtime/base/program-functions.h"
 #include "hphp/util/atomic.h"
 #include "hphp/util/logger.h"
-#include "hphp/util/util.h"
+#include "hphp/util/text-util.h"
 #include "hphp/util/hash.h"
 #include "hphp/util/process.h"
-#include "hphp/util/job_queue.h"
+#include "hphp/util/job-queue.h"
 #include "hphp/util/timer.h"
 
 using namespace HPHP;
@@ -196,7 +201,7 @@ BlockScopePtr AnalysisResult::findConstantDeclarer(
 
 ClassScopePtr AnalysisResult::findClass(const std::string &name) const {
   AnalysisResultConstPtr ar = shared_from_this();
-  string lname = Util::toLower(name);
+  string lname = toLower(name);
   StringToClassScopePtrMap::const_iterator sysIter =
     m_systemClasses.find(lname);
   if (sysIter != m_systemClasses.end()) return sysIter->second;
@@ -213,7 +218,7 @@ ClassScopePtr AnalysisResult::findClass(const std::string &name,
   AnalysisResultPtr ar = shared_from_this();
   if (by == PropertyName) return ClassScopePtr();
 
-  string lname = Util::toLower(name);
+  string lname = toLower(name);
   if (by == MethodName) {
     StringToClassScopePtrVecMap::iterator iter =
       m_methodToClassDecs.find(lname);
@@ -288,7 +293,7 @@ ClassScopePtr AnalysisResult::findExactClass(ConstructPtr cs,
 bool AnalysisResult::checkClassPresent(ConstructPtr cs,
                                        const std::string &name) const {
   if (name == "self" || name == "parent") return true;
-  std::string lowerName = Util::toLower(name);
+  std::string lowerName = toLower(name);
   if (ClassScopePtr currentCls = cs->getClassScope()) {
     if (lowerName == currentCls->getName() ||
         currentCls->derivesFrom(shared_from_this(), lowerName,
@@ -423,6 +428,16 @@ void AnalysisResult::markRedeclaringClasses() {
     }
   }
 
+  auto markRedeclaring = [&] (const std::string& name) {
+    auto it = m_classDecs.find(name);
+    if (it != m_classDecs.end()) {
+      auto& classes = it->second;
+      for (unsigned int i = 0; i < classes.size(); ++i) {
+        classes[i]->setRedeclaring(ar, i);
+      }
+    }
+  };
+
   /*
    * In WholeProgram mode, during parse time we collected all
    * class_alias calls so we can mark the targets of such calls
@@ -446,18 +461,21 @@ void AnalysisResult::markRedeclaringClasses() {
    * as redeclaring for now.
    */
   for (auto& kv : m_classAliases) {
-    auto markRedeclaring = [&] (const std::string& name) {
-      auto it = m_classDecs.find(name);
-      if (it != m_classDecs.end()) {
-        auto& classes = it->second;
-        for (unsigned int i = 0; i < classes.size(); ++i) {
-          classes[i]->setRedeclaring(ar, i);
-        }
-      }
-    };
+    assert(kv.first == toLower(kv.first));
+    assert(kv.second == toLower(kv.second));
+    markRedeclaring(kv.first);
+    markRedeclaring(kv.second);
+  }
 
-    markRedeclaring(Util::toLower(kv.first));
-    markRedeclaring(Util::toLower(kv.second));
+  /*
+   * Similar to class_alias, when a type alias is declared with the
+   * same name as a class in the program, we need to make sure the
+   * class is marked redeclaring.  It is possible in some requests
+   * that things like 'instanceof Foo' will not mean the same thing.
+   */
+  for (auto& name : m_typeAliasNames) {
+    assert(toLower(name) == name);
+    markRedeclaring(name);
   }
 }
 
@@ -475,8 +493,7 @@ void AnalysisResult::link(FileScopePtr user, FileScopePtr provider) {
 
 bool AnalysisResult::addClassDependency(FileScopePtr usingFile,
                                         const std::string &className) {
-  if (BuiltinSymbols::s_classes.find(className) !=
-      BuiltinSymbols::s_classes.end())
+  if (m_systemClasses.find(className) != m_systemClasses.end())
     return true;
 
   StringToClassScopePtrVecMap::const_iterator iter =
@@ -494,8 +511,7 @@ bool AnalysisResult::addClassDependency(FileScopePtr usingFile,
 
 bool AnalysisResult::addFunctionDependency(FileScopePtr usingFile,
                                            const std::string &functionName) {
-  if (BuiltinSymbols::s_functions.find(functionName) !=
-      BuiltinSymbols::s_functions.end())
+  if (m_functions.find(functionName) != m_functions.end())
     return true;
   StringToFunctionScopePtrMap::const_iterator iter =
     m_functionDecs.find(functionName);
@@ -557,12 +573,16 @@ bool AnalysisResult::isSystemConstant(const std::string &constName) const {
 ///////////////////////////////////////////////////////////////////////////////
 // Program
 
-void AnalysisResult::loadBuiltins() {
-  AnalysisResultPtr ar = shared_from_this();
-  BuiltinSymbols::LoadFunctions(ar, m_functions);
-  BuiltinSymbols::LoadClasses(ar, m_systemClasses);
-  BuiltinSymbols::LoadVariables(ar, m_variables);
-  BuiltinSymbols::LoadConstants(ar, m_constants);
+void AnalysisResult::addSystemFunction(FunctionScopeRawPtr fs) {
+  FunctionScopePtr& entry = m_functions[fs->getName()];
+  assert(!entry);
+  entry = fs;
+}
+
+void AnalysisResult::addSystemClass(ClassScopeRawPtr cs) {
+  ClassScopePtr& entry = m_systemClasses[cs->getName()];
+  assert(!entry);
+  entry = cs;
 }
 
 void AnalysisResult::checkClassDerivations() {
@@ -574,7 +594,11 @@ void AnalysisResult::checkClassDerivations() {
       hphp_string_iset seen;
       cls->checkDerivation(ar, seen);
       if (Option::WholeProgram) {
-        cls->importUsedTraits(ar);
+        try {
+          cls->importUsedTraits(ar);
+        } catch (const AnalysisTimeFatalException& e) {
+          cls->setFatal(e);
+        }
       }
     }
   }
@@ -592,22 +616,26 @@ void AnalysisResult::resolveNSFallbackFuncs() {
 }
 
 void AnalysisResult::collectFunctionsAndClasses(FileScopePtr fs) {
-  const StringToFunctionScopePtrMap &funcs = fs->getFunctions();
-
-  for (StringToFunctionScopePtrMap::const_iterator iter = funcs.begin();
-       iter != funcs.end(); ++iter) {
-    FunctionScopePtr func = iter->second;
+  for (const auto& iter : fs->getFunctions()) {
+    FunctionScopePtr func = iter.second;
     if (!func->inPseudoMain()) {
-      FunctionScopePtr &funcDec = m_functionDecs[iter->first];
+      FunctionScopePtr &funcDec = m_functionDecs[iter.first];
       if (funcDec) {
-        FunctionScopePtrVec &funcVec = m_functionReDecs[iter->first];
-        int sz = funcVec.size();
-        if (!sz) {
-          funcDec->setRedeclaring(sz++);
-          funcVec.push_back(funcDec);
+        if (funcDec->isSystem()) {
+          assert(funcDec->allowOverride());
+          funcDec = func;
+        } else if (func->isSystem()) {
+          assert(func->allowOverride());
+        } else {
+          FunctionScopePtrVec &funcVec = m_functionReDecs[iter.first];
+          int sz = funcVec.size();
+          if (!sz) {
+            funcDec->setRedeclaring(sz++);
+            funcVec.push_back(funcDec);
+          }
+          func->setRedeclaring(sz++);
+          funcVec.push_back(func);
         }
-        func->setRedeclaring(sz++);
-        funcVec.push_back(func);
       } else {
         funcDec = func;
       }
@@ -615,13 +643,12 @@ void AnalysisResult::collectFunctionsAndClasses(FileScopePtr fs) {
   }
 
   if (const StringToFunctionScopePtrVecMap *redec = fs->getRedecFunctions()) {
-    for (StringToFunctionScopePtrVecMap::const_iterator iter = redec->begin();
-         iter != redec->end(); ++iter) {
-      FunctionScopePtrVec::const_iterator i = iter->second.begin();
-      FunctionScopePtrVec::const_iterator e = iter->second.end();
-      FunctionScopePtr &funcDec = m_functionDecs[iter->first];
+    for (const auto &iter : *redec) {
+      FunctionScopePtrVec::const_iterator i = iter.second.begin();
+      FunctionScopePtrVec::const_iterator e = iter.second.end();
+      FunctionScopePtr &funcDec = m_functionDecs[iter.first];
       assert(funcDec); // because the first one was in funcs above
-      FunctionScopePtrVec &funcVec = m_functionReDecs[iter->first];
+      FunctionScopePtrVec &funcVec = m_functionReDecs[iter.first];
       int sz = funcVec.size();
       if (!sz) {
         funcDec->setRedeclaring(sz++);
@@ -634,15 +661,15 @@ void AnalysisResult::collectFunctionsAndClasses(FileScopePtr fs) {
     }
   }
 
-  const StringToClassScopePtrVecMap &classes = fs->getClasses();
-  for (StringToClassScopePtrVecMap::const_iterator iter = classes.begin();
-       iter != classes.end(); ++iter) {
-    ClassScopePtrVec &clsVec = m_classDecs[iter->first];
-    clsVec.insert(clsVec.end(), iter->second.begin(), iter->second.end());
+  for (const auto& iter : fs->getClasses()) {
+    ClassScopePtrVec &clsVec = m_classDecs[iter.first];
+    clsVec.insert(clsVec.end(), iter.second.begin(), iter.second.end());
   }
 
   m_classAliases.insert(fs->getClassAliases().begin(),
                         fs->getClassAliases().end());
+  m_typeAliasNames.insert(fs->getTypeAliasNames().begin(),
+                          fs->getTypeAliasNames().end());
 }
 
 static bool by_filename(const FileScopePtr &f1, const FileScopePtr &f2) {
@@ -673,7 +700,7 @@ void AnalysisResult::analyzeProgram(bool system /* = false */) {
   // Analyze some special cases
   for (set<string>::const_iterator it = Option::VolatileClasses.begin();
        it != Option::VolatileClasses.end(); ++it) {
-    ClassScopePtr cls = findClass(Util::toLower(*it));
+    ClassScopePtr cls = findClass(toLower(*it));
     if (cls && cls->isUserClass()) {
       cls->setVolatile();
     }
@@ -712,10 +739,10 @@ void AnalysisResult::analyzeProgram(bool system /* = false */) {
       cls->setStaticDynamic(ar);
     }
     StringToFunctionScopePtrMap methods;
-    cls->collectMethods(ar, methods);
+    cls->collectMethods(ar, methods, true /* include privates */);
     bool needAbstractMethodImpl =
       (!cls->isAbstract() && !cls->isInterface() &&
-       !cls->derivesFromRedeclaring() &&
+       cls->derivesFromRedeclaring() == Derivation::Normal &&
        !cls->getAttribute(ClassScope::UsesUnknownTrait));
     for (StringToFunctionScopePtrMap::const_iterator iterMethod =
            methods.begin(); iterMethod != methods.end(); ++iterMethod) {
@@ -734,7 +761,7 @@ void AnalysisResult::analyzeProgram(bool system /* = false */) {
   string cname;
   BOOST_FOREACH(tie(cname, cls), m_systemClasses) {
     StringToFunctionScopePtrMap methods;
-    cls->collectMethods(ar, methods);
+    cls->collectMethods(ar, methods, true /* include privates */);
     for (StringToFunctionScopePtrMap::const_iterator iterMethod =
            methods.begin(); iterMethod != methods.end(); ++iterMethod) {
       m_methodToClassDecs[iterMethod->first].push_back(cls);
@@ -790,7 +817,7 @@ void AnalysisResult::analyzePerfectVirtuals() {
       ClassScopePtr cls = iter->second[i];
 
       // being conservative, not to do redeclaring classes at all
-      if (cls->derivesFromRedeclaring()) {
+      if (cls->derivesFromRedeclaring() == Derivation::Redeclaring) {
         addClassRootMethods(ar, cls, redeclaringMethods);
         continue;
       }
@@ -952,11 +979,14 @@ struct OptVisitor {
 
   AnalysisResultPtr m_ar;
   unsigned m_nscope;
-  JobQueueDispatcher<BlockScope *, OptWorker<When> > *m_dispatcher;
+  JobQueueDispatcher<OptWorker<When>> *m_dispatcher;
 };
 
 template <typename When>
-class OptWorker : public JobQueueWorker<BlockScope *, true, true> {
+class OptWorker : public JobQueueWorker<BlockScope*,
+                                        void*,
+                                        true,
+                                        true> {
 public:
   OptWorker() {}
 
@@ -968,15 +998,15 @@ public:
 
   virtual void doJob(BlockScope *scope) {
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
-    atomic_inc(AnalysisResult::s_NumDoJobCalls);
+    ++AnalysisResult::s_NumDoJobCalls;
     ConcurrentBlockScopeRawPtrIntHashMap::accessor acc;
     AnalysisResult::s_DoJobUniqueScopes.insert(acc,
       BlockScopeRawPtr(scope));
     acc->second += 1;
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
     try {
-      DepthFirstVisitor<When, OptVisitor > *visitor =
-        (DepthFirstVisitor<When, OptVisitor >*)m_opaque;
+      auto visitor =
+        (DepthFirstVisitor<When, OptVisitor>*) m_context;
       {
         Lock ldep(BlockScope::s_depsMutex);
         Lock lstate(BlockScope::s_jobStateMutex);
@@ -1028,13 +1058,13 @@ public:
                 break;
               case BlockScope::MarkProcessing:
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
-                atomic_inc(AnalysisResult::s_NumForceRerunGlobal);
+                ++AnalysisResult::s_NumForceRerunGlobal;
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
                 pf->first->setForceRerun(true);
                 break;
               case BlockScope::MarkProcessed:
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
-                atomic_inc(AnalysisResult::s_NumReactivateGlobal);
+                ++AnalysisResult::s_NumReactivateGlobal;
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
                 if (visitor->activateScope(pf->first)) {
                   visitor->enqueue(pf->first);
@@ -1070,7 +1100,7 @@ public:
               int m = pf->first->getMark();
               if (pf->second & useKinds && m == BlockScope::MarkProcessed) {
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
-                atomic_inc(AnalysisResult::s_NumReactivateUseKinds);
+                ++AnalysisResult::s_NumReactivateUseKinds;
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
                 bool ready = visitor->activateScope(pf->first);
                 always_assert(!ready);
@@ -1094,7 +1124,7 @@ public:
                 // in its entirety. Thus, we must force it to run again in
                 // order to be able to observe all the updates.
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
-                atomic_inc(AnalysisResult::s_NumForceRerunUseKinds);
+                ++AnalysisResult::s_NumForceRerunUseKinds;
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
                 always_assert(pf->first->getNumDepsToWaitFor() == 0);
                 pf->first->setForceRerun(true);
@@ -1165,7 +1195,7 @@ void OptWorker<Pre>::onThreadExit() {
     } \
     if (threadCount <= 0) threadCount = 1; \
     this->m_data.m_dispatcher = \
-      new JobQueueDispatcher<BlockScope *, worker >( \
+      new JobQueueDispatcher<worker>( \
         threadCount, true, 0, false, this); \
   } while (0)
 
@@ -1210,7 +1240,7 @@ template <typename When>
 void
 AnalysisResult::preWaitCallback(bool first,
                                 const BlockScopeRawPtrQueue &scopes,
-                                void *opaque) {
+                                void *context) {
   // default is no-op
 }
 
@@ -1219,17 +1249,17 @@ bool
 AnalysisResult::postWaitCallback(bool first,
                                  bool again,
                                  const BlockScopeRawPtrQueue &scopes,
-                                 void *opaque) {
+                                 void *context) {
   // default is no-op
   return again;
 }
 
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
-int AnalysisResult::s_NumDoJobCalls         = 0;
-int AnalysisResult::s_NumForceRerunGlobal   = 0;
-int AnalysisResult::s_NumReactivateGlobal   = 0;
-int AnalysisResult::s_NumForceRerunUseKinds = 0;
-int AnalysisResult::s_NumReactivateUseKinds = 0;
+std::atomic<int> AnalysisResult::s_NumDoJobCalls(0);
+std::atomic<int> AnalysisResult::s_NumForceRerunGlobal(0);
+std::atomic<int> AnalysisResult::s_NumReactivateGlobal(0);
+std::atomic<int> AnalysisResult::s_NumForceRerunUseKinds(0);
+std::atomic<int> AnalysisResult::s_NumReactivateUseKinds(0);
 
 ConcurrentBlockScopeRawPtrIntHashMap
   AnalysisResult::s_DoJobUniqueScopes;
@@ -1284,7 +1314,7 @@ struct BIPairCmp {
 template <typename When>
 void
 AnalysisResult::processScopesParallel(const char *id,
-                                      void *opaque /* = NULL */) {
+                                      void *context /* = NULL */) {
   BlockScopeRawPtrQueue scopes;
   getScopesSet(scopes);
 
@@ -1321,7 +1351,7 @@ AnalysisResult::processScopesParallel(const char *id,
 
     BlockScopeRawPtrQueue enqueued;
     again = dfv.visitParallel(scopes, first, enqueued);
-    preWaitCallback<When>(first, scopes, opaque);
+    preWaitCallback<When>(first, scopes, context);
 
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
     {
@@ -1375,7 +1405,7 @@ AnalysisResult::processScopesParallel(const char *id,
     std::cout << "Number of waiting scopes: " << numWaiting << std::endl;
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
 
-    again = postWaitCallback<When>(first, again, scopes, opaque);
+    again = postWaitCallback<When>(first, again, scopes, context);
     first = false;
   } while (again);
   dfv.data().stop();
@@ -1504,7 +1534,7 @@ DepthFirstVisitor<InferTypes, OptVisitor>::visitScope(BlockScopeRawPtr scope) {
         // there are potentially AST nodes which are interested in the updated
         // return type
 #ifdef HPHP_INSTRUMENT_TYPE_INF
-        atomic_inc(RescheduleException::s_NumForceRerunSelfCaller);
+        ++RescheduleException::s_NumForceRerunSelfCaller;
 #endif /* HPHP_INSTRUMENT_TYPE_INF */
         scope->setForceRerun(true);
       }
@@ -1521,7 +1551,7 @@ DepthFirstVisitor<InferTypes, OptVisitor>::visitScope(BlockScopeRawPtr scope) {
     // potential deadlock detected- reschedule
     // this scope to run at a later time
 #ifdef HPHP_INSTRUMENT_TYPE_INF
-    atomic_inc(RescheduleException::s_NumReschedules);
+    ++RescheduleException::s_NumReschedules;
 #endif /* HPHP_INSTRUMENT_TYPE_INF */
     ret |= scope->getUpdated();
     if (m) {
@@ -1547,7 +1577,8 @@ DepthFirstVisitor<InferTypes, OptVisitor>::visitScope(BlockScopeRawPtr scope) {
 
 template<>
 bool AnalysisResult::postWaitCallback<InferTypes>(
-    bool first, bool again, const BlockScopeRawPtrQueue &scopes, void *opaque) {
+    bool first, bool again,
+    const BlockScopeRawPtrQueue &scopes, void *context) {
 
 #ifdef HPHP_INSTRUMENT_TYPE_INF
   std::cout << "Number of rescheduled: " <<
@@ -1578,9 +1609,9 @@ bool AnalysisResult::postWaitCallback<InferTypes>(
 }
 
 #ifdef HPHP_INSTRUMENT_TYPE_INF
-int RescheduleException::s_NumReschedules          = 0;
-int RescheduleException::s_NumForceRerunSelfCaller = 0;
-int RescheduleException::s_NumRetTypesChanged      = 0;
+std::atomic<int> RescheduleException::s_NumReschedules(0);
+std::atomic<int> RescheduleException::s_NumForceRerunSelfCaller(0);
+std::atomic<int> RescheduleException::s_NumRetTypesChanged(0);
 LProfileMap BaseTryLock::s_LockProfileMap;
 #endif /* HPHP_INSTRUMENT_TYPE_INF */
 
@@ -1589,12 +1620,10 @@ void AnalysisResult::inferTypes() {
   BlockScopeRawPtrQueue scopes;
   getScopesSet(scopes);
 
-  for (BlockScopeRawPtrQueue::iterator
-       it = scopes.begin(), end = scopes.end();
-       it != end; ++it) {
-    (*it)->setInTypeInference(true);
-    (*it)->clearUpdated();
-    assert((*it)->getNumDepsToWaitFor() == 0);
+  for (auto scope : scopes) {
+    scope->setInTypeInference(true);
+    scope->clearUpdated();
+    assert(scope->getNumDepsToWaitFor() == 0);
   }
 
 #ifdef HPHP_INSTRUMENT_TYPE_INF
@@ -1605,13 +1634,11 @@ void AnalysisResult::inferTypes() {
 
   processScopesParallel<InferTypes>("InferTypes");
 
-  for (BlockScopeRawPtrQueue::iterator
-       it = scopes.begin(), end = scopes.end();
-       it != end; ++it) {
-    (*it)->setInTypeInference(false);
-    (*it)->clearUpdated();
-    assert((*it)->getMark() == BlockScope::MarkProcessed);
-    assert((*it)->getNumDepsToWaitFor() == 0);
+  for (auto scope : scopes) {
+    scope->setInTypeInference(false);
+    scope->clearUpdated();
+    assert(scope->getMark() == BlockScope::MarkProcessed);
+    assert(scope->getNumDepsToWaitFor() == 0);
   }
 }
 
@@ -1653,12 +1680,12 @@ StatementPtr DepthFirstVisitor<Post, OptVisitor>::visit(StatementPtr stmt) {
   return stmt->postOptimize(this->m_data.m_ar);
 }
 
-class FinalWorker : public JobQueueWorker<MethodStatementPtr> {
+class FinalWorker : public JobQueueWorker<MethodStatementPtr, AnalysisResult*> {
 public:
   virtual void doJob(MethodStatementPtr m) {
     try {
       AliasManager am(1);
-      am.finalSetup(((AnalysisResult*)m_opaque)->shared_from_this(), m);
+      am.finalSetup(m_context->shared_from_this(), m);
     } catch (Exception &e) {
       Logger::Error("%s", e.getMessage().c_str());
     }
@@ -1667,11 +1694,11 @@ public:
 
 template<>
 void AnalysisResult::preWaitCallback<Post>(
-    bool first, const BlockScopeRawPtrQueue &scopes, void *opaque) {
-  assert(!Option::ControlFlow || opaque != nullptr);
+    bool first, const BlockScopeRawPtrQueue &scopes, void *context) {
+  assert(!Option::ControlFlow || context != nullptr);
   if (first && Option::ControlFlow) {
-    JobQueueDispatcher<FinalWorker::JobType, FinalWorker> *dispatcher
-      = (JobQueueDispatcher<FinalWorker::JobType, FinalWorker> *) opaque;
+    auto *dispatcher
+      = (JobQueueDispatcher<FinalWorker> *) context;
     for (BlockScopeRawPtrQueue::const_iterator it = scopes.begin(),
            end = scopes.end(); it != end; ++it) {
       BlockScopeRawPtr scope = *it;
@@ -1695,7 +1722,7 @@ void AnalysisResult::postOptimize() {
     }
     if (threadCount <= 0) threadCount = 1;
 
-    JobQueueDispatcher<FinalWorker::JobType, FinalWorker> dispatcher(
+    JobQueueDispatcher<FinalWorker> dispatcher(
       threadCount, true, 0, false, this);
 
     processScopesParallel<Post>("PostOptimize", &dispatcher);

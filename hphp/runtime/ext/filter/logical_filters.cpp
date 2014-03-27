@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,13 +17,13 @@
 #include "hphp/runtime/ext/filter/logical_filters.h"
 #include "hphp/runtime/ext/filter/sanitizing_filters.h"
 #include "hphp/runtime/ext/ext_filter.h"
-#include "hphp/runtime/base/zend/zend_php_config.h"
-#include "hphp/runtime/base/zend/zend_url.h"
-#include "hphp/runtime/base/complex_types.h"
+#include "hphp/runtime/base/zend-php-config.h"
+#include "hphp/runtime/base/zend-url.h"
+#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/ext/ext_function.h"
 #include "hphp/runtime/ext/ext_string.h"
-#include "hphp/runtime/ext/ext_url.h"
+#include "hphp/runtime/ext/url/ext_url.h"
 #include <arpa/inet.h>
 #include <pcre.h>
 
@@ -294,33 +294,33 @@ Variant php_filter_float(PHP_INPUT_FILTER_PARAM_DECL) {
 
   StringBuffer p(len);
   if (str < end && (*str == '+' || *str == '-')) {
-    p += *str++;
+    p.append(*str++);
   }
   int first = 1;
   while (1) {
     int n = 0;
     while (str < end && *str >= '0' && *str <= '9') {
       ++n;
-      p += *str++;
+      p.append(*str++);
     }
     if (str == end || *str == dec_sep || *str == 'e' || *str == 'E') {
       if (!first && n != 3) {
         goto error;
       }
       if (*str == dec_sep) {
-        p += '.';
+        p.append('.');
         str++;
         while (str < end && *str >= '0' && *str <= '9') {
-          p += *str++;
+          p.append(*str++);
         }
       }
       if (*str == 'e' || *str == 'E') {
-        p += *str++;
+        p.append(*str++);
         if (str < end && (*str == '+' || *str == '-')) {
-          p += *str++;
+          p.append(*str++);
         }
         while (str < end && *str >= '0' && *str <= '9') {
-          p += *str++;
+          p.append(*str++);
         }
       }
       break;
@@ -340,14 +340,14 @@ Variant php_filter_float(PHP_INPUT_FILTER_PARAM_DECL) {
     goto error;
   }
 
-  long lval;
+  int64_t lval;
   double dval;
-  switch (is_numeric_string(p.data(), p.length(), &lval, &dval, 0)) {
+  switch (is_numeric_string(p.data(), p.size(), &lval, &dval, 0)) {
     case KindOfInt64:
       return (double) lval;
       break;
     case KindOfDouble:
-      if ((!dval && p.length() > 1 && strpbrk(p.data(), "123456789")) ||
+      if ((!dval && p.size() > 1 && strpbrk(p.data(), "123456789")) ||
            !zend_finite(dval)) {
         goto error;
       }
@@ -372,7 +372,7 @@ Variant php_filter_validate_regexp(PHP_INPUT_FILTER_PARAM_DECL) {
     RETURN_VALIDATION_FAILED
   }
 
-  int matches = preg_match(regexp, value);
+  int matches = preg_match(regexp, value).toInt32();
 
   if (matches <= 0) {
     RETURN_VALIDATION_FAILED
@@ -406,7 +406,7 @@ Variant php_filter_validate_url(PHP_INPUT_FILTER_PARAM_DECL) {
     char *s = url.host;
 
     /* First char of hostname must be alphanumeric */
-    if(!isalnum((int)*(unsigned char *)s)) {
+    if (!isalnum((int)*(unsigned char *)s)) {
       goto bad_url;
     }
 
@@ -470,7 +470,7 @@ Variant php_filter_validate_email(PHP_INPUT_FILTER_PARAM_DECL) {
     RETURN_VALIDATION_FAILED
   }
 
-  int matches = preg_match(regexp, value);
+  int matches = preg_match(regexp, value).toInt32();
 
   if (matches <= 0) {
     RETURN_VALIDATION_FAILED
@@ -767,7 +767,10 @@ Variant php_filter_callback(PHP_INPUT_FILTER_PARAM_DECL) {
     raise_warning("First argument is expected to be a valid callback");
     return uninit_null();
   }
-  return vm_call_user_func(option_array, CREATE_VECTOR1(ref(value)));
+  return vm_call_user_func(
+    option_array,
+    PackedArrayInit(1).appendRef(value).toArray()
+  );
 }
 
 }

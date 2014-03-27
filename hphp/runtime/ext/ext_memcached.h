@@ -3,7 +3,7 @@
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
    | Copyright (c) 2010 Hyves (http://www.hyves.nl)                       |
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,8 +19,11 @@
 #ifndef incl_HPHP_EXT_MEMCACHED_H_
 #define incl_HPHP_EXT_MEMCACHED_H_
 
-#include "hphp/runtime/base/base_includes.h"
-#include "libmemcached/memcached.h"
+#include "hphp/runtime/base/base-includes.h"
+#include <libmemcached/memcached.h>
+#include <map>
+#include <memory>
+#include <vector>
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -81,56 +84,58 @@ extern const int64_t q_Memcached$$RES_TIMEOUT;
 extern const int64_t q_Memcached$$RES_BAD_KEY_PROVIDED;
 extern const int64_t q_Memcached$$RES_CONNECTION_SOCKET_CREATE_FAILURE;
 extern const int64_t q_Memcached$$RES_PAYLOAD_FAILURE;
+extern const int64_t q_Memcached$$RES_NOT_SUPPORTED;
+extern const int64_t q_Memcached$$RES_INVALID_HOST_PROTOCOL;
 
 ///////////////////////////////////////////////////////////////////////////////
 // class Memcached
 
-FORWARD_DECLARE_CLASS_BUILTIN(Memcached);
+FORWARD_DECLARE_CLASS(Memcached);
 class c_Memcached : public ExtObjectData, public Sweepable {
  public:
-  DECLARE_CLASS(Memcached, Memcached, ObjectData)
+  DECLARE_CLASS(Memcached)
 
   // need to implement
-  public: c_Memcached(Class* cls = c_Memcached::s_cls);
+  public: c_Memcached(Class* cls = c_Memcached::classof());
   public: ~c_Memcached();
-  public: void t___construct(CStrRef persistent_id = null_string);
-  public: bool t_add(CStrRef key, CVarRef value, int expiration = 0);
-  public: bool t_addbykey(CStrRef server_key, CStrRef key, CVarRef value, int expiration = 0);
-  public: bool t_addserver(CStrRef host, int port, int weight = 0);
-  public: bool t_addservers(CArrRef servers);
-  public: bool t_append(CStrRef key, CStrRef value);
-  public: bool t_appendbykey(CStrRef server_key, CStrRef key, CStrRef value);
-  public: bool t_cas(double cas_token, CStrRef key, CVarRef value, int expiration = 0);
-  public: bool t_casbykey(double cas_token, CStrRef server_key, CStrRef key, CVarRef value, int expiration = 0);
-  public: Variant t_decrement(CStrRef key, int64_t offset = 1);
-  public: bool t_delete(CStrRef key, int time = 0);
-  public: bool t_deletebykey(CStrRef server_key, CStrRef key, int time = 0);
+  public: void t___construct(const String& persistent_id = null_string);
+  public: bool t_add(const String& key, const Variant& value, int expiration = 0);
+  public: bool t_addbykey(const String& server_key, const String& key, const Variant& value, int expiration = 0);
+  public: bool t_addserver(const String& host, int port, int weight = 0);
+  public: bool t_addservers(const Array& servers);
+  public: bool t_append(const String& key, const String& value);
+  public: bool t_appendbykey(const String& server_key, const String& key, const String& value);
+  public: bool t_cas(double cas_token, const String& key, const Variant& value, int expiration = 0);
+  public: bool t_casbykey(double cas_token, const String& server_key, const String& key, const Variant& value, int expiration = 0);
+  public: Variant t_decrement(const String& key, int64_t offset = 1);
+  public: bool t_delete(const String& key, int time = 0);
+  public: bool t_deletebykey(const String& server_key, const String& key, int time = 0);
   public: Variant t_fetch();
   public: Variant t_fetchall();
   public: bool t_flush(int delay = 0);
-  public: Variant t_get(CStrRef key, CVarRef cache_cb = null_variant, VRefParam cas_token = null_variant);
-  public: Variant t_getbykey(CStrRef server_key, CStrRef key, CVarRef cache_cb = null_variant, VRefParam cas_token = null_variant);
-  public: bool t_getdelayed(CArrRef keys, bool with_cas = false, CVarRef value_cb = null_variant);
-  public: bool t_getdelayedbykey(CStrRef server_key, CArrRef keys, bool with_cas = false, CVarRef value_cb = null_variant);
-  public: Variant t_getmulti(CArrRef keys, VRefParam cas_tokens = null_variant, int flags = 0);
-  public: Variant t_getmultibykey(CStrRef server_key, CArrRef keys, VRefParam cas_tokens = null_variant, int flags = 0);
+  public: Variant t_get(const String& key, const Variant& cache_cb = null_variant, VRefParam cas_token = null_variant);
+  public: Variant t_getbykey(const String& server_key, const String& key, const Variant& cache_cb = null_variant, VRefParam cas_token = null_variant);
+  public: bool t_getdelayed(const Array& keys, bool with_cas = false, const Variant& value_cb = null_variant);
+  public: bool t_getdelayedbykey(const String& server_key, const Array& keys, bool with_cas = false, const Variant& value_cb = null_variant);
+  public: Variant t_getmulti(const Array& keys, VRefParam cas_tokens = null_variant, int flags = 0);
+  public: Variant t_getmultibykey(const String& server_key, const Array& keys, VRefParam cas_tokens = null_variant, int flags = 0);
   public: Variant t_getoption(int option);
   public: int64_t t_getresultcode();
   public: String t_getresultmessage();
-  public: Variant t_getserverbykey(CStrRef server_key);
+  public: Variant t_getserverbykey(const String& server_key);
   public: Array t_getserverlist();
   public: Variant t_getstats();
   public: Variant t_getversion();
-  public: Variant t_increment(CStrRef key, int64_t offset = 1);
-  public: bool t_prepend(CStrRef key, CStrRef value);
-  public: bool t_prependbykey(CStrRef server_key, CStrRef key, CStrRef value);
-  public: bool t_replace(CStrRef key, CVarRef value, int expiration = 0);
-  public: bool t_replacebykey(CStrRef server_key, CStrRef key, CVarRef value, int expiration = 0);
-  public: bool t_set(CStrRef key, CVarRef value, int expiration = 0);
-  public: bool t_setbykey(CStrRef server_key, CStrRef key, CVarRef value, int expiration = 0);
-  public: bool t_setmulti(CArrRef items, int expiration = 0);
-  public: bool t_setmultibykey(CStrRef server_key, CArrRef items, int expiration = 0);
-  public: bool t_setoption(int option, CVarRef value);
+  public: Variant t_increment(const String& key, int64_t offset = 1);
+  public: bool t_prepend(const String& key, const String& value);
+  public: bool t_prependbykey(const String& server_key, const String& key, const String& value);
+  public: bool t_replace(const String& key, const Variant& value, int expiration = 0);
+  public: bool t_replacebykey(const String& server_key, const String& key, const Variant& value, int expiration = 0);
+  public: bool t_set(const String& key, const Variant& value, int expiration = 0);
+  public: bool t_setbykey(const String& server_key, const String& key, const Variant& value, int expiration = 0);
+  public: bool t_setmulti(const Array& items, int expiration = 0);
+  public: bool t_setmultibykey(const String& server_key, const Array& items, int expiration = 0);
+  public: bool t_setoption(int option, const Variant& value);
  private:
   class Impl {
   public:
@@ -142,25 +147,25 @@ class c_Memcached : public ExtObjectData, public Sweepable {
     int serializer;
     int rescode;
   };
-  typedef boost::shared_ptr<Impl> ImplPtr;
+  typedef std::shared_ptr<Impl> ImplPtr;
   ImplPtr m_impl;
 
   bool handleError(memcached_return status);
-  void toPayload(CVarRef value, std::vector<char> &payload, uint32_t &flags);
+  void toPayload(const Variant& value, std::vector<char> &payload, uint32_t &flags);
   bool toObject(Variant& value, const memcached_result_st &result);
-  memcached_return doCacheCallback(CVarRef callback, CStrRef key,
+  memcached_return doCacheCallback(const Variant& callback, const String& key,
                                    Variant& value);
-  bool getMultiImpl(CStrRef server_key, CArrRef keys, bool enableCas,
+  bool getMultiImpl(const String& server_key, const Array& keys, bool enableCas,
                     Array *returnValue);
   bool fetchImpl(memcached_result_st &result, Array &item);
   typedef memcached_return_t (*SetOperation)(memcached_st *,
       const char *, size_t, const char *, size_t, const char *, size_t,
       time_t, uint32_t);
-  bool setOperationImpl(SetOperation op, CStrRef server_key,
-                        CStrRef key, CVarRef value, int expiration);
+  bool setOperationImpl(SetOperation op, const String& server_key,
+                        const String& key, const Variant& value, int expiration);
   typedef memcached_return_t (*IncDecOperation)(memcached_st *,
       const char *, size_t, uint32_t, uint64_t *);
-  Variant incDecOperationImpl(IncDecOperation op, CStrRef key, int64_t offset);
+  Variant incDecOperationImpl(IncDecOperation op, const String& key, int64_t offset);
 
   typedef std::map<std::string, ImplPtr> ImplMap;
   static DECLARE_THREAD_LOCAL(ImplMap, s_persistentMap);

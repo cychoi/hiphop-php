@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,8 +13,18 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/util/timer.h"
+
+#include <cassert>
+
+#ifdef __APPLE__
+#include <mach/clock.h>
+#include <mach/mach.h>
+#endif
+
+#include <sys/time.h>
+#include <sys/resource.h>
+
 #include "hphp/util/logger.h"
 #include "hphp/util/trace.h"
 
@@ -61,6 +71,30 @@ void Timer::report() const {
             seconds / 60, seconds % 60, ms, getName());
 }
 
+void Timer::GetMonotonicTime(timespec &ts) {
+#ifndef __APPLE__
+  gettime(CLOCK_MONOTONIC, &ts);
+#else
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  TIMEVAL_TO_TIMESPEC(&tv, &ts);
+#endif
+}
+
+void Timer::GetRealtimeTime(timespec &ts) {
+#ifndef __APPLE__
+  clock_gettime(CLOCK_REALTIME, &ts);
+#else
+  clock_serv_t cclock;
+  mach_timespec_t mts;
+  host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+  clock_get_time(cclock, &mts);
+  mach_port_deallocate(mach_task_self(), cclock);
+  ts.tv_sec = mts.tv_sec;
+  ts.tv_nsec = mts.tv_nsec;
+#endif
+}
+
 static int64_t to_usec(const timeval& tv) {
   return (int64_t(tv.tv_sec) * 1000000) + tv.tv_usec;
 }
@@ -71,22 +105,28 @@ int64_t Timer::GetCurrentTimeMicros() {
   return to_usec(tv);
 }
 
+int64_t Timer::GetRusageMicros(Type t, int who) {
+  assert(t != WallTime);
+
+  struct rusage ru;
+  memset(&ru, 0, sizeof(ru));
+  auto DEBUG_ONLY ret = getrusage(who, &ru);
+  assert(ret == 0);
+
+  switch (who) {
+    case SystemCPU: return to_usec(ru.ru_stime);
+    case UserCPU:   return to_usec(ru.ru_utime);
+    case TotalCPU:  return to_usec(ru.ru_stime) + to_usec(ru.ru_utime);
+    default: always_assert(false);
+  }
+}
+
 int64_t Timer::measure() const {
   if (m_type == WallTime) {
     return GetCurrentTimeMicros();
   }
 
-  struct rusage ru;
-  memset(&ru, 0, sizeof(ru));
-  getrusage(RUSAGE_SELF, &ru);
-
-  switch (m_type) {
-  case SystemCPU: return to_usec(ru.ru_stime);
-  case UserCPU:   return to_usec(ru.ru_utime);
-  case TotalCPU:  return to_usec(ru.ru_stime) + to_usec(ru.ru_utime);
-  default: assert(false);
-  }
-  return 0;
+  return GetRusageMicros(m_type, RUSAGE_SELF);
 }
 
 const char *Timer::getName() const {
@@ -110,8 +150,8 @@ SlowTimer::SlowTimer(int64_t msThreshold, const char *location, const char *info
 
 SlowTimer::~SlowTimer() {
   int64_t msec = getTime();
-  if (msec >= m_msThreshold) {
-    Logger::Error("SlowTimer [%dms] at %s: %s",
+  if (msec >= m_msThreshold && m_msThreshold != 0) {
+    Logger::Error("SlowTimer [%" PRId64 "ms] at %s: %s",
                   msec, m_location.c_str(), m_info.c_str());
   }
 }

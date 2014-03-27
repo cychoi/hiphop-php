@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,8 @@
 
 #include "hphp/test/ext/test_ext_memcached.h"
 #include "hphp/runtime/ext/ext_memcached.h"
-#include "hphp/runtime/ext/ext_options.h"
+#include "hphp/runtime/ext/std/ext_std_options.h"
+#include "hphp/runtime/ext/ext_array.h"
 #include "hphp/test/ext/test_memcached_info.inc"
 
 IMPLEMENT_SEP_EXTENSION_TEST(Memcached);
@@ -68,7 +69,7 @@ bool TestExtMemcached::test_Memcached_get_set() {
   CREATE_MEMCACHED();
 
   const char *key = "foo";
-  Array value = CREATE_MAP1("foo", "bar");
+  Array value = make_map_array("foo", "bar");
   memc->t_set(key, value, EXPIRATION);
   VS(memc->t_get(key), value);
 
@@ -107,7 +108,7 @@ bool TestExtMemcached::test_Memcached_types() {
   list.add(s_float_zero, 0.0);
   list.add(s_null, uninit_null());
   list.add(s_array_empty, Array());
-  list.add(s_array, CREATE_VECTOR4(1, 2, 3, "foo"));
+  list.add(s_array, make_packed_array(1, 2, 3, "foo"));
 
   CREATE_MEMCACHED();
   for (ArrayIter iter(list); iter; ++iter) {
@@ -120,7 +121,7 @@ bool TestExtMemcached::test_Memcached_types() {
   }
 
   VERIFY(memc->t_setmulti(list, EXPIRATION));
-  Variant res = memc->t_getmulti(list.keys());
+  Variant res = memc->t_getmulti(f_array_keys(list).toArray());
   VERIFY(res.isArray());
   Array resArray = res.toArray();
   VERIFY(resArray->size() == list.size());
@@ -133,8 +134,9 @@ bool TestExtMemcached::test_Memcached_types() {
 
 bool TestExtMemcached::test_Memcached_cas() {
   CREATE_MEMCACHED();
-  for (ArrayIter iter(memc_version); iter; ++iter) {
-    if (!f_version_compare(iter.second().toString(), "1.3.0", ">=")) {
+  for (ArrayIter iter(memc_version.toArray()); iter; ++iter) {
+    if (!HHVM_FN(version_compare)(iter.second().toString(), "1.3.0", ">=")
+        .toBoolean()) {
       SKIP("Need memcached 1.3.0 for CAS");
       return Count(true);
     }

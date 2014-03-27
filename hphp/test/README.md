@@ -21,7 +21,12 @@ all sub-suites.
 * Slow tests with the JIT in IR mode -
 `test/run test/slow -m hhir`
 
-* Run evertyhing that is supposed to pass -
+* Slow tests with the JIT, using pseudomain_wrapper.php to ensure that
+  statements in global scope get jitted (may have false positives due to,
+  e.g. backtraces changing) -
+`test/run test/slow -m automain`
+
+* Run everything that is supposed to pass -
 `fbmake runtests`
 
 # File Layout
@@ -51,8 +56,8 @@ Any suite can have a `config.hdf` file in it that will be used. If one isn't
 present, then the parent suite it checked recusrivly until we use
 test/config.hdf.
 
-If a suite contains an `hphpd.hdf` file, all of the files in the suite will be
-run with the -m debug and --debug-config _dir_/hphpd.hdf switches added to the
+If a suite contains an `hphpd.ini` file, all of the files in the suite will be
+run with the -m debug and --debug-config _dir_/hphpd.ini switches added to the
 command line. (_dir_ will be replaced by path of the suite directory.)
 
 Name your test in a descriptive manner and when in doubt break your test into

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,15 +17,14 @@
 #ifndef incl_HPHP_EXT_HHBC_H_
 #define incl_HPHP_EXT_HHBC_H_
 
-#include "hphp/runtime/base/complex_types.h"
+#include "hphp/runtime/base/complex-types.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct ActRec;
 
-  class Instance;
-;
+class ObjectData;
 
 struct HhbcExtFuncInfo {
   const char* m_name;
@@ -40,8 +39,10 @@ struct HhbcExtMethodInfo {
 
 struct HhbcExtClassInfo {
   const char* m_name;
-  HPHP::Instance* (*m_InstanceCtor)(HPHP::Class*);
-  int m_sizeof;
+  BuiltinCtorFunction m_instanceCtor;
+  BuiltinDtorFunction m_instanceDtor;
+  size_t m_totalSize;
+  ptrdiff_t m_objectDataOffset;
   long long m_methodCount;
   const HhbcExtMethodInfo* m_methods;
   HPHP::Class** m_clsPtr;

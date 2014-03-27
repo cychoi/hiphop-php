@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -14,24 +14,36 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/ext/ext_network.h"
-#include "hphp/runtime/ext/ext_apc.h"
-#include "hphp/runtime/ext/ext_string.h"
-#include "hphp/runtime/base/runtime_option.h"
-#include "hphp/runtime/base/server/server_stats.h"
-#include "hphp/util/lock.h"
-#include "hphp/runtime/base/file/file.h"
-#include "netinet/in.h"
+
+#include <netinet/in.h>
 #include <netdb.h>
 #include <sys/socket.h>
-#include "arpa/inet.h"
-#include "arpa/nameser.h"
+#include <arpa/inet.h>
+#include <arpa/nameser.h>
 #include <resolv.h>
+
+#include "folly/ScopeGuard.h"
+
+#include "hphp/runtime/ext/ext_apc.h"
+#include "hphp/runtime/ext/ext_string.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/server/server-stats.h"
+#include "hphp/util/lock.h"
+#include "hphp/runtime/base/file.h"
 #include "hphp/util/network.h"
 
 #if defined(__APPLE__)
 # include <arpa/nameser_compat.h>
+#include <vector>
+#endif
+
+// HOST_NAME_MAX is recommended by POSIX, but not required.
+// FreeBSD and OSX (as of 10.9) are known to not define it.
+// 255 is generally the safe value to assume and upstream
+// PHP does this as well.
+#ifndef HOST_NAME_MAX
+#define HOST_NAME_MAX 255
 #endif
 
 #define MAXPACKET  8192 /* max packet size used internally by BIND */
@@ -100,31 +112,18 @@ private:
 IMPLEMENT_THREAD_LOCAL(ResolverInit, ResolverInit::s_res);
 
 Variant f_gethostname() {
-  struct addrinfo hints, *res;
-  char h_name[NI_MAXHOST];
-  int error;
-  String canon_hname;
+  char h_name[HOST_NAME_MAX];
 
-  error = gethostname(h_name, NI_MAXHOST);
-  if (error) {
+  if (gethostname(h_name, HOST_NAME_MAX) != 0) {
+    raise_warning(
+        "gethostname() failed with errorno=%d: %s", errno, strerror(errno));
     return false;
   }
 
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_flags = AI_CANONNAME;
-
-  error = getaddrinfo(h_name, NULL, &hints, &res);
-  if (error) {
-    return String(h_name, CopyString);
-  }
-
-  canon_hname = String(res->ai_canonname, CopyString);
-  freeaddrinfo(res);
-  return canon_hname;
+  return String(h_name, CopyString);
 }
 
-Variant f_gethostbyaddr(CStrRef ip_address) {
+Variant f_gethostbyaddr(const String& ip_address) {
   IOStatusHelper io("gethostbyaddr", ip_address.data());
   struct addrinfo hints, *res, *res0;
   char h_name[NI_MAXHOST];
@@ -149,7 +148,7 @@ Variant f_gethostbyaddr(CStrRef ip_address) {
   return ip_address;
 }
 
-String f_gethostbyname(CStrRef hostname) {
+String f_gethostbyname(const String& hostname) {
   IOStatusHelper io("gethostbyname", hostname.data());
   if (RuntimeOption::EnableDnsCache) {
     Variant success;
@@ -163,8 +162,8 @@ String f_gethostbyname(CStrRef hostname) {
     }
   }
 
-  Util::HostEnt result;
-  if (!Util::safe_gethostbyname(hostname.data(), result)) {
+  HostEnt result;
+  if (!safe_gethostbyname(hostname.data(), result)) {
     if (RuntimeOption::EnableDnsCache) {
       f_apc_store(hostname, false, RuntimeOption::DnsCacheTTL,
                   SHARED_STORE_DNS_CACHE);
@@ -174,7 +173,7 @@ String f_gethostbyname(CStrRef hostname) {
 
   struct in_addr in;
   memcpy(&in.s_addr, *(result.hostbuf.h_addr_list), sizeof(in.s_addr));
-  String ret(Util::safe_inet_ntoa(in));
+  String ret(safe_inet_ntoa(in));
   if (RuntimeOption::EnableDnsCache) {
     f_apc_store(hostname, ret, RuntimeOption::DnsCacheTTL,
                 SHARED_STORE_DNS_CACHE);
@@ -182,22 +181,22 @@ String f_gethostbyname(CStrRef hostname) {
   return ret;
 }
 
-Variant f_gethostbynamel(CStrRef hostname) {
+Variant f_gethostbynamel(const String& hostname) {
   IOStatusHelper io("gethostbynamel", hostname.data());
-  Util::HostEnt result;
-  if (!Util::safe_gethostbyname(hostname.data(), result)) {
+  HostEnt result;
+  if (!safe_gethostbyname(hostname.data(), result)) {
     return false;
   }
 
   Array ret;
   for (int i = 0 ; result.hostbuf.h_addr_list[i] != 0 ; i++) {
     struct in_addr in = *(struct in_addr *)result.hostbuf.h_addr_list[i];
-    ret.append(String(Util::safe_inet_ntoa(in)));
+    ret.append(String(safe_inet_ntoa(in)));
   }
   return ret;
 }
 
-Variant f_getprotobyname(CStrRef name) {
+Variant f_getprotobyname(const String& name) {
   Lock lock(NetworkMutex);
 
   struct protoent *ent = getprotobyname(name.data());
@@ -217,7 +216,7 @@ Variant f_getprotobynumber(int number) {
   return String(ent->p_name, CopyString);
 }
 
-Variant f_getservbyname(CStrRef service, CStrRef protocol) {
+Variant f_getservbyname(const String& service, const String& protocol) {
   Lock lock(NetworkMutex);
 
   struct servent *serv = getservbyname(service.data(), protocol.data());
@@ -227,7 +226,7 @@ Variant f_getservbyname(CStrRef service, CStrRef protocol) {
   return ntohs(serv->s_port);
 }
 
-Variant f_getservbyport(int port, CStrRef protocol) {
+Variant f_getservbyport(int port, const String& protocol) {
   Lock lock(NetworkMutex);
 
   struct servent *serv = getservbyport(htons(port), protocol.data());
@@ -237,7 +236,7 @@ Variant f_getservbyport(int port, CStrRef protocol) {
   return String(serv->s_name, CopyString);
 }
 
-Variant f_inet_ntop(CStrRef in_addr) {
+Variant f_inet_ntop(const String& in_addr) {
   int af = AF_INET;
   if (in_addr.size() == 16) {
     af = AF_INET6;
@@ -254,7 +253,7 @@ Variant f_inet_ntop(CStrRef in_addr) {
   return String(buffer, CopyString);
 }
 
-Variant f_inet_pton(CStrRef address) {
+Variant f_inet_pton(const String& address) {
   int af = AF_INET;
   const char *saddress = address.data();
   if (strchr(saddress, ':')) {
@@ -275,7 +274,9 @@ Variant f_inet_pton(CStrRef address) {
   return String(buffer, af == AF_INET ? 4 : 16, CopyString);
 }
 
-Variant f_ip2long(CStrRef ip_address) {
+const StaticString s_255_255_255_255("255.255.255.255");
+
+Variant f_ip2long(const String& ip_address) {
   unsigned long int ip;
   if (ip_address.empty() ||
       (ip = inet_addr(ip_address.data())) == INADDR_NONE) {
@@ -283,7 +284,7 @@ Variant f_ip2long(CStrRef ip_address) {
      * because inet_addr() considers it wrong. We return 0xFFFFFFFF and
      * not -1 or ~0 because of 32/64bit issues.
      */
-    if (ip_address == "255.255.255.255") {
+    if (ip_address == s_255_255_255_255) {
       return (int64_t)0xFFFFFFFF;
     }
     return false;
@@ -294,7 +295,7 @@ Variant f_ip2long(CStrRef ip_address) {
 String f_long2ip(int proper_address) {
   struct in_addr myaddr;
   myaddr.s_addr = htonl(proper_address);
-  return Util::safe_inet_ntoa(myaddr);
+  return safe_inet_ntoa(myaddr);
 }
 
 /* just a hack to free resources allocated by glibc in __res_nsend()
@@ -315,7 +316,7 @@ static void php_dns_free_res(struct __res_state *res) {
 #endif
 }
 
-bool f_dns_check_record(CStrRef host, CStrRef type /* = null_string */) {
+bool f_dns_check_record(const String& host, const String& type /* = null_string */) {
   IOStatusHelper io("dns_check_record", host.data());
   const char *stype;
   if (type.empty()) {
@@ -357,7 +358,7 @@ bool f_dns_check_record(CStrRef host, CStrRef type /* = null_string */) {
   return (i >= 0);
 }
 
-bool f_checkdnsrr(CStrRef host, CStrRef type /* = null_string */) {
+bool f_checkdnsrr(const String& host, const String& type /* = null_string */) {
   return f_dns_check_record(host, type);
 }
 
@@ -366,48 +367,48 @@ typedef union {
   u_char qb2[65536];
 } querybuf;
 
-static const StaticString s_host("host");
-static const StaticString s_type("type");
-static const StaticString s_ip("ip");
-static const StaticString s_pri("pri");
-static const StaticString s_weight("weight");
-static const StaticString s_port("port");
-static const StaticString s_order("order");
-static const StaticString s_pref("pref");
-static const StaticString s_target("target");
-static const StaticString s_cpu("cpu");
-static const StaticString s_os("os");
-static const StaticString s_txt("txt");
-static const StaticString s_mname("mname");
-static const StaticString s_rname("rname");
-static const StaticString s_serial("serial");
-static const StaticString s_refresh("refresh");
-static const StaticString s_retry("retry");
-static const StaticString s_expire("expire");
-static const StaticString s_minimum_ttl("minimum-ttl");
-static const StaticString s_ipv6("ipv6");
-static const StaticString s_masklen("masklen");
-static const StaticString s_chain("chain");
-static const StaticString s_flags("flags");
-static const StaticString s_services("services");
-static const StaticString s_regex("regex");
-static const StaticString s_replacement("replacement");
-static const StaticString s_class("class");
-static const StaticString s_ttl("ttl");
-
-static const StaticString s_A("A");
-static const StaticString s_MX("MX");
-static const StaticString s_CNAME("CNAME");
-static const StaticString s_NS("NS");
-static const StaticString s_PTR("PTR");
-static const StaticString s_HINFO("HINFO");
-static const StaticString s_TXT("TXT");
-static const StaticString s_SOA("SOA");
-static const StaticString s_AAAA("AAAA");
-static const StaticString s_A6("A6");
-static const StaticString s_SRV("SRV");
-static const StaticString s_NAPTR("NAPTR");
-static const StaticString s_IN("IN");
+const StaticString
+  s_host("host"),
+  s_type("type"),
+  s_ip("ip"),
+  s_pri("pri"),
+  s_weight("weight"),
+  s_port("port"),
+  s_order("order"),
+  s_pref("pref"),
+  s_target("target"),
+  s_cpu("cpu"),
+  s_os("os"),
+  s_txt("txt"),
+  s_mname("mname"),
+  s_rname("rname"),
+  s_serial("serial"),
+  s_refresh("refresh"),
+  s_retry("retry"),
+  s_expire("expire"),
+  s_minimum_ttl("minimum-ttl"),
+  s_ipv6("ipv6"),
+  s_masklen("masklen"),
+  s_chain("chain"),
+  s_flags("flags"),
+  s_services("services"),
+  s_regex("regex"),
+  s_replacement("replacement"),
+  s_class("class"),
+  s_ttl("ttl"),
+  s_A("A"),
+  s_MX("MX"),
+  s_CNAME("CNAME"),
+  s_NS("NS"),
+  s_PTR("PTR"),
+  s_HINFO("HINFO"),
+  s_TXT("TXT"),
+  s_SOA("SOA"),
+  s_AAAA("AAAA"),
+  s_A6("A6"),
+  s_SRV("SRV"),
+  s_NAPTR("NAPTR"),
+  s_IN("IN");
 
 static unsigned char *php_parserr(unsigned char *cp, querybuf *answer,
                                   int type_to_fetch, bool store,
@@ -491,14 +492,14 @@ static unsigned char *php_parserr(unsigned char *cp, querybuf *answer,
 
     subarray.set(s_type, s_TXT);
     String s = String(dlen, ReserveString);
-    tp = (unsigned char *)s.mutableSlice().ptr;
+    tp = (unsigned char *)s.bufferSlice().ptr;
 
     while (ll < dlen) {
       n = cp[ll];
       memcpy(tp + ll , cp + ll + 1, n);
       ll = ll + n + 1;
     }
-    s.setSize(dlen);
+    s.setSize(dlen > 0 ? dlen - 1 : 0);
     cp += dlen;
 
     subarray.set(s_txt, s);
@@ -684,20 +685,15 @@ static unsigned char *php_parserr(unsigned char *cp, querybuf *answer,
   return cp;
 }
 
-Variant f_dns_get_record(CStrRef hostname, int type /* = -1 */,
-                         VRefParam authns /* = null */,
-                         VRefParam addtl /* = null */) {
+Variant f_dns_get_record(const String& hostname, int type /* = -1 */,
+                         VRefParam authnsRef /* = null */,
+                         VRefParam addtlRef /* = null */) {
   IOStatusHelper io("dns_get_record", hostname.data(), type);
   if (type < 0) type = PHP_DNS_ALL;
   if (type & ~PHP_DNS_ALL && type != PHP_DNS_ANY) {
     raise_warning("Type '%d' not supported", type);
     return false;
   }
-
-  /* Initialize the return array */
-  Array ret;
-  authns = Array::Create();
-  addtl = Array::Create();
 
   unsigned char *cp = NULL, *end = NULL;
   int qd, an, ns = 0, ar = 0;
@@ -712,6 +708,7 @@ Variant f_dns_get_record(CStrRef hostname, int type /* = -1 */,
    * - In case of PHP_DNS_ANY we use the directly fetch DNS_T_ANY.
    *   (step NUMTYPES+1 )
    */
+  Array ret;
   bool first_query = true;
   bool store_results = true;
   for (int t = (type == PHP_DNS_ANY ? (PHP_DNS_NUM_TYPES + 1) : 0);
@@ -788,6 +785,9 @@ Variant f_dns_get_record(CStrRef hostname, int type /* = -1 */,
     php_dns_free_res(res);
   }
 
+  Array authns;
+  Array addtl;
+
   /* List of Authoritative Name Servers */
   while (ns-- > 0 && cp && cp < end) {
     Array retval;
@@ -806,11 +806,14 @@ Variant f_dns_get_record(CStrRef hostname, int type /* = -1 */,
     }
   }
 
+  authnsRef = authns;
+  addtlRef = addtl;
   return ret;
 }
 
-bool f_dns_get_mx(CStrRef hostname, VRefParam mxhosts,
-                  VRefParam weights /* = null */) {
+bool f_dns_get_mx(const String& hostname,
+                  VRefParam mxhostsRef,
+                  VRefParam weightsRef /* = null */) {
   IOStatusHelper io("dns_get_mx", hostname.data());
   int count, qdc;
   unsigned short type, weight;
@@ -818,8 +821,12 @@ bool f_dns_get_mx(CStrRef hostname, VRefParam mxhosts,
   char buf[MAXHOSTNAMELEN];
   unsigned char *cp, *end;
 
-  mxhosts = Array::Create();
-  weights = Array::Create();
+  Array mxhosts;
+  Array weights;
+  SCOPE_EXIT {
+    mxhostsRef = mxhosts;
+    weightsRef = weights;
+  };
 
   /* Go! */
   struct __res_state *res;
@@ -878,7 +885,7 @@ bool f_dns_get_mx(CStrRef hostname, VRefParam mxhosts,
   return true;
 }
 
-bool f_getmxrr(CStrRef hostname, VRefParam mxhosts,
+bool f_getmxrr(const String& hostname, VRefParam mxhosts,
                VRefParam weight /* = uninit_null() */) {
   return f_dns_get_mx(hostname, ref(mxhosts), weight);
 }
@@ -890,15 +897,15 @@ bool f_getmxrr(CStrRef hostname, VRefParam mxhosts,
  * f_fsockopen() and f_pfsockopen() are implemented in ext_socket.cpp.
  */
 
-Variant f_socket_get_status(CObjRef stream) {
+Variant f_socket_get_status(const Resource& stream) {
   return f_stream_get_meta_data(stream);
 }
 
-bool f_socket_set_blocking(CObjRef stream, int mode) {
+bool f_socket_set_blocking(const Resource& stream, int mode) {
   return f_stream_set_blocking(stream, mode);
 }
 
-bool f_socket_set_timeout(CObjRef stream, int seconds,
+bool f_socket_set_timeout(const Resource& stream, int seconds,
                           int microseconds /* = 0 */) {
   return f_stream_set_timeout(stream, seconds, microseconds);
 }
@@ -906,7 +913,7 @@ bool f_socket_set_timeout(CObjRef stream, int seconds,
 ///////////////////////////////////////////////////////////////////////////////
 // http
 
-void f_header(CStrRef str, bool replace /* = true */,
+void f_header(const String& str, bool replace /* = true */,
               int http_response_code /* = 0 */) {
   if (f_headers_sent()) {
     raise_warning("Cannot modify header information - headers already sent");
@@ -924,20 +931,27 @@ void f_header(CStrRef str, bool replace /* = true */,
   }
 
   Transport *transport = g_context->getTransport();
-  if (transport && header->size()) {
-    const char *header_line = header->data();
+  if (transport && header.size()) {
+    const char *header_line = header.data();
 
     // handle single line of status code
-    if (header->size() >= 5 && strncasecmp(header_line, "HTTP/", 5) == 0) {
+    if (header.size() >= 5 && strncasecmp(header_line, "HTTP/", 5) == 0) {
       int code = 200;
+      const char *reason = nullptr;
       for (const char *ptr = header_line; *ptr; ptr++) {
         if (*ptr == ' ' && *(ptr + 1) != ' ') {
           code = atoi(ptr + 1);
+          for (ptr++; *ptr; ptr++) {
+            if (*ptr == ' ' && *(ptr + 1) != ' ') {
+              reason = ptr + 1;
+              break;
+            }
+          }
           break;
         }
       }
       if (code) {
-        transport->setResponse(code, "explicit_header");
+        transport->setResponse(code, reason);
       }
       return;
     }
@@ -968,7 +982,7 @@ void f_header(CStrRef str, bool replace /* = true */,
   }
 }
 
-Variant f_http_response_code(int response_code /*= 0 */) {
+Variant f_http_response_code(int response_code /* = 0 */) {
   Transport *transport = g_context->getTransport();
   if (!transport) {
     raise_warning("Unable to access response code, no transport");
@@ -989,20 +1003,19 @@ Variant f_http_response_code(int response_code /*= 0 */) {
 
 Array f_headers_list() {
   Transport *transport = g_context->getTransport();
+  Array ret = Array::Create();
   if (transport) {
     HeaderMap headers;
     transport->getResponseHeaders(headers);
-    Array ret;
     for (HeaderMap::const_iterator iter = headers.begin();
          iter != headers.end(); ++iter) {
-      const vector<string> &values = iter->second;
+      const std::vector<std::string> &values = iter->second;
       for (unsigned int i = 0; i < values.size(); i++) {
         ret.append(String(iter->first + ": " + values[i]));
       }
     }
-    return ret;
   }
-  return Array();
+  return ret;
 }
 
 bool f_headers_sent(VRefParam file /* = null */, VRefParam line /* = null */) {
@@ -1015,7 +1028,7 @@ bool f_headers_sent(VRefParam file /* = null */, VRefParam line /* = null */) {
   return false;
 }
 
-bool f_header_register_callback(CVarRef callback) {
+bool f_header_register_callback(const Variant& callback) {
   Transport *transport = g_context->getTransport();
   if (!transport) {
     // fail if there is no transport
@@ -1028,7 +1041,7 @@ bool f_header_register_callback(CVarRef callback) {
   return transport->setHeaderCallback(callback);
 }
 
-void f_header_remove(CStrRef name /* = null_string */) {
+void f_header_remove(const String& name /* = null_string */) {
   if (f_headers_sent()) {
     raise_warning("Cannot modify header information - headers already sent");
   }
@@ -1051,9 +1064,9 @@ int f_get_http_request_size() {
   }
 }
 
-bool f_setcookie(CStrRef name, CStrRef value /* = null_string */,
-                 int64_t expire /* = 0 */, CStrRef path /* = null_string */,
-                 CStrRef domain /* = null_string */, bool secure /* = false */,
+bool f_setcookie(const String& name, const String& value /* = null_string */,
+                 int64_t expire /* = 0 */, const String& path /* = null_string */,
+                 const String& domain /* = null_string */, bool secure /* = false */,
                  bool httponly /* = false */) {
   Transport *transport = g_context->getTransport();
   if (transport) {
@@ -1063,9 +1076,9 @@ bool f_setcookie(CStrRef name, CStrRef value /* = null_string */,
   return false;
 }
 
-bool f_setrawcookie(CStrRef name, CStrRef value /* = null_string */,
-                    int64_t expire /* = 0 */, CStrRef path /* = null_string */,
-                    CStrRef domain /* = null_string */,
+bool f_setrawcookie(const String& name, const String& value /* = null_string */,
+                    int64_t expire /* = 0 */, const String& path /* = null_string */,
+                    const String& domain /* = null_string */,
                     bool secure /* = false */,
                     bool httponly /* = false */) {
   Transport *transport = g_context->getTransport();
@@ -1082,7 +1095,7 @@ void f_define_syslog_variables() {
   // do nothing, since all variables are defined as constants already
 }
 
-bool f_openlog(CStrRef ident, int option, int facility) {
+bool f_openlog(const String& ident, int option, int facility) {
   openlog(ident.data(), option, facility);
   return true;
 }
@@ -1092,7 +1105,7 @@ bool f_closelog() {
   return true;
 }
 
-bool f_syslog(int priority, CStrRef message) {
+bool f_syslog(int priority, const String& message) {
   syslog(priority, "%s", message.data());
   return true;
 }

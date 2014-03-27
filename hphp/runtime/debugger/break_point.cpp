@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,19 +13,27 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/debugger/break_point.h"
+
+#include <boost/lexical_cast.hpp>
+#include <vector>
+
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/debugger_proxy.h"
 #include "hphp/runtime/debugger/debugger_thrift_buffer.h"
 #include "hphp/runtime/base/preg.h"
-#include "hphp/runtime/base/execution_context.h"
-#include "hphp/runtime/base/class_info.h"
-#include "hphp/runtime/base/stat_cache.h"
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/class-info.h"
+#include "hphp/runtime/base/stat-cache.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/ext/ext_continuation.h"
 
 namespace HPHP { namespace Eval {
+
+using std::string;
+using boost::lexical_cast;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 TRACE_SET_MOD(debugger);
@@ -40,7 +48,7 @@ int InterruptSite::getFileLen() const {
 
 std::string InterruptSite::desc() const {
   TRACE(2, "InterruptSite::desc\n");
-  string ret;
+  std::string ret;
   if (m_error.isNull()) {
     ret = "Break";
   } else if (m_error.isObject()) {
@@ -64,7 +72,7 @@ std::string InterruptSite::desc() const {
   string file = getFile();
   int line0 = getLine0();
   if (line0) {
-    ret += " on line " + lexical_cast<string>(line0);
+    ret += " on line " + boost::lexical_cast<std::string>(line0);
     if (!file.empty()) {
       ret += " of " + file;
     }
@@ -75,36 +83,60 @@ std::string InterruptSite::desc() const {
   return ret;
 }
 
-InterruptSite::InterruptSite(bool hardBreakPoint, CVarRef error)
-    : m_error(error), m_class(nullptr), m_function(nullptr),
+InterruptSite::InterruptSite(bool hardBreakPoint, const Variant& error)
+    : m_error(error), m_activationRecord(nullptr),
+      m_callingSite(nullptr), m_class(nullptr),
       m_file((StringData*)nullptr),
       m_line0(0), m_char0(0), m_line1(0), m_char1(0),
       m_offset(InvalidAbsoluteOffset), m_unit(nullptr), m_valid(false),
       m_funcEntry(false) {
   TRACE(2, "InterruptSite::InterruptSite\n");
-  Transl::VMRegAnchor _;
 #define bail_on(c) if (c) { return; }
-  VMExecutionContext* context = g_vmContext;
+  auto const context = g_context.getNoCheck();
   ActRec *fp = context->getFP();
   bail_on(!fp);
   if (hardBreakPoint && fp->skipFrame()) {
     // for hard breakpoint, the fp is for an extension function,
     // so we need to construct the site on the caller
     fp = context->getPrevVMState(fp, &m_offset);
-    assert(fp);
-    bail_on(!fp->m_func);
-    m_unit = fp->m_func->unit();
-    bail_on(!m_unit);
   } else {
-    const uchar *pc = context->getPC();
-    bail_on(!fp->m_func);
-    m_unit = fp->m_func->unit();
+    auto const *pc = context->getPC();
+    auto f = fp->m_func;
+    bail_on(!f);
+    m_unit = f->unit();
     bail_on(!m_unit);
     m_offset = m_unit->offsetOf(pc);
-    if (m_offset == fp->m_func->base()) {
+    auto base = f->isGenerator() ? c_Continuation::userBase(f) : f->base();
+    if (m_offset == base) {
       m_funcEntry = true;
     }
   }
+#undef bail_on
+  this->Initialize(fp);
+}
+
+// Only used to look for callers by function name. No need to
+// to retrieve source line information for this kind of site.
+InterruptSite::InterruptSite(ActRec *fp, Offset offset, const Variant& error)
+  : m_error(error), m_activationRecord(nullptr),
+    m_callingSite(nullptr), m_class(nullptr),
+    m_file((StringData*)nullptr),
+    m_line0(0), m_char0(0), m_line1(0), m_char1(0),
+    m_offset(offset), m_unit(nullptr), m_valid(false),
+    m_funcEntry(false) {
+  TRACE(2, "InterruptSite::InterruptSite(fp)\n");
+  this->Initialize(fp);
+}
+
+void InterruptSite::Initialize(ActRec *fp) {
+  TRACE(2, "InterruptSite::Initialize\n");
+
+#define bail_on(c) if (c) { return; }
+  assert(fp);
+  m_activationRecord = fp;
+  bail_on(!fp->m_func);
+  m_unit = fp->m_func->unit();
+  bail_on(!m_unit);
   m_file = m_unit->filepath()->data();
   if (m_unit->getSourceLoc(m_offset, m_sourceLoc)) {
     m_line0 = m_sourceLoc.line0;
@@ -120,6 +152,21 @@ InterruptSite::InterruptSite(bool hardBreakPoint, CVarRef error)
   }
 #undef bail_on
   m_valid = true;
+}
+
+// Returns an Interrupt site for the function that called the
+// function that contains this site. This site retains ownership
+// of the returned site and it will be deleted when this site
+// is destructed, so do not hold on to the returned object for
+// longer than there is a guarantee that this site will be alive.
+const InterruptSite *InterruptSite::getCallingSite() const {
+  if (m_callingSite != nullptr) return m_callingSite.get();
+  auto const context = g_context.getNoCheck();
+  Offset parentOffset;
+  auto parentFp = context->getPrevVMState(m_activationRecord, &parentOffset);
+  if (parentFp == nullptr) return nullptr;
+  m_callingSite.reset(new InterruptSite(parentFp, parentOffset, m_error));
+  return m_callingSite.get();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -189,9 +236,10 @@ BreakPointInfo::~BreakPointInfo() {
   }
 }
 
-void BreakPointInfo::sendImpl(DebuggerThriftBuffer &thrift) {
+void BreakPointInfo::sendImpl(int version, DebuggerThriftBuffer &thrift) {
   TRACE(2, "BreakPointInfo::sendImpl\n");
   thrift.write((int8_t)m_state);
+  if (version >= 1) thrift.write((int8_t)m_bindState);
   thrift.write((int8_t)m_interruptType);
   thrift.write(m_file);
   thrift.write(m_line1);
@@ -208,10 +256,13 @@ void BreakPointInfo::sendImpl(DebuggerThriftBuffer &thrift) {
   thrift.write(m_exceptionObject);
 }
 
-void BreakPointInfo::recvImpl(DebuggerThriftBuffer &thrift) {
+void BreakPointInfo::recvImpl(int version, DebuggerThriftBuffer &thrift) {
   TRACE(2, "BreakPointInfo::recvImpl\n");
   int8_t tmp;
   thrift.read(tmp); m_state = (State)tmp;
+  if (version >= 1) {
+    thrift.read(tmp); m_bindState = (BindState)tmp;
+  }
   thrift.read(tmp); m_interruptType = (InterruptType)tmp;
   thrift.read(m_file);
   thrift.read(m_line1);
@@ -234,30 +285,44 @@ void BreakPointInfo::setClause(const std::string &clause, bool check) {
   m_check = check;
 }
 
-void BreakPointInfo::changeBreakPointDepth(int stackDepth) {
-  TRACE(2, "BreakPointInfo::changeBreakPointDepth\n");
-  // if the breakpoint is equal or lower than the stack depth
-  // delete it
-  breakDepthStack.remove_if(
-      std::bind2nd(std::greater_equal<int>(), stackDepth)
-  );
+void BreakPointInfo::transferStack(BreakPointInfoPtr bpi) {
+  if (bpi->m_stack.empty()) return;
+  m_stack.splice(m_stack.begin(), bpi->m_stack);
 }
 
-void BreakPointInfo::unsetBreakable(int stackDepth) {
+// Disables the breakpoint at the given stack level.
+// Following this call, BreakPointInfo::breakable will return false until
+// a subsequent call to BreakPointInfo::setBreakable with a lower or equal
+// stack level.
+void BreakPointInfo::unsetBreakable(int stackDepth, Offset offset) {
   TRACE(2, "BreakPointInfo::unsetBreakable\n");
-  breakDepthStack.push_back(stackDepth);
-}
-
-void BreakPointInfo::setBreakable(int stackDepth) {
-  TRACE(2, "BreakPointInfo::setBreakable\n");
-  if (!breakDepthStack.empty() && breakDepthStack.back() == stackDepth) {
-    breakDepthStack.pop_back();
+  if (m_stack.empty() || m_stack.back().first < stackDepth) {
+    m_stack.push_back(std::make_pair(stackDepth, offset));
   }
 }
 
-bool BreakPointInfo::breakable(int stackDepth) const {
+// Enables the breakpoint at the given stack level.
+// Following this call, BreakPointInfo::breakable will return true until
+// a subsequent call to BreakPointInfo::unsetBreakable with the same or
+// higher stack level.
+void BreakPointInfo::setBreakable(int stackDepth) {
+  TRACE(2, "BreakPointInfo::setBreakable\n");
+  while (!m_stack.empty() && m_stack.back().first >= stackDepth) {
+    m_stack.pop_back();
+  }
+}
+
+// Returns true if this breakpoint is enabled at the given stack level.
+bool BreakPointInfo::breakable(int stackDepth, Offset offset) const {
   TRACE(2, "BreakPointInfo::breakable\n");
-  if (!breakDepthStack.empty() && breakDepthStack.back() == stackDepth) {
+  if (!m_stack.empty() && m_stack.back().first >= stackDepth) {
+    if (m_stack.back().first == stackDepth && m_stack.back().second >= offset) {
+      // We assume that the only way to ask this question for the same
+      // stack level and offset, is for the execution to have come back
+      // here after executing the operation at offset, but without
+      // executing any other operations in the interpreter.
+      return true;
+    }
     return false;
   } else {
     return true;
@@ -290,7 +355,7 @@ bool BreakPointInfo::valid() {
             return false;
           }
         }
-        if (m_regex || m_funcs.size() > 1) {
+        if (m_regex) {
           return false;
         }
         return (m_line1 && m_line2) || !m_file.empty() || !m_funcs.empty();
@@ -312,7 +377,23 @@ bool BreakPointInfo::same(BreakPointInfoPtr bpi) {
   return desc() == bpi->desc();
 }
 
-bool BreakPointInfo::match(InterruptType interrupt, InterruptSite &site) {
+// Checks if the interrupt type and site matches this breakpoint.
+// Does not run any code.
+bool BreakPointInfo::match(DebuggerProxy &proxy, InterruptType interrupt,
+    InterruptSite &site) {
+  return match(proxy, interrupt, site, false);
+}
+
+// Checks if the interrupt type and site matches this breakpoint.
+// Evaluates the breakpoint's conditional clause if present.
+// This can cause side effects.
+bool BreakPointInfo::cmatch(DebuggerProxy &proxy, InterruptType interrupt,
+    InterruptSite &site) {
+  return match(proxy, interrupt, site, true);
+}
+
+bool BreakPointInfo::match(DebuggerProxy &proxy, InterruptType interrupt,
+    InterruptSite &site, bool evalClause) {
   TRACE(2, "BreakPointInfo::match\n");
   if (m_interruptType == interrupt) {
     switch (interrupt) {
@@ -324,13 +405,13 @@ bool BreakPointInfo::match(InterruptType interrupt, InterruptSite &site) {
       case ExceptionThrown:
         return
           checkExceptionOrError(site.getError()) &&
-          checkUrl(site.url()) && checkClause();
+          checkUrl(site.url()) && (!evalClause || checkClause(proxy));
       case BreakPointReached:
       {
         bool match =
           Match(site.getFile(), site.getFileLen(), m_file, m_regex, false) &&
           checkLines(site.getLine0()) && checkStack(site) &&
-          checkUrl(site.url()) && checkClause();
+          checkUrl(site.url()) && (!evalClause || checkClause(proxy));
 
         if (!getFuncName().empty()) {
           // function entry breakpoint
@@ -359,7 +440,7 @@ std::string BreakPointInfo::state(bool padding) const {
 }
 
 std::string BreakPointInfo::regex(const std::string &name) const {
-  TRACE(2, "BreakPointInfo::regex\n");
+  TRACE(7, "BreakPointInfo::regex\n");
   if (m_regex) {
     return "regex{" + name + "}";
   }
@@ -367,7 +448,7 @@ std::string BreakPointInfo::regex(const std::string &name) const {
 }
 
 std::string BreakPointInfo::getNamespace() const {
-  TRACE(2, "BreakPointInfo::getNamespace\n");
+  TRACE(7, "BreakPointInfo::getNamespace\n");
   if (!m_funcs.empty()) {
     return m_funcs[0]->m_namespace;
   }
@@ -375,7 +456,7 @@ std::string BreakPointInfo::getNamespace() const {
 }
 
 std::string BreakPointInfo::getClass() const {
-  TRACE(2, "BreakPointInfo::getClass\n");
+  TRACE(7, "BreakPointInfo::getClass\n");
   if (!m_funcs.empty()) {
     return m_funcs[0]->m_class;
   }
@@ -383,7 +464,7 @@ std::string BreakPointInfo::getClass() const {
 }
 
 std::string BreakPointInfo::getFunction() const {
-  TRACE(2, "BreakPointInfo::getFunction\n");
+  TRACE(7, "BreakPointInfo::getFunction\n");
   if (!m_funcs.empty()) {
     return m_funcs[0]->m_function;
   }
@@ -391,7 +472,7 @@ std::string BreakPointInfo::getFunction() const {
 }
 
 std::string BreakPointInfo::getFuncName() const {
-  TRACE(2, "BreakPointInfo::getFuncName\n");
+  TRACE(7, "BreakPointInfo::getFuncName\n");
   if (!m_funcs.empty()) {
     return m_funcs[0]->getName();
   }
@@ -399,7 +480,7 @@ std::string BreakPointInfo::getFuncName() const {
 }
 
 std::string BreakPointInfo::site() const {
-  TRACE(2, "BreakPointInfo::site\n");
+  TRACE(7, "BreakPointInfo::site\n");
   string ret;
 
   string preposition = "at ";
@@ -606,6 +687,24 @@ int32_t BreakPointInfo::parseFileLocation(const std::string &str,
   return offset1;
 }
 
+//( letter | underscore ) #( letter | digit | underscore | extended_ascii ),
+//extended_ascii::=char_nbr(127)..char_nbr(255),
+static bool isValidIdentifier(const std::string &str) {
+  auto len = str.length();
+  for (int32_t index = 0; index < len; index++) {
+    char ch = str[index];
+    if (('A' <= ch && ch <= 'Z') || ('a' <= ch && ch <= 'z') || ch == '_') {
+      continue;
+    }
+    if (index == 0) return false;
+    if (('0' <= ch && ch <= '9') || ch >= 127) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 /* The parser accepts the following syntax, which harks back to pre VM days
    (all components are optional, as long as there is at least one component):
 
@@ -670,9 +769,11 @@ void BreakPointInfo::parseBreakPointReached(const std::string &exp,
       // check for {something other than a name}
       if (offset2 == offset1) goto returnInvalid;
       name = exp.substr(offset1, offset2-offset1);
+      offset1 = offset2;
     }
     while (offset1 < len && exp[offset1] == '\\') {
       if (!m_namespace.empty()) m_namespace += "\\";
+      if (!isValidIdentifier(name)) goto returnInvalid;
       m_namespace += name;
       offset1 += 1;
       auto offset2 = scanName(exp, offset1);
@@ -692,11 +793,12 @@ void BreakPointInfo::parseBreakPointReached(const std::string &exp,
     }
     // Now we have a namespace, class and func name.
     // The namespace only or the namespace and class might be empty.
-    DFunctionInfoPtr pfunc(new DFunctionInfo());
+    auto pfunc = std::make_shared<DFunctionInfo>();
     if (m_class.empty()) {
-      if (m_namespace.empty())
+      if (!isValidIdentifier(name)) goto returnInvalid;
+      if (m_namespace.empty()) {
         pfunc->m_function = name;
-      else {
+      } else {
         // Yes this does seem beyond strange, but that is what the PHP parser
         // does when it sees a function declared inside a namespace, so we
         // too have to pretend there is no namespace here. At some point
@@ -706,10 +808,12 @@ void BreakPointInfo::parseBreakPointReached(const std::string &exp,
       }
     } else {
       mangleXhpName(m_class, pfunc->m_class);
+      if (!isValidIdentifier(pfunc->m_class)) goto returnInvalid;
       if (!m_namespace.empty()) {
         // Emulate parser hack. See longer comment above.
         pfunc->m_class = m_namespace + "\\" + pfunc->m_class;
       }
+      if (!isValidIdentifier(name)) goto returnInvalid;
       pfunc->m_function = name;
     }
     m_funcs.insert(m_funcs.begin(), pfunc);
@@ -825,21 +929,28 @@ bool BreakPointInfo::MatchFile(const char *haystack, int haystack_len,
   return false;
 }
 
+// Returns true if file is a suffix path of fullPath
 bool BreakPointInfo::MatchFile(const std::string& file,
-                               const std::string& fullPath,
-                               const std::string& relPath) {
-  TRACE(2, "BreakPointInfo::MatchFile(const std::string&\n");
-  if (file == fullPath || file == relPath) {
+                               const std::string& fullPath) {
+  TRACE(7, "BreakPointInfo::MatchFile(const std::string&\n");
+  if (file == fullPath) {
     return true;
   }
-  if (file.find('/') == std::string::npos &&
-      file == fullPath.substr(fullPath.rfind('/') + 1)) {
+  if (file.size() > 0 && file[0] != '/') {
+    auto pos = fullPath.rfind(file);
+    // check for match
+    if (pos == std::string::npos) return false;
+    // check if match is a suffix
+    if (pos + file.size() > fullPath.size()) return false;
+    // check if suffix is a sub path
+    if (pos == 0 || fullPath[pos-1] != '/') return false;
     return true;
   }
-  // file is possibly setup with a symlink in the path
-  if (StatCache::realpath(file.c_str()) ==
-      StatCache::realpath(fullPath.c_str())) {
-    return true;
+  // Perhaps file or fullPath is a symlink.
+  auto realFile = StatCache::realpath(file.c_str());
+  auto realFullPath = StatCache::realpath(fullPath.c_str());
+  if (realFile != file || realFullPath != fullPath) {
+    return MatchFile(realFile, realFullPath);
   }
   return false;
 }
@@ -853,16 +964,15 @@ bool BreakPointInfo::MatchClass(const char *fcls, const std::string &bcls,
     return Match(fcls, 0, bcls, true, true);
   }
 
-  StackStringData sdBClsName(bcls.c_str());
-  Class* clsB = Unit::lookupClass(&sdBClsName);
-  StackStringData sdFClsName(fcls);
-  Class* clsF = Unit::lookupClass(&sdFClsName);
+  String sdBClsName(bcls);
+  Class* clsB = Unit::lookupClass(sdBClsName.get());
   if (!clsB) return false;
+  String sdFClsName(fcls, CopyString);
+  Class* clsF = Unit::lookupClass(sdFClsName.get());
   if (clsB == clsF) return true;
-  StackStringData sdFuncName(func);
-  Func* f = clsB->lookupMethod(&sdFuncName);
-  if (!f) return false;
-  return (f->baseCls() == clsF);
+  String sdFuncName(func, CopyString);
+  Func* f = clsB->lookupMethod(sdFuncName.get());
+  return f && f->baseCls() == clsF;
 }
 
 bool BreakPointInfo::Match(const char *haystack, int haystack_len,
@@ -884,13 +994,13 @@ bool BreakPointInfo::Match(const char *haystack, int haystack_len,
 
   Variant matches;
   Variant r = preg_match(String(needle.c_str(), needle.size(),
-                                AttachLiteral),
-                         String(haystack, haystack_len, AttachLiteral),
+                                CopyString),
+                         String(haystack, haystack_len, CopyString),
                          matches);
   return HPHP::same(r, 1);
 }
 
-bool BreakPointInfo::checkExceptionOrError(CVarRef e) {
+bool BreakPointInfo::checkExceptionOrError(const Variant& e) {
   TRACE(2, "BreakPointInfo::checkException\n");
   assert(!e.isNull());
   if (e.isObject()) {
@@ -898,7 +1008,7 @@ bool BreakPointInfo::checkExceptionOrError(CVarRef e) {
       return Match(m_class.c_str(), m_class.size(),
                    e.toObject()->o_getClassName().data(), true, false);
     }
-    return e.instanceof(m_class.c_str());
+    return e.getObjectData()->o_instanceof(m_class.c_str());
   }
   return Match(m_class.c_str(), m_class.size(), ErrorClassName, m_regex,
                false);
@@ -928,21 +1038,30 @@ bool BreakPointInfo::checkLines(int line) {
   return true;
 }
 
+// Checks if m_funcs[0] matches the top of the execution stack and
+// if m_funcs[1] (if not null) matches an earlier stack frame, and so on.
+// I.e. m_funcs[1] need only be caller, not a direct caller, of m_funcs[0].
 bool BreakPointInfo::checkStack(InterruptSite &site) {
   TRACE(2, "BreakPointInfo::checkStack\n");
-  if (m_funcs.empty()) return true;
-
-  if (!Match(site.getNamespace(), 0, m_funcs[0]->m_namespace, m_regex, true) ||
-      !Match(site.getFunction(),  0, m_funcs[0]->m_function,  m_regex, true) ||
-      !MatchClass(site.getClass(), m_funcs[0]->m_class, m_regex,
-                  site.getFunction())) {
-    return false;
+  const InterruptSite* s = &site;
+  for (int i = 0; i < m_funcs.size(); ) {
+    if (!Match(s->getNamespace(), 0, m_funcs[i]->m_namespace, m_regex, true) ||
+        !Match(s->getFunction(),  0, m_funcs[i]->m_function,  m_regex, true) ||
+        !MatchClass(s->getClass(), m_funcs[i]->m_class, m_regex,
+                    s->getFunction())) {
+      if (i == 0) return false; //m_funcs[0] must match the very first frame.
+      // there is a mismatch for this frame, but the calling frame may match
+      // so carry on.
+    } else {
+      i++; // matched m_funcs[i], proceed to match m_funcs[i+1]
+    }
+    s = s->getCallingSite();
+    if (s == nullptr) return false;
   }
-
   return true;
 }
 
-bool BreakPointInfo::checkClause() {
+bool BreakPointInfo::checkClause(DebuggerProxy &proxy) {
   TRACE(2, "BreakPointInfo::checkClause\n");
   if (!m_clause.empty()) {
     if (m_php.empty()) {
@@ -957,7 +1076,9 @@ bool BreakPointInfo::checkClause() {
       // Don't hit more breakpoints while attempting to decide if we should stop
       // at this breakpoint.
       EvalBreakControl eval(true);
-      Variant ret = DebuggerProxy::ExecutePHP(m_php, output, false, 0);
+      bool failed;
+      Variant ret = proxy.ExecutePHP(m_php, output, 0, failed,
+                                     DebuggerProxy::ExecutePHPFlagsNone);
       if (m_check) {
         return ret.toBoolean();
       }
@@ -970,17 +1091,19 @@ bool BreakPointInfo::checkClause() {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void BreakPointInfo::SendImpl(const BreakPointInfoPtrVec &bps,
+void BreakPointInfo::SendImpl(int version,
+                              const std::vector<BreakPointInfoPtr> &bps,
                               DebuggerThriftBuffer &thrift) {
   TRACE(2, "BreakPointInfo::SendImpl\n");
   int16_t size = bps.size();
   thrift.write(size);
   for (int i = 0; i < size; i++) {
-    bps[i]->sendImpl(thrift);
+    bps[i]->sendImpl(version, thrift);
   }
 }
 
-void BreakPointInfo::RecvImpl(BreakPointInfoPtrVec &bps,
+void BreakPointInfo::RecvImpl(int version,
+                              std::vector<BreakPointInfoPtr> &bps,
                               DebuggerThriftBuffer &thrift) {
   TRACE(2, "BreakPointInfo::RecvImpl\n");
   int16_t size;
@@ -988,7 +1111,7 @@ void BreakPointInfo::RecvImpl(BreakPointInfoPtrVec &bps,
   bps.resize(size);
   for (int i = 0; i < size; i++) {
     BreakPointInfoPtr bpi(new BreakPointInfo());
-    bpi->recvImpl(thrift);
+    bpi->recvImpl(version, thrift);
     bps[i] = bpi;
   }
 }
